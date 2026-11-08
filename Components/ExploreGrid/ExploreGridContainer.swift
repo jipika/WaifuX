@@ -21,6 +21,10 @@ struct ExploreGridContainer: NSViewRepresentable {
     var gridSpacing: CGFloat? = nil
     /// 点击回调
     var onSelect: ((Int) -> Void)?
+    /// 点击前捕获当前已显示封面的共享转场源；nil 的页面完全沿用旧点击路径。
+    var onSelectionSource: ((Int, CardTransitionSource?) -> Void)? = nil
+    /// Selection-only identity must not activate the O(N) reorder reconciliation path in explore grids.
+    var selectionItemIdentifier: ((Int) -> String)? = nil
     /// 可见区域变化回调
     var onVisibleItemsChange: ((Set<IndexPath>) -> Void)?
     /// 滚动偏移回调，用于 SwiftUI 外层显示返回顶部等轻量状态。

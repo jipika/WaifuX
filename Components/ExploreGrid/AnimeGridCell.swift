@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// 动漫卡片 Cell — 还原重构前 AnimePortraitCard 的视觉结构
 /// - 10:14 竖版封面
@@ -80,8 +81,34 @@ final class AnimeGridCell: ExploreGridItem {
     }()
 
     private var currentAnime: AnimeSearchResult?
+    weak var standaloneTransitionRegistry: AnimeCardTransitionRegistry?
+    private var standaloneSelection: ((CGPoint?) -> Void)?
+    private var standaloneClickRecognizer: NSClickGestureRecognizer?
 
+    override var cardTransitionItemID: String? { currentAnime?.id }
     override var hoverScaleFactor: CGFloat { 1.02 }
+
+    /// The SwiftUI explore grid keeps its lazy columns while using the same native cover and
+    /// presentation-layer geometry as collection cells. Collection-view users leave this nil.
+    func setStandaloneSelection(_ action: ((CGPoint?) -> Void)?) {
+        standaloneSelection = action
+        if let recognizer = standaloneClickRecognizer {
+            recognizer.isEnabled = action != nil
+        } else if action != nil {
+            let recognizer = NSClickGestureRecognizer(target: self, action: #selector(selectStandaloneCard(_:)))
+            recognizer.buttonMask = 0x1
+            view.addGestureRecognizer(recognizer)
+            standaloneClickRecognizer = recognizer
+        }
+        view.needsLayout = true
+    }
+
+    @objc private func selectStandaloneCard(_ recognizer: NSClickGestureRecognizer) {
+        guard recognizer.state == .ended, let window = view.window else { return }
+        let point = view.convert(recognizer.location(in: view), to: nil)
+        guard window === view.window, view.visibleRect.contains(recognizer.location(in: view)) else { return }
+        standaloneSelection?(point)
+    }
 
     override func setupContentLayout() {
         containerView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -109,8 +136,11 @@ final class AnimeGridCell: ExploreGridItem {
     }
 
     override func prepareForReuse() {
+        standaloneTransitionRegistry?.unregister(self)
+        standaloneTransitionRegistry = nil
         super.prepareForReuse()
         currentAnime = nil
+        setStandaloneSelection(nil)
         titleLabel.stringValue = ""
         episodeLabel.stringValue = ""
         ratingLabel.stringValue = ""
@@ -145,11 +175,13 @@ final class AnimeGridCell: ExploreGridItem {
             ratingBadgeView.isHidden = true
         }
 
-        if let coverURL = anime.coverURL.flatMap(URL.init(string:)) {
-            loadImage(url: coverURL, targetSize: preferredImageTargetSize())
-        } else {
-            loadImage(url: nil, targetSize: preferredImageTargetSize())
-        }
+        // Only a successfully displayed image may seed a transition. An absent URL also
+        // invalidates an in-flight/reused cover through the shared identity-aware loader.
+        loadImage(
+            urls: anime.coverURL.flatMap(URL.init(string:)).map { [$0] } ?? [],
+            targetSize: preferredImageTargetSize(),
+            imageIdentity: anime.id
+        )
 
         if containerView.bounds.width > 0, containerView.bounds.height > 0 {
             layoutContentFrames()
@@ -175,10 +207,12 @@ final class AnimeGridCell: ExploreGridItem {
         coverImageView.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
 
         bottomBar.frame = CGRect(x: 0, y: 0, width: bounds.width, height: Layout.bottomBarHeight)
+        let standalone = standaloneSelection != nil
+        let episodeWidth = episodeLabel.isHidden ? 0 : min(episodeLabel.fittingSize.width + 17, max(0, bounds.width * 0.42))
         titleLabel.frame = CGRect(
             x: Layout.titleSidePadding,
-            y: 18,
-            width: bounds.width - Layout.titleSidePadding * 2,
+            y: standalone ? 14 : 18,
+            width: max(0, bounds.width - Layout.titleSidePadding * 2 - (standalone ? episodeWidth + 8 : 0)),
             height: 16
         ).integral
 
@@ -189,15 +223,15 @@ final class AnimeGridCell: ExploreGridItem {
             let iconSize = NSSize(width: 10, height: 10)
             let episodeSize = episodeLabel.fittingSize
             episodeIconLabel.frame = CGRect(
-                x: Layout.titleSidePadding,
-                y: Layout.episodeBottomPadding,
+                x: standalone ? bounds.width - Layout.titleSidePadding - episodeWidth : Layout.titleSidePadding,
+                y: standalone ? 17 : Layout.episodeBottomPadding,
                 width: iconSize.width,
                 height: iconSize.height
             ).integral
             episodeLabel.frame = CGRect(
                 x: episodeIconLabel.frame.maxX + 4,
-                y: Layout.episodeBottomPadding - 1,
-                width: min(episodeSize.width, bounds.width - Layout.titleSidePadding * 2 - iconSize.width - 4),
+                y: standalone ? 16 : Layout.episodeBottomPadding - 1,
+                width: max(0, min(episodeSize.width, standalone ? episodeWidth - 17 : bounds.width - Layout.titleSidePadding * 2 - iconSize.width - 4)),
                 height: max(12, episodeSize.height)
             ).integral
         }
@@ -235,10 +269,109 @@ final class AnimeGridCell: ExploreGridItem {
     }
 
     private func preferredImageTargetSize() -> CGSize {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let width = max(coverImageView.bounds.width, 180) * scale
-        let height = max(coverImageView.bounds.height, 252) * scale
-        let maxEdge = min(max(width, height), 1200)
-        return CGSize(width: width, height: min(height, maxEdge))
+        // ExploreGridItem accepts points and applies the hosting window's scale itself.
+        // Preserve the existing 1200px decode budget without multiplying scale twice.
+        let scale = view.window?.backingScaleFactor ?? 2
+        let size = CGSize(width: max(coverImageView.bounds.width, 180), height: max(coverImageView.bounds.height, 252))
+        let factor = min(1, 1200 / max(1, max(size.width, size.height) * scale))
+        return CGSize(width: size.width * factor, height: size.height * factor)
+    }
+}
+
+/// Page-owned, weak registration: a return resolves the current mounted cell by stable ID,
+/// including after SwiftUI recreates a lazy row. No scrolling geometry is published to SwiftUI.
+@MainActor
+final class AnimeCardTransitionRegistry: ObservableObject {
+    private struct WeakCell {
+        weak var value: AnimeGridCell?
+    }
+    private var cellsByItemID: [String: [WeakCell]] = [:]
+    var isVisible = true
+
+    func register(_ cell: AnimeGridCell) {
+        guard let itemID = cell.cardTransitionItemID, !itemID.isEmpty else { return }
+        var entries = cellsByItemID[itemID] ?? []
+        entries.removeAll { $0.value == nil || $0.value?.cardTransitionItemID != itemID }
+        if !entries.contains(where: { $0.value === cell }) {
+            entries.append(WeakCell(value: cell))
+        }
+        cellsByItemID[itemID] = entries
+    }
+
+    func unregister(_ cell: AnimeGridCell) {
+        guard let itemID = cell.cardTransitionItemID else { return }
+        let remaining = cellsByItemID[itemID]?.filter { $0.value != nil && $0.value !== cell } ?? []
+        cellsByItemID[itemID] = remaining.isEmpty ? nil : remaining
+    }
+
+    func source(for itemID: String, from selectedCell: AnimeGridCell, activationPoint: CGPoint?) -> CardTransitionSource? {
+        guard isVisible, !itemID.isEmpty,
+              let snapshot = selectedCell.cardTransitionSnapshot(for: itemID),
+              uniqueCell(for: itemID, in: snapshot.window) === selectedCell else { return nil }
+        let window = snapshot.window
+        return CardTransitionSource(
+            itemID: itemID, image: snapshot.image, anchor: snapshot.anchor, window: window,
+            activationPointInWindow: activationPoint
+        ) { [weak self, weak window] in
+            guard let self, let window, self.isVisible,
+                  let cell = self.uniqueCell(for: itemID, in: window) else { return nil }
+            return cell.cardTransitionSnapshot(for: itemID)?.anchor
+        }
+    }
+
+    private func uniqueCell(for itemID: String, in window: NSWindow) -> AnimeGridCell? {
+        var match: AnimeGridCell?
+        for entry in cellsByItemID[itemID] ?? [] {
+            guard let cell = entry.value, cell.cardTransitionItemID == itemID,
+                  cell.cardTransitionSnapshot(for: itemID)?.window === window else { continue }
+            guard match == nil else { return nil }
+            match = cell
+        }
+        return match
+    }
+}
+
+/// Native, reusable card hosted inside the existing lazy SwiftUI columns. Capturing a source
+/// is synchronous with this card's click, before the selectedAnime binding changes.
+struct AnimeExploreGridCard: NSViewControllerRepresentable {
+    let anime: AnimeSearchResult
+    let cardWidth: CGFloat
+    let isVisible: Bool
+    let transitionRegistry: AnimeCardTransitionRegistry
+    let onSelect: (AnimeSearchResult, CardTransitionSource?) -> Void
+
+    func makeNSViewController(context: Context) -> AnimeGridCell {
+        let cell = AnimeGridCell()
+        _ = cell.view
+        update(cell)
+        return cell
+    }
+
+    func updateNSViewController(_ cell: AnimeGridCell, context: Context) {
+        update(cell)
+    }
+
+    static func dismantleNSViewController(_ cell: AnimeGridCell, coordinator: ()) {
+        cell.prepareForReuse()
+    }
+
+    private func update(_ cell: AnimeGridCell) {
+        cell.view.setFrameSize(CGSize(width: cardWidth, height: cardWidth * 1.4 + 44))
+        cell.view.layoutSubtreeIfNeeded()
+        if cell.cardTransitionItemID != anime.id {
+            cell.standaloneTransitionRegistry?.unregister(cell)
+        }
+        cell.configure(with: anime, isFavorite: false)
+        cell.standaloneTransitionRegistry = transitionRegistry
+        transitionRegistry.register(cell)
+        cell.setHoverInteractionEnabled(isVisible)
+        let selection = onSelect
+        let item = anime
+        let acceptsSelection = isVisible
+        cell.setStandaloneSelection { [weak cell, weak transitionRegistry] point in
+            guard acceptsSelection, let cell else { return }
+            let source = transitionRegistry?.source(for: item.id, from: cell, activationPoint: point)
+            selection(item, source)
+        }
     }
 }

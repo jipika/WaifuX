@@ -2813,11 +2813,10 @@ enum SceneOfflineBakeService {
         let rendererDirectory = executableURL.deletingLastPathComponent()
         // 先白名单过滤宿主环境（杜绝 Xcode/宿主图形调试键继承），再重建路径。
         var env = WallpaperEngineXBridge.sanitizedRendererEnvironment(ProcessInfo.processInfo.environment)
-        let searchPaths = [
-            rendererDirectory.path,
-            rendererDirectory.deletingLastPathComponent().path
-        ].filter { !$0.isEmpty }
-        env["PATH"] = searchPaths.joined(separator: ":")
+        env["PATH"] = WallpaperEngineXBridge.rendererExecutableSearchPath(directories: [
+            rendererDirectory,
+            rendererDirectory.deletingLastPathComponent()
+        ])
 
         let libraryPaths = [
             rendererDirectory.appendingPathComponent("lib").path,
@@ -2826,9 +2825,8 @@ enum SceneOfflineBakeService {
             rendererDirectory.deletingLastPathComponent().appendingPathComponent("Resources/lib").path
         ].filter { !$0.isEmpty }
         env["DYLD_LIBRARY_PATH"] = libraryPaths.joined(separator: ":")
-        // 剥离 Xcode 调试注入（MTL_DEBUG_LAYER/GPUTOOLS_*/DYLD_INSERT_LIBRARIES 等），
-        // 否则预览/bake 子进程继承 Metal 验证层 + GPU 帧捕获，渲染循环被拖到近停摆（黑屏）。
-        return WallpaperEngineXBridge.sanitizedRendererEnvironment(env)
+        // 宿主环境已在上面过滤；这里保留刚重建的工具路径和随包库路径。
+        return env
     }
 
     /// 无媒体库记录时（例如仅能从 Steam 目录解析到工程）用于缓存目录名的稳定 ID。

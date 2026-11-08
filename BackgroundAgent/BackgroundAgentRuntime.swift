@@ -160,6 +160,7 @@ final class BackgroundAgentRuntime {
             // 三套库状态齐了：从这里开始 `library.snapshot` 可以提前应答，
             // 不必等 startRuntime 尾部（渲染器/屏保恢复要几十秒，UI 白等）。
             libraryRecordsAreRestored = true
+            MenuBarQuickWallpaperRepository.shared.start()
             libraryRecoveryTask = Task(priority: .utility) {
                 await DirectoryMigrationService.shared.recoverIncompleteMigrationIfNeeded()
                 guard !Task.isCancelled else { return }

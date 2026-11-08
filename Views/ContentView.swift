@@ -29,6 +29,7 @@ private final class MainContentNavigationState: ObservableObject {
         }
     }
     @Published var isHomeChromeHidden = false
+    @Published var isShowingDetail = false
     @Published var selectedWallpaper: Wallpaper?
     @Published var selectedMedia: MediaItem?
     @Published var selectedAnime: AnimeSearchResult?
@@ -37,6 +38,15 @@ private final class MainContentNavigationState: ObservableObject {
     @Published var librarySelectedMedia: MediaItem?
     @Published var libraryWallpaperContext: [Wallpaper] = []
     @Published var libraryMediaContext: [MediaItem] = []
+    /// Click-time visual context, consumed once by openDetail; never published per scroll frame.
+    var pendingCardSource: CardTransitionSource?
+    var pendingCardSourceTab: MainTab?
+
+    func prepareCardSource(_ source: CardTransitionSource?, from tab: MainTab) {
+        guard selectedTab == tab else { return }
+        pendingCardSource = source
+        pendingCardSourceTab = source == nil ? nil : tab
+    }
 
     private var mouseMovementMonitor: Any?
     private var mouseRevealOrigin: NSPoint?
@@ -52,6 +62,7 @@ private final class MainContentNavigationState: ObservableObject {
 
     func resetForMemoryRelease() {
         isHomeChromeHidden = false
+        isShowingDetail = false
         mouseRevealOrigin = nil
         selectedWallpaper = nil
         selectedMedia = nil
@@ -61,6 +72,8 @@ private final class MainContentNavigationState: ObservableObject {
         librarySelectedMedia = nil
         libraryWallpaperContext.removeAll()
         libraryMediaContext.removeAll()
+        pendingCardSource = nil
+        pendingCardSourceTab = nil
         selectedTab = .home
     }
 
@@ -131,6 +144,15 @@ private enum MainDetailRoute: Hashable {
     case media(MediaItem, context: [MediaItem]?)
     case anime(AnimeSearchResult)
     case manga(MangaRoutePayload)
+
+    var transitionItemID: String? {
+        switch self {
+        case .wallpaper(let item, _): item.id
+        case .media(let item, _): item.id
+        case .anime(let item): item.id
+        case .manga: nil
+        }
+    }
 }
 
 @MainActor
@@ -233,9 +255,9 @@ private struct HomeTabPage: View {
             isHomeChromeHidden: navigationState.binding(for: \.isHomeChromeHidden),
             onOpenWallpapers: { navigationState.selectedTab = .wallpaperExplore },
             onOpenMedia: { navigationState.selectedTab = .mediaExplore },
-            isTabActive: navigationState.selectedTab == .home
+            isTabActive: navigationState.selectedTab == .home && !navigationState.isShowingDetail
         )
-        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .home)
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .home && !navigationState.isShowingDetail)
     }
 }
 
@@ -247,9 +269,10 @@ private struct WallpaperExploreTabPage: View {
         WallpaperExploreContentView(
             viewModel: wallpaperViewModel,
             selectedWallpaper: navigationState.binding(for: \.selectedWallpaper),
-            isVisible: navigationState.selectedTab == .wallpaperExplore
+            isVisible: navigationState.selectedTab == .wallpaperExplore && !navigationState.isShowingDetail,
+            onPrepareCardTransition: { navigationState.prepareCardSource($0, from: .wallpaperExplore) }
         )
-        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .wallpaperExplore)
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .wallpaperExplore && !navigationState.isShowingDetail)
     }
 }
 
@@ -261,9 +284,10 @@ private struct AnimeExploreTabPage: View {
         AnimeExploreView(
             viewModel: animeViewModel,
             selectedAnime: navigationState.binding(for: \.selectedAnime),
-            isVisible: navigationState.selectedTab == .animeExplore
+            isVisible: navigationState.selectedTab == .animeExplore && !navigationState.isShowingDetail,
+            onPrepareCardTransition: { navigationState.prepareCardSource($0, from: .animeExplore) }
         )
-        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .animeExplore)
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .animeExplore && !navigationState.isShowingDetail)
     }
 }
 
@@ -275,9 +299,10 @@ private struct MediaExploreTabPage: View {
         MediaExploreContentView(
             viewModel: mediaViewModel,
             selectedMedia: navigationState.binding(for: \.selectedMedia),
-            isVisible: navigationState.selectedTab == .mediaExplore
+            isVisible: navigationState.selectedTab == .mediaExplore && !navigationState.isShowingDetail,
+            onPrepareCardTransition: { navigationState.prepareCardSource($0, from: .mediaExplore) }
         )
-        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .mediaExplore)
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .mediaExplore && !navigationState.isShowingDetail)
     }
 }
 
@@ -297,9 +322,10 @@ private struct MyLibraryTabPage: View {
             selectedAnime: navigationState.binding(for: \.librarySelectedAnime),
             wallpaperContext: navigationState.binding(for: \.libraryWallpaperContext),
             mediaContext: navigationState.binding(for: \.libraryMediaContext),
-            isVisible: navigationState.selectedTab == .myMedia
+            isVisible: navigationState.selectedTab == .myMedia && !navigationState.isShowingDetail,
+            onPrepareCardTransition: { navigationState.prepareCardSource($0, from: .myMedia) }
         )
-        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .myMedia)
+        .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .myMedia && !navigationState.isShowingDetail)
     }
 }
 
@@ -316,6 +342,8 @@ struct ContentView: View {
 
     @StateObject private var navigationState = MainContentNavigationState()
     @StateObject private var guessYouLikeVM = GuessYouLikeViewModel()
+    @StateObject private var cardMorph = WallpaperCardMorphCoordinator()
+    @State private var activeCardSourceTab: MainTab?
     @ObservedObject private var localization = LocalizationService.shared
     // 注意：WallpaperSourceManager.shared 不在此顶层观察。
     // 它有 2 个 @Published 属性（activeSource / lastSwitchMessage），若顶层 @ObservedObject 会在数据源切换时触发整个 ContentView body 重算。
@@ -347,6 +375,7 @@ struct ContentView: View {
         #endif
         ZStack {
             detailNavigationContent
+            WallpaperCardMorphOverlay(coordinator: cardMorph)
 
             // 全局提示与弹窗不跟随页面位移。
             globalOverlayLayer
@@ -363,10 +392,21 @@ struct ContentView: View {
         .onDisappear {
             unregisterDetailBackSwipeHandler()
             navigationState.stopMouseMovementMonitoring()
+            cardMorph.cancelAll()
+            activeCardSourceTab = nil
+            navigationState.pendingCardSource = nil
+            navigationState.pendingCardSourceTab = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .appDidHideWindow)) { _ in
+            cardMorph.cancelAll()
+            activeCardSourceTab = nil
+            navigationState.pendingCardSource = nil
+            navigationState.pendingCardSourceTab = nil
         }
         .onChange(of: navigationState.selectedTab) { _, tab in
             AppResponsivenessMonitor.noteTabChange(tab.title)
             navigationState.isHomeChromeHidden = false
+            cardSourceTabDidChange(to: tab)
         }
         .onChange(of: detailPath.count) { _, depth in
             AppResponsivenessMonitor.noteDetailDepth(depth)
@@ -460,13 +500,24 @@ struct ContentView: View {
             isVisible: true,
             allowsSnapshot: detailPath.isEmpty
         ) {
-            NavigationStack(path: detailPathBinding) {
+            ZStack {
+                // Retain the live list under the aperture while the native detail prepares.
                 mainContent
-                    .navigationDestination(for: MainDetailRoute.self) { route in
-                        detailDestination(for: route)
-                    }
+                    .opacity(detailPath.isEmpty || cardMorph.isTransitioning ? 1 : 0)
+                    .allowsHitTesting(detailPath.isEmpty)
+                    .accessibilityHidden(!detailPath.isEmpty)
+                NavigationStack(path: detailPathBinding) {
+                    Color.clear
+                        .navigationDestination(for: MainDetailRoute.self) { route in
+                            detailDestination(for: route)
+                        }
+                }
+                .id(detailNavigationStackID)
+                .opacity(detailPath.isEmpty ? 0 : 1)
+                .allowsHitTesting(!detailPath.isEmpty)
+                .accessibilityHidden(detailPath.isEmpty)
+                .modifier(CardMorphDestinationReveal(coordinator: cardMorph))
             }
-            .id(detailNavigationStackID)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // 独立 NSHostingView 会重新计算标题栏安全区；外层忽略设置不会跨根视图传入。
             .ignoresSafeArea(.container, edges: .top)
@@ -626,6 +677,10 @@ struct ContentView: View {
 
     /// 先完整关闭当前详情页，再在下一轮主线程事件重建并打开目标详情。
     private func replaceDetailWithCurrentWallpaper(_ route: MainDetailRoute) {
+        cardMorph.cancelAll()
+        activeCardSourceTab = nil
+        navigationState.pendingCardSource = nil
+        navigationState.pendingCardSourceTab = nil
         pendingCurrentWallpaperRoute = route
         updateDetailPath([], animated: false)
         clearSelectedDetailBindings()
@@ -648,23 +703,38 @@ struct ContentView: View {
                 contextWallpapers: context,
                 onClose: popDetail,
                 onNavigateToWallpaper: { selected in
+                    cardMorph.cancelAll()
                     updateDetailPath(detailPath + [.wallpaper(selected, context: context)])
-                }
+                },
+                transitionImage: cardMorph.seedImage(for: wallpaper.id),
+                onTransitionReady: { cardMorph.detailDidAppear(itemID: wallpaper.id) },
+                onTransitionImageReady: { id, image in cardMorph.detailImageReady(itemID: id, image: image) },
+                onDisplayedWallpaperChange: { cardMorph.detailChangedItem(to: $0) }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationBarBackButtonHidden(true)
             .toolbar(.hidden, for: .automatic)
 
         case .media(let item, let context):
-            MediaDetailSheet(
-                item: item,
-                viewModel: mediaViewModel,
-                contextItems: context,
-                onClose: popDetail,
-                onNavigateToItem: { selected in
-                    updateDetailPath(detailPath + [.media(selected, context: context)])
-                }
-            )
+            CardMorphMediaGate(itemID: item.id, coordinator: cardMorph) { isTransitioning, isClosing, isPreparingImage in
+                MediaDetailSheet(
+                    item: item,
+                    viewModel: mediaViewModel,
+                    contextItems: context,
+                    onClose: popDetail,
+                    onNavigateToItem: { selected in
+                        cardMorph.cancelAll()
+                        updateDetailPath(detailPath + [.media(selected, context: context)])
+                    },
+                    transitionImage: cardMorph.seedImage(for: item.id),
+                    onTransitionReady: { cardMorph.detailDidAppear(itemID: item.id) },
+                    onTransitionImageReady: { id, image in cardMorph.detailImageReady(itemID: id, image: image) },
+                    onDisplayedItemChange: { cardMorph.detailChangedItem(to: $0) },
+                    isCardTransitionActive: isTransitioning,
+                    isCardTransitionClosing: isClosing,
+                    isPreparingTransitionImage: isPreparingImage
+                )
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationBarBackButtonHidden(true)
             .toolbar(.hidden, for: .automatic)
@@ -675,7 +745,14 @@ struct ContentView: View {
                 isPresented: Binding(
                     get: { !detailPath.isEmpty },
                     set: { if !$0 { popDetail() } }
-                )
+                ),
+                transitionImage: cardMorph.seedImage(for: anime.id),
+                onTransitionReady: { cardMorph.detailDidAppear(itemID: anime.id) },
+                onTransitionImageReady: { id, image in cardMorph.detailImageReady(itemID: id, image: image) },
+                onDisplayedItemChange: { cardMorph.detailChangedItem(to: $0) },
+                onTransitionLayoutChange: { usesBackdrop in
+                    cardMorph.detailLayoutChanged(itemID: anime.id, layout: usesBackdrop ? .fill : .portrait)
+                }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
@@ -701,8 +778,7 @@ struct ContentView: View {
         Binding(
             get: { detailPath },
             set: { newPath in
-                updateDetailPath(newPath)
-                if newPath.isEmpty { clearSelectedDetailBindings() }
+                requestDetailPath(newPath)
             }
         )
     }
@@ -726,12 +802,67 @@ struct ContentView: View {
                 detailNavigation.suppressAnimation()
             }
             detailPageRevision &+= 1
+            navigationState.isShowingDetail = !newPath.isEmpty
             detailPath = newPath
         }
     }
 
+    private func cardSourceTabDidChange(to tab: MainTab) {
+        // onChange may run after a click on the new page; only retire the old page's request.
+        if activeCardSourceTab != tab {
+            cardMorph.cancelAll()
+            activeCardSourceTab = nil
+        }
+        if navigationState.pendingCardSourceTab != tab {
+            navigationState.pendingCardSource = nil
+            navigationState.pendingCardSourceTab = nil
+        }
+    }
+
     private func openDetail(_ route: MainDetailRoute, animated: Bool = true) {
+        let source = navigationState.pendingCardSourceTab == navigationState.selectedTab
+            ? navigationState.pendingCardSource : nil
+        navigationState.pendingCardSource = nil
+        navigationState.pendingCardSourceTab = nil
+        cardMorph.cancelAll()
+        activeCardSourceTab = navigationState.selectedTab
+        clearTriggerBinding(for: route)
+        if animated, detailPath.isEmpty, let source, source.itemID == route.transitionItemID,
+           cardMorph.present(source, imageLayout: transitionImageLayout(for: route), prepareImage: { size, scale in
+               if case .media(let item, _) = route {
+                   let record = MediaLibraryService.shared.downloadRecord(for: item.id)
+                   let isBaking = SceneOfflineBakeProgressTracker.shared.progress(for: item.id) != nil
+                   return await WallpaperTransitionImageLoader.loadMedia(
+                       item: item, record: record, isBaking: isBaking, viewportSize: size, displayScale: scale)
+               }
+               guard let url = self.transitionImageURL(for: route) else { return nil }
+               return await WallpaperTransitionImageLoader.load(url: url, viewportSize: size, displayScale: scale)
+           }, open: { self.updateDetailPath([route], animated: false) }) {
+            return
+        }
         updateDetailPath([route], animated: animated)
+    }
+
+    private func transitionImageURL(for route: MainDetailRoute) -> URL? {
+        switch route {
+        case .wallpaper(let wallpaper, _):
+            viewModel.localFileURLIfAvailable(for: wallpaper) ?? wallpaper.fullImageURL ?? wallpaper.thumbURL
+        case .media(let item, _): item.coverImageURL
+        case .anime(let anime): anime.coverURL.flatMap(URL.init(string:))
+        case .manga: nil
+        }
+    }
+
+    private func transitionImageLayout(for route: MainDetailRoute) -> CardMorphImageLayout {
+        switch route {
+        case .wallpaper(let wallpaper, _):
+            wallpaper.dimensionY > wallpaper.dimensionX && wallpaper.dimensionX > 0 ? .portrait : .fill
+        case .anime: .portrait
+        case .media, .manga: .fill
+        }
+    }
+
+    private func clearTriggerBinding(for route: MainDetailRoute) {
         // 仅清除触发当前导航的那个 binding，避免 5 个无关的 onChange 空跑
         switch route {
         case .wallpaper:
@@ -745,13 +876,25 @@ struct ContentView: View {
         }
     }
 
+    private func requestDetailPath(_ newPath: [MainDetailRoute]) {
+        guard newPath != detailPath else { return }
+        if newPath.isEmpty, detailPath.count == 1,
+           let itemID = detailPath[0].transitionItemID,
+           cardMorph.close(itemID: itemID, pop: {
+               self.updateDetailPath([], animated: false)
+               self.clearSelectedDetailBindings()
+           }) {
+            return
+        }
+        cardMorph.cancelAll()
+        updateDetailPath(newPath)
+        if newPath.isEmpty { clearSelectedDetailBindings() }
+    }
+
     private func popDetail() {
-        if !detailPath.isEmpty {
-            updateDetailPath(Array(detailPath.dropLast()))
-        }
-        if detailPath.isEmpty {
-            clearSelectedDetailBindings()
-        }
+        if cardMorph.cancelOpening() { return }
+        guard !detailPath.isEmpty else { return }
+        requestDetailPath(Array(detailPath.dropLast()))
     }
 
     /// Wallpaper, media, anime, and manga detail pages share this NavigationStack.
@@ -759,7 +902,7 @@ struct ContentView: View {
         guard detailBackSwipeRegistration == nil else { return }
         detailBackSwipeRegistration = TrackpadBackSwipeRouter.shared.register(
             priority: 100,
-            isEnabled: { !self.detailPath.isEmpty },
+            isEnabled: { !self.detailPath.isEmpty || self.cardMorph.isOpening },
             action: { self.popDetail() }
         )
     }
@@ -925,6 +1068,10 @@ struct ContentView: View {
     }
 
     private func releaseForegroundMemory() {
+        cardMorph.cancelAll()
+        activeCardSourceTab = nil
+        navigationState.pendingCardSource = nil
+        navigationState.pendingCardSourceTab = nil
         ForegroundPrefetchManager.shared.stopAll()
         viewModel.releaseForegroundMemory()
         mediaViewModel.releaseForegroundMemory()

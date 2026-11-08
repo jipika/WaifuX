@@ -4110,13 +4110,21 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// rendererLaunchEnvironment 在白名单之后按渲染器路径重建，不继承宿主值。
     /// nonisolated：spawn 点分散在非隔离上下文（bake/预览/web 离线烘焙的后台任务）。
     nonisolated static func sanitizedRendererEnvironment(_ env: [String: String]) -> [String: String] {
-        var env: [String: String] = [:]
+        var sanitized: [String: String] = [:]
         for key in rendererEnvironmentAllowKeys {
             if let value = env[key], !value.isEmpty {
-                env[key] = value
+                sanitized[key] = value
             }
         }
-        return env
+        return sanitized
+    }
+
+    /// 保留随包工具的查找优先级，同时让 afplay 等系统工具可用；不继承宿主 PATH。
+    nonisolated static func rendererExecutableSearchPath(directories: [URL]) -> String {
+        var seen = Set<String>()
+        return (directories.map(\.path) + ["/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .joined(separator: ":")
     }
 
     /// 渲染子进程环境白名单：保证进程可运行（用户/临时目录/日志）+ 渲染器自身的
@@ -4147,11 +4155,10 @@ final class WallpaperEngineXBridge: ObservableObject {
         // 再按渲染器所在路径重建 PATH / DYLD_LIBRARY_PATH。
         var environment = sanitizedRendererEnvironment(ProcessInfo.processInfo.environment)
 
-        let searchPaths = [
-            rendererDirectory.path,
-            resourceDirectory.path,
-        ]
-        environment["PATH"] = searchPaths.joined(separator: ":")
+        environment["PATH"] = rendererExecutableSearchPath(directories: [
+            rendererDirectory,
+            resourceDirectory,
+        ])
         environment["DYLD_LIBRARY_PATH"] = [
             rendererDirectory.appendingPathComponent("lib").path,
             resourceDirectory.appendingPathComponent("lib").path,

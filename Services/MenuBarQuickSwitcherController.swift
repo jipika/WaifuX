@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Kingfisher
+import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -11,6 +12,12 @@ final class MenuBarQuickSwitcherController: NSObject {
     private var localEventMonitor: Any?
     private var globalEventMonitor: Any?
     private var presentationGeneration = 0
+    private var prewarmSubscription: AnyCancellable?
+    private var prewarmWorkItem: DispatchWorkItem?
+    private var isDismissing = false
+    private weak var statusAnchorView: NSView?
+    private var presentationAnchorX: CGFloat = 0.5
+    private let presentationAnimationKey = "quickSwitcher.presentation"
 
     override init() {
         panel = MenuBarQuickSwitcherPanel(
@@ -26,7 +33,7 @@ final class MenuBarQuickSwitcherController: NSObject {
         panel.hasShadow = true
         panel.level = .popUpMenu
         panel.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary]
-        panel.animationBehavior = .utilityWindow
+        panel.animationBehavior = .none
         panel.hidesOnDeactivate = false
 
         viewModel.onApplied = { [weak self] in
@@ -55,11 +62,11 @@ final class MenuBarQuickSwitcherController: NSObject {
         onOpenDetail: @escaping (MainWallpaperDetailRequest) -> Void,
         onQuit: @escaping () -> Void
     ) {
-        if panel.isVisible {
-            dismiss()
-            return
-        }
+        if dismissForStatusItemClick() { return }
 
+        statusAnchorView = anchorView
+        isDismissing = false
+        panel.ignoresMouseEvents = false
         presentationGeneration &+= 1
         viewModel.onOpenSettings = { [weak self] in
             self?.dismiss()
@@ -74,6 +81,7 @@ final class MenuBarQuickSwitcherController: NSObject {
             onOpenDetail(request)
         }
         viewModel.onQuitApplication = onQuit
+        let performanceStart = ProcessInfo.processInfo.systemUptime
         let prepareStart = Date()
         viewModel.prepare(
             targetScreen: targetScreen,
@@ -85,12 +93,18 @@ final class MenuBarQuickSwitcherController: NSObject {
         let mountDone = Date()
 
         positionPanel(relativeTo: anchorView, on: targetScreen)
+        preparePresentationLayer()
         panel.alphaValue = 1
         // A nonactivating panel can become key for input without making WaifuX the
         // foreground application, so background Screen Time does not resume here.
         panel.makeKeyAndOrderFront(nil)
+        animatePresentation(visible: true)
         let frontDone = Date()
         installDismissMonitors()
+        InteractionPerformanceLog.record(.menuOpen, since: performanceStart, metadata: [
+            "phase": "orderFront", "batch": String(viewModel.batchItems.count),
+            "indexReady": MenuBarQuickWallpaperRepository.shared.isReady ? "1" : "0"
+        ])
 
         // 「点开菜单栏要等一等」的分段耗时：prepare（数据/当前壁纸定位）、
         // mount（NSHostingController + SwiftUI 树重建）、front（panel 可见）。
@@ -106,26 +120,127 @@ final class MenuBarQuickSwitcherController: NSObject {
         ])
     }
 
-    func dismiss() {
-        removeDismissMonitors()
-        guard panel.isVisible || panel.contentViewController != nil else { return }
-
-        presentationGeneration &+= 1
-        let dismissedGeneration = presentationGeneration
-        panel.orderOut(nil)
-        viewModel.suspendPreviewWork()
-
-        // Keep the responder tree alive until AppKit finishes dispatching the
-        // mouse event that dismissed the panel, then release its players,
-        // tracking areas, layers, and hosted SwiftUI hierarchy.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self,
-                  self.presentationGeneration == dismissedGeneration,
-                  !self.panel.isVisible else {
-                return
+    /// Build the small static hosting tree once, outside the first click.
+    func prewarm() {
+        guard !panel.isVisible else { return }
+        viewModel.prewarmCandidates()
+        mountContentIfNeeded()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        guard prewarmSubscription == nil else { return }
+        prewarmSubscription = MenuBarQuickWallpaperRepository.shared.changes.sink { [weak self] in
+            guard let self, !self.panel.isVisible else { return }
+            self.prewarmWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.panel.isVisible else { return }
+                self.viewModel.prewarmCandidates()
+                self.panel.contentView?.layoutSubtreeIfNeeded()
             }
-            self.panel.contentViewController = nil
+            self.prewarmWorkItem = work
+            DispatchQueue.main.async(execute: work)
         }
+    }
+
+    func updateDesignAvailability(_ available: Bool) {
+        viewModel.updateDesignAvailability(available)
+    }
+
+    /// A click on an already-visible menu belongs to its close, including its exit.
+    /// Check this before preparing wallpaper/design metadata in the status action.
+    @discardableResult
+    func dismissForStatusItemClick() -> Bool {
+        guard panel.isVisible || isDismissing || viewModel.isPresented else { return false }
+        dismiss()
+        return true
+    }
+
+    func dismiss() {
+        guard !isDismissing, panel.isVisible || viewModel.isPresented else { return }
+        removeDismissMonitors()
+        isDismissing = true
+        presentationGeneration &+= 1
+        panel.ignoresMouseEvents = true
+        // Stop decoding immediately, but keep covers mounted until the exit finishes.
+        viewModel.suspendPreviewWork(keepingPresentation: true)
+        animatePresentation(visible: false)
+    }
+
+    private var collapsedTransform: CATransform3D {
+        // Keep the point beneath the status item stationary, even near screen edges.
+        // A transform changes no AppKit frames and causes no SwiftUI relayout.
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return CATransform3DIdentity }
+        let scale: CGFloat = 0.94
+        let layer = panel.contentView?.layer
+        let anchor = layer?.anchorPoint ?? .zero
+        let pivotX = (presentationAnchorX - anchor.x) * contentSize.width
+        let isFlipped = panel.contentView?.isFlipped ?? false
+        let pivotY = ((isFlipped ? 0 : 1) - anchor.y) * contentSize.height
+        return CATransform3DConcat(CATransform3DMakeScale(scale, scale, 1),
+            CATransform3DMakeTranslation(pivotX * (1 - scale), pivotY * (1 - scale), 0))
+    }
+
+    private func preparePresentationLayer() {
+        guard let layer = panel.contentView?.layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.removeAnimation(forKey: presentationAnimationKey)
+        layer.transform = collapsedTransform
+        layer.opacity = 0
+        CATransaction.commit()
+    }
+
+    private func animatePresentation(visible: Bool) {
+        let generation = presentationGeneration
+        guard let layer = panel.contentView?.layer else {
+            if !visible { finishDismissal(generation: generation) }
+            return
+        }
+        // A hidden, prewarmed layer can still have an old presentation value.
+        // Only an in-flight transition should supply the starting screen value.
+        let current = layer.animation(forKey: presentationAnimationKey) != nil
+            ? (layer.presentation() ?? layer) : layer
+        let fromTransform = current.transform
+        let fromOpacity = current.opacity
+        let targetTransform = visible ? CATransform3DIdentity : collapsedTransform
+        let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let duration: TimeInterval = reducedMotion ? 0.08 : (visible ? 0.18 : 0.13)
+        let transform = CABasicAnimation(keyPath: "transform")
+        transform.fromValue = NSValue(caTransform3D: fromTransform)
+        transform.toValue = NSValue(caTransform3D: targetTransform)
+        let opacity = CABasicAnimation(keyPath: "opacity")
+        opacity.fromValue = fromOpacity
+        opacity.toValue = visible ? Float(1) : Float(0)
+        transform.duration = duration
+        opacity.duration = duration
+        let group = CAAnimationGroup()
+        group.animations = [transform, opacity]
+        group.duration = duration
+        group.timingFunction = visible
+            ? CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+            : CAMediaTimingFunction(controlPoints: 0.2, 0, 0.6, 1)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if !visible {
+            CATransaction.setCompletionBlock { [weak self] in
+                // Core Animation calls completion after replacement as well as completion.
+                // The presentation generation prevents an old close hiding a new open.
+                Task { @MainActor [weak self] in
+                    self?.finishDismissal(generation: generation)
+                }
+            }
+        }
+        layer.transform = targetTransform
+        layer.opacity = visible ? 1 : 0
+        layer.add(group, forKey: presentationAnimationKey)
+        CATransaction.commit()
+    }
+
+    private func finishDismissal(generation: Int) {
+        guard presentationGeneration == generation, isDismissing else { return }
+        panel.orderOut(nil)
+        viewModel.finishHidingPresentation()
+        isDismissing = false
+        panel.ignoresMouseEvents = false
     }
 
     private func positionPanel(relativeTo anchorView: NSView, on screen: NSScreen?) {
@@ -151,6 +266,18 @@ final class MenuBarQuickSwitcherController: NSObject {
         origin.y = max(visibleFrame.minY + 12, origin.y)
 
         panel.setFrame(NSRect(origin: origin, size: contentSize), display: false)
+        presentationAnchorX = min(max((screenRect.midX - origin.x) / contentSize.width, 0), 1)
+    }
+
+    private func isStatusItemMouseDown(_ event: NSEvent) -> Bool {
+        guard event.type == .leftMouseDown || event.type == .rightMouseDown,
+              let anchor = statusAnchorView, let window = anchor.window else { return false }
+        let frame = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+        // Status-item input may arrive through a system window/global monitor.
+        // A windowless event already carries screen coordinates.
+        let location = event.window.map { $0.convertPoint(toScreen: event.locationInWindow) }
+            ?? event.locationInWindow
+        return frame.contains(location)
     }
 
     private func installDismissMonitors() {
@@ -166,17 +293,28 @@ final class MenuBarQuickSwitcherController: NSObject {
                 return nil
             }
 
-            if event.window !== self.panel {
-                self.dismiss()
+            if self.isStatusItemMouseDown(event) {
+                // The status item's mouseUp action owns the toggle. Dismissing on
+                // mouseDown would turn that same click into a mid-exit reopen.
+                return event
             }
+            if event.window !== self.panel { self.dismiss() }
             return event
         }
 
+        let generation = presentationGeneration
         globalEventMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] _ in
+        ) { [weak self] event in
+            // AppKit invokes event monitors on the main thread. Capture the hit now;
+            // a later cursor position could belong to a different click.
+            let isStatusItemClick = MainActor.assumeIsolated {
+                self?.isStatusItemMouseDown(event) ?? false
+            }
+            guard !isStatusItemClick else { return }
             DispatchQueue.main.async {
-                self?.dismiss()
+                guard let self, self.presentationGeneration == generation else { return }
+                self.dismiss()
             }
         }
     }
@@ -240,6 +378,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         var canGoNext = false
         var volume: Double = 1.0
         var rate: Double?
+        var showsVolumeControl = false
 
         static let empty = PlaybackSnapshot()
     }
@@ -257,6 +396,20 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     private var applyTask: Task<Void, Never>?
     @Published private(set) var errorMessage: String?
     @Published private(set) var previewWarmupToken = UUID()
+    @Published private(set) var isPresented = false
+    @Published private(set) var isPreviewActive = false
+    private(set) var activationGeneration: UInt64 = 0
+    let playbackActivity = LoopingVideoPlaybackActivity()
+    private var warmupGeneration: UInt64 = 0
+    private var userSelectedCandidate = false
+    private var coverVersions: [String: Int] = [:]
+
+    func coverRevision(for id: String) -> Int {
+        coverVersions[id, default: 0] + MenuBarQuickWallpaperRepository.shared.previewRevision(for: id)
+    }
+    private func isActive(_ generation: UInt64) -> Bool {
+        isPreviewActive && activationGeneration == generation
+    }
     @Published private(set) var canDesignCurrentWallpaper = false
     /// nil = 我的库（全部本地项目）；非空数组 = 选中的下载文件夹。
     @Published private(set) var selectedFolderIDs: [String]?
@@ -277,7 +430,6 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     private var libraryObservers: Set<AnyCancellable> = []
     private var playbackRefreshWorkItem: DispatchWorkItem?
     private var currentWallpaperIdentityTask: Task<Void, Never>?
-    private var libraryFetchTask: Task<Void, Never>?
 
     var onOpenSettings: (() -> Void)?
     var onOpenDesignWallpaper: (() -> Void)?
@@ -361,6 +513,17 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         onOpenDetail?(request)
     }
 
+    func prewarmCandidates() {
+        guard !isPresented else { return }
+        reconcileCachedBatch()
+        if batchItems.isEmpty { replaceBatch(avoidPreviousBatch: false) }
+    }
+
+    func updateDesignAvailability(_ available: Bool) {
+        guard isPresented, canDesignCurrentWallpaper != available else { return }
+        canDesignCurrentWallpaper = available
+    }
+
     func openDesignWallpaper() {
         guard canDesignCurrentWallpaper else { return }
         onOpenDesignWallpaper?()
@@ -371,6 +534,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         currentWallpaperURL: URL?,
         canDesignCurrentWallpaper: Bool
     ) {
+        activationGeneration &+= 1
+        playbackActivity.resume()
+        isPresented = true
+        isPreviewActive = true
+        userSelectedCandidate = false
         targetScreenID = targetScreen?.wallpaperScreenIdentifier
         targetScreenFingerprint = targetScreen?.wallpaperScreenFingerprint
         self.canDesignCurrentWallpaper = canDesignCurrentWallpaper
@@ -392,6 +560,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         }
 
         let dataStart = Date()
+        reconcileCachedBatch()
         if batchItems.isEmpty || didChangeFolderSelection {
             replaceBatch(avoidPreviousBatch: false)
         } else {
@@ -407,8 +576,14 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         startObservingPlaybackState()
         startObservingCoverUpdates()
         startObservingLibraryState()
-        resolveCurrentWallpaperIdentity()
-        refreshPlaybackSnapshot()
+        previewWarmupToken = UUID()
+        let generation = activationGeneration
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, self.isActive(generation) else { return }
+            self.resolveCurrentWallpaperIdentity()
+            self.refreshPlaybackSnapshot()
+        }
     }
 
     func item(at index: Int) -> MenuBarQuickWallpaperItem? {
@@ -417,11 +592,15 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     }
 
     func select(_ item: MenuBarQuickWallpaperItem) {
+        userSelectedCandidate = true
         selectedItem = item
+        previewWarmupToken = UUID()
         errorMessage = nil
     }
 
     func selectNextItem() {
+        userSelectedCandidate = true
+        previewWarmupToken = UUID()
         guard !batchItems.isEmpty else { return }
         guard let selectedItem,
               let index = batchItems.firstIndex(where: { $0.id == selectedItem.id }) else {
@@ -542,34 +721,29 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     }
 
     /// 该屏是否有活跃动态壁纸（视频 / WE scene/web），决定暂停/音量/速度是否可用。
-    var hasLivePlayback: Bool { readPlaybackSnapshot().hasLivePlayback }
+    var hasLivePlayback: Bool { playbackSnapshot.hasLivePlayback }
 
     /// 音量键是否显示：锁屏扩展模式的壁纸跑在扩展进程里，宿主侧只有
     /// per-display 静音/暂停 prefs、没有连续音量接口（与右键菜单
     /// `if !isExtensionMode` 跳过音量滑块同一约束），此时隐藏音量键。
     /// scene/web/本机视频都可用：WE 的 setVolume 热推渲染器 audioControl
     /// 文件 + web daemon IPC，视频写 per-screen 存储。
-    var showsVolumeControl: Bool {
-        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenMirroringActive {
-            return false
-        }
-        return hasLivePlayback
-    }
+    var showsVolumeControl: Bool { playbackSnapshot.showsVolumeControl }
 
     /// 该屏当前是否暂停（视频按屏查；WE 只有全局暂停态）。
-    var isPlaybackPaused: Bool { readPlaybackSnapshot().isPaused }
+    var isPlaybackPaused: Bool { playbackSnapshot.isPaused }
 
     /// 该屏音量（视频按屏独立；WE 走 VideoWallpaperManager 的每屏音量）。
-    var playbackVolume: Double { readPlaybackSnapshot().volume }
+    var playbackVolume: Double { playbackSnapshot.volume }
 
     /// 该屏播放速度（只对本机视频有效；WE/静态壁纸返回 nil → 面板隐藏）。
-    var playbackRate: Double? { readPlaybackSnapshot().rate }
+    var playbackRate: Double? { playbackSnapshot.rate }
 
     /// 是否可以切上一张/下一张（有可轮换的调度项）。
-    var canSwitchWallpaper: Bool { readPlaybackSnapshot().canGoNext }
+    var canSwitchWallpaper: Bool { playbackSnapshot.canGoNext }
 
     /// 是否有可回退的上一张。
-    var canGoPrevious: Bool { readPlaybackSnapshot().canGoPrevious }
+    var canGoPrevious: Bool { playbackSnapshot.canGoPrevious }
 
     /// 从各服务现算一份快照（真值来源）。视图只认 `playbackSnapshot`，
     /// 这里用于订阅回调与首次求值。
@@ -592,6 +766,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             snapshot.isPaused = videoManager.isPaused(on: screen)
         }
 
+        if #available(macOS 26.0, *), videoManager.isLockScreenMirroringActive {
+            snapshot.showsVolumeControl = false
+        } else {
+            snapshot.showsVolumeControl = snapshot.hasLivePlayback
+        }
         snapshot.volume = videoManager.volume(for: screen)
         if videoManager.assignedVideoURL(for: screen) != nil {
             snapshot.rate = videoManager.playbackRate(for: screen)
@@ -605,6 +784,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
     /// 把快照推给视图；值没变就不发布，避免三个服务各报一次变更造成的重复重绘。
     func refreshPlaybackSnapshot() {
+        guard isPreviewActive else { return }
         let next = readPlaybackSnapshot()
         guard next != playbackSnapshot else { return }
         playbackSnapshot = next
@@ -614,6 +794,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 合并窗口 30ms，一次用户操作里多个服务连环发通知只重绘一次。
     func startObservingPlaybackState() {
         guard playbackObservers.isEmpty else { return }
+        let generation = activationGeneration
         let merged = Publishers.MergeMany(
             VideoWallpaperManager.shared.objectWillChange.map { _ in () }
                 .eraseToAnyPublisher(),
@@ -626,10 +807,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
         merged
             .sink { [weak self] in
-                guard let self else { return }
+                guard let self, self.isActive(generation) else { return }
                 self.playbackRefreshWorkItem?.cancel()
                 let item = DispatchWorkItem { [weak self] in
-                    self?.refreshPlaybackSnapshot()
+                    guard let self, self.isActive(generation) else { return }
+                    self.refreshPlaybackSnapshot()
                 }
                 self.playbackRefreshWorkItem = item
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: item)
@@ -641,10 +823,11 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 刷新候选项封面。抽帧不改下载记录，仓库按记录指纹缓存的旧 preview 必须显式失效。
     func startObservingCoverUpdates() {
         guard coverObservers.isEmpty else { return }
+        let generation = activationGeneration
         NotificationCenter.default.publisher(for: .sceneOfflineBakeThumbnailDidUpdate)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
-                guard let self, let itemID = notification.object as? String else { return }
+                guard let self, self.isActive(generation), let itemID = notification.object as? String else { return }
                 let posterURL = notification.userInfo?["thumbnailURL"] as? URL
                 self.handleCoverUpdate(itemID: itemID, posterURL: posterURL)
             }
@@ -654,34 +837,23 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 库快照/当前屏路径晚于弹窗到达时，重新计算当前项，不把 provisional external 留到最后。
     private func startObservingLibraryState() {
         guard libraryObservers.isEmpty else { return }
-        // UI 冷启动而 Helper 尚未推送库快照时主动拉一次；已到达则等订阅变更即可。
-        if !BackgroundRuntimeBridge.librarySnapshotIsArrived {
-            libraryFetchTask?.cancel()
-            libraryFetchTask = Task { @MainActor in
-                try? await BackgroundRuntimeBridge.refreshLibrarySnapshot()
-            }
-        }
-        let libraryChanges = Publishers.Merge3(
-            BackgroundRuntimeBridge.librarySnapshotArrivedPublisher
-                .map { _ in () }.dropFirst(),
-            WallpaperLibraryService.shared.$downloadRecords
-                .map { _ in () }.dropFirst(),
-            MediaLibraryService.shared.$downloadRecords
-                .map { _ in () }.dropFirst()
-        )
-        libraryChanges
-            .receive(on: DispatchQueue.main)
+        let generation = activationGeneration
+        MenuBarQuickWallpaperRepository.shared.changes
             .sink { [weak self] in
-                guard let self else { return }
-                MenuBarQuickWallpaperRepository.shared.invalidateItemsCache()
-                self.resolveCurrentWallpaperIdentity()
-            }
-            .store(in: &libraryObservers)
+                guard let self, self.isActive(generation) else { return }
+                self.reconcileCachedBatch()
+                if self.batchItems.isEmpty {
+                    self.replaceBatch(avoidPreviousBatch: false)
+                } else {
+                    self.ensureCurrentWallpaperInBatch(selectCurrent: !self.userSelectedCandidate)
+                }
+                self.previewWarmupToken = UUID()
+            }.store(in: &libraryObservers)
 
         CurrentWallpaperService.shared.$activeURLByScreenID
             .receive(on: DispatchQueue.main)
             .sink { [weak self] values in
-                guard let self,
+                guard let self, self.isActive(generation),
                       let screen = self.resolvedTargetScreen(),
                       let url = values[screen.wallpaperScreenIdentifier],
                       self.currentWallpaperURL != url else { return }
@@ -702,17 +874,19 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         currentWallpaperLookupURL = presentedURL
         reconcileCurrentWallpaperSelection()
         // 非派生图路径（视频 / scene / web / 原图直设）不读 blur-fill 映射。
-        let derivedDirectory = DownloadPathManager.shared.derivedWallpapersFolderURL
+        let derivedDirectory = VideoThumbnailCache.libraryLookupContext().root
+            .appendingPathComponent("DerivedWallpapers", isDirectory: true)
         let derivedPrefix = derivedDirectory
             .appendingPathComponent("PortraitBlurFill", isDirectory: true)
             .standardizedFileURL.path + "/"
         guard presentedURL.standardizedFileURL.path.hasPrefix(derivedPrefix) else { return }
+        let generation = activationGeneration
         currentWallpaperIdentityTask = Task { @MainActor [weak self] in
             let sourceURL = await PortraitBlurFillWallpaperService.shared.originalSourceURL(
                 forDerivedWallpaperAt: presentedURL,
                 derivedWallpapersDirectory: derivedDirectory
             )
-            guard let self, !Task.isCancelled,
+            guard let self, !Task.isCancelled, self.isActive(generation),
                   self.currentWallpaperURL == presentedURL else { return }
             self.currentWallpaperIdentityTask = nil
             self.currentWallpaperLookupURL = sourceURL ?? presentedURL
@@ -722,41 +896,32 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
     private func reconcileCurrentWallpaperSelection() {
         // 用户已手动点选另一张库壁纸时，异步身份结果只更新候选，不抢走选中。
-        let userPickedOther = selectedItem.map { item in
-            item.isLibraryItem
-                && item.localURL != currentWallpaperLookupURL
-                && item.localURL != currentWallpaperURL
-        } ?? false
+        let userPickedOther = userSelectedCandidate
         ensureCurrentWallpaperInBatch(selectCurrent: !userPickedOther)
     }
 
     private func handleCoverUpdate(itemID: String, posterURL: URL?) {
-        MenuBarQuickWallpaperRepository.shared.invalidateItemsCache()
+        let generation = activationGeneration
         let targets = batchItems.filter { $0.sceneBakeItemID == itemID }
-        guard !targets.isEmpty else { return }
-
         for item in targets {
+            coverVersions[item.id, default: 0] &+= 1
+            previewTasks[item.id]?.cancel()
+            previewTasks[item.id] = nil
             coverRefreshTasks[item.id]?.cancel()
             coverRefreshTasks[item.id] = Task { @MainActor [weak self] in
-                // 同路径覆盖写入：清掉 hero/chip 用的 768 降采样内存缓存，否则同 URL 仍出旧帧。
                 if let posterURL {
                     let processor = DownsamplingImageProcessor(size: CGSize(width: 768, height: 768))
-                    try? await ImageCache.default.removeImage(
-                        forKey: posterURL.cacheKey,
-                        processorIdentifier: processor.identifier
-                    )
+                    try? await ImageCache.default.removeImage(forKey: posterURL.cacheKey,
+                        processorIdentifier: processor.identifier)
                 }
-                let resolved = await MenuBarQuickWallpaperRepository.shared.previewURL(
-                    for: item,
-                    ignoringCurrentThumbnail: true
-                )
-                guard let self, !Task.isCancelled else { return }
+                guard let self, !Task.isCancelled, self.isActive(generation) else { return }
+                let resolved = await MenuBarQuickWallpaperRepository.shared.resolvePreview(for: item)
+                guard !Task.isCancelled, self.isActive(generation) else { return }
                 self.coverRefreshTasks[item.id] = nil
-                guard let resolved else { return }
-                self.updateThumbnail(resolved, for: item.id)
-                self.coverRevision &+= 1
+                self.updateResolvedPreview(resolved, replacing: item.id)
             }
         }
+        coverRevision &+= 1
     }
 
     func togglePlaybackForTargetScreen() {
@@ -873,6 +1038,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 
     private func validatedFolderIDs(_ folderIDs: [String]?) -> [String]? {
         guard let folderIDs else { return nil }
+        guard !folderIDs.isEmpty else { return [] }
         let visibleFolderIDs = Set(availableFolders.map(\.id))
         let validated = folderIDs.filter { visibleFolderIDs.contains($0) }
         return validated.isEmpty ? nil : validated
@@ -945,6 +1111,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     ) {
         applyTask?.cancel()
         let requestID = UUID()
+        let presentation = activationGeneration
         applyProgress.begin(requestID)
         errorMessage = nil
         applyTask = Task { [weak self] in
@@ -953,7 +1120,8 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                 selectedItem,
                 targetScreens: targetScreens,
                 globallySynced: globallySynced,
-                requestID: requestID
+                requestID: requestID,
+                presentation: presentation
             )
         }
     }
@@ -962,7 +1130,8 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         _ selectedItem: MenuBarQuickWallpaperItem,
         targetScreens: [NSScreen]?,
         globallySynced: Bool,
-        requestID: UUID
+        requestID: UUID,
+        presentation: UInt64
     ) async {
         let applyActivity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep],
@@ -1048,7 +1217,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             refreshPlaybackSnapshot()
             // Keep browsing open if the user selected another candidate while
             // the previous wallpaper was synchronizing in the background.
-            if self.selectedItem?.id == selectedItem.id { onApplied?() }
+            if isActive(presentation), self.selectedItem?.id == selectedItem.id { onApplied?() }
         } catch {
             // A cancelled/older request may clean up its own renderer, but must
             // never dismiss this panel or clear a newer request's progress/error.
@@ -1062,7 +1231,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
                 "item": selectedItem.id,
                 "error": error.localizedDescription,
             ])
-            errorMessage = error.localizedDescription
+            if isActive(presentation) { errorMessage = error.localizedDescription }
             _ = applyProgress.finish(requestID)
             applyTask = nil
         }
@@ -1162,55 +1331,84 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 且每个任务完成都会触发一次 SwiftUI 重排 —— 直接表现为「弹窗一出来就卡」。
     private static let previewWarmupConcurrency = 2
 
-    /// 槽位释放信号：某个预热任务完成后置 true，派发循环消费掉它补位。
-    /// 只在 MainActor 上读写，无锁。
-    private var previewSlotReleased = false
-
     func warmVisiblePreviews() async {
-        let itemsToWarm = batchItems.filter { $0.thumbnailURL == nil }
-        var inFlight = 0
-        for item in itemsToWarm {
-            if Task.isCancelled { return }
-            guard previewTasks[item.id] == nil else { continue }
-            // 并发槽占满时等一个释放信号再派发 —— 完成即补位。等待用短 sleep
-            // 让位 MainActor（完成回调要靠主线程置位），比旧版 40ms 轮询
-            // 「数任务字典」更直接，也不会在等待期独占主线程。
-            while inFlight >= Self.previewWarmupConcurrency {
-                if previewSlotReleased {
-                    previewSlotReleased = false
-                    inFlight -= 1
-                    break
-                }
-                if Task.isCancelled { return }
+        guard isPreviewActive else { return }
+        warmupGeneration &+= 1
+        let warmup = warmupGeneration
+        let generation = activationGeneration
+        for task in previewTasks.values { task.cancel() }
+        previewTasks.removeAll()
+        // Current hero first; the remainder is bounded to this sixteen-item batch.
+        var items = batchItems
+        if let selected = selectedItem {
+            items.removeAll { $0.id == selected.id }
+            items.insert(selected, at: 0)
+        }
+        for item in items {
+            guard !Task.isCancelled, isActive(generation), warmupGeneration == warmup else { return }
+            guard !MenuBarQuickWallpaperRepository.shared.cachedPreviewIsFresh(for: item.id),
+                  coverRefreshTasks[item.id] == nil else { continue }
+            while previewTasks.count >= Self.previewWarmupConcurrency {
                 try? await Task.sleep(for: .milliseconds(16))
+                guard !Task.isCancelled, isActive(generation), warmupGeneration == warmup else { return }
             }
             previewTasks[item.id] = Task { @MainActor [weak self] in
-                guard let self else { return }
-                let thumbnailURL = await MenuBarQuickWallpaperRepository.shared.previewURL(for: item)
-                guard !Task.isCancelled else { return }
-                self.updateThumbnail(thumbnailURL, for: item.id)
+                let resolved = await MenuBarQuickWallpaperRepository.shared.resolvePreview(for: item)
+                guard let self, !Task.isCancelled, self.isActive(generation),
+                      self.warmupGeneration == warmup else { return }
                 self.previewTasks[item.id] = nil
-                self.previewSlotReleased = true
+                self.updateResolvedPreview(resolved, replacing: item.id)
             }
-            inFlight += 1
         }
     }
 
-    func suspendPreviewWork() {
+    func suspendPreviewWork(keepingPresentation: Bool = false) {
+        playbackActivity.suspend()
+        isPreviewActive = false
+        if !keepingPresentation { isPresented = false }
+        activationGeneration &+= 1
+        warmupGeneration &+= 1
+        playbackObservers.removeAll()
+        coverObservers.removeAll()
         libraryObservers.removeAll()
+        playbackRefreshWorkItem?.cancel()
+        playbackRefreshWorkItem = nil
         currentWallpaperIdentityTask?.cancel()
         currentWallpaperIdentityTask = nil
-        libraryFetchTask?.cancel()
-        libraryFetchTask = nil
-        for task in previewTasks.values {
-            task.cancel()
-        }
+        for task in previewTasks.values { task.cancel() }
         previewTasks.removeAll()
-        for task in coverRefreshTasks.values {
-            task.cancel()
-        }
+        for task in coverRefreshTasks.values { task.cancel() }
         coverRefreshTasks.removeAll()
-        previewSlotReleased = false
+    }
+
+    func finishHidingPresentation() { isPresented = false }
+
+    private func reconcileCachedBatch() {
+        let repository = MenuBarQuickWallpaperRepository.shared
+        let current = repository.currentItem(matching: currentWallpaperLookupURL)
+        batchItems = batchItems.compactMap { item in
+            if item.isLibraryItem {
+                guard let refreshed = repository.item(id: item.id),
+                      repository.contains(refreshed, folderIDs: selectedFolderIDs)
+                        || refreshed.id == current?.id else { return nil }
+                return refreshed
+            }
+            return current
+        }
+        if let selected = selectedItem {
+            selectedItem = batchItems.first { $0.id == selected.id }
+        }
+        coverVersions = coverVersions.filter { id, _ in batchItems.contains { $0.id == id } }
+    }
+
+    private func updateResolvedPreview(_ resolved: MenuBarQuickWallpaperItem?, replacing id: String) {
+        if let resolved {
+            batchItems = batchItems.map { $0.id == id ? resolved : $0 }
+            if selectedItem?.id == id { selectedItem = resolved }
+        } else if MenuBarQuickWallpaperRepository.shared.isTemporarilyUnavailable(id: id) {
+            batchItems.removeAll { $0.id == id }
+            if selectedItem?.id == id { selectedItem = batchItems.first }
+        }
     }
 
     /// 重建候选批次。
@@ -1221,33 +1419,19 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     ///   批次里（保证它一定在候选项中），不强行置顶。
     /// 无论哪种情况，最终都默认选中它，hero 大图随之显示当前壁纸。
     private func replaceBatch(avoidPreviousBatch: Bool) {
-        let pool = MenuBarQuickWallpaperRepository.shared.items(folderIDs: selectedFolderIDs)
-        let currentItem = MenuBarQuickWallpaperRepository.shared.currentItem(
-            matching: currentWallpaperLookupURL
-        )
-        let currentIsInPool: Bool = {
-            guard let currentItem else { return false }
-            return pool.contains { $0.id == currentItem.id }
-        }()
-
-        guard !pool.isEmpty || currentItem != nil else {
+        let repository = MenuBarQuickWallpaperRepository.shared
+        let currentItem = repository.currentItem(matching: currentWallpaperLookupURL)
+        let currentIsInPool = currentItem.map { repository.contains($0, folderIDs: selectedFolderIDs) } ?? false
+        var nextBatch = repository.sample(folderIDs: selectedFolderIDs,
+            excluding: avoidPreviousBatch ? lastBatchIDs : [], limit: Self.batchSize)
+        let limit = Self.batchSize
+        guard !nextBatch.isEmpty || currentItem != nil else {
             batchItems = []
             selectedItem = nil
             errorMessage = nil
             previewWarmupToken = UUID()
             return
         }
-
-        let limit = min(Self.batchSize, max(pool.count, currentItem == nil ? 0 : 1))
-        var candidates = pool
-        if avoidPreviousBatch {
-            let fresh = candidates.filter { !lastBatchIDs.contains($0.id) }
-            if fresh.count >= min(limit, pool.count) {
-                candidates = fresh
-            }
-        }
-
-        var nextBatch = Array(candidates.shuffled().prefix(limit))
         if let currentItem, !nextBatch.contains(where: { $0.id == currentItem.id }) {
             // 不属于当前文件夹 → 第一个；属于当前文件夹但没抽中 → 随机位置补进。
             // 随机位置排除末尾，截断时 removeLast 才不会把刚补进来的它删掉。
@@ -1261,9 +1445,6 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         }
         if nextBatch.isEmpty, let currentItem {
             nextBatch = [currentItem]
-        }
-        if nextBatch.isEmpty {
-            nextBatch = Array(pool.prefix(limit))
         }
 
         batchItems = nextBatch
@@ -1320,17 +1501,6 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             || lhs.localURL.standardizedFileURL.path == rhs.localURL.standardizedFileURL.path
     }
 
-    private func updateThumbnail(_ thumbnailURL: URL?, for itemID: String) {
-        guard let thumbnailURL else { return }
-        batchItems = batchItems.map { item in
-            item.id == itemID ? item.replacingThumbnail(with: thumbnailURL) : item
-        }
-        if selectedItem?.id == itemID,
-           let refreshed = batchItems.first(where: { $0.id == itemID }) {
-            selectedItem = refreshed
-        }
-    }
-
     private func resolvedTargetScreen() -> NSScreen? {
         NSScreen.screens.first {
             $0.wallpaperScreenIdentifier == targetScreenID
@@ -1340,470 +1510,368 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
 }
 
 @MainActor
-private final class MenuBarQuickWallpaperRepository {
+final class MenuBarQuickWallpaperRepository {
     static let shared = MenuBarQuickWallpaperRepository()
-
-    private let fileManager = FileManager.default
-
-    /// 打开弹窗的路径是同步的，而重建一次列表要对每条记录做多次存在性检查
-    /// （原片还挂在外置盘上）：库一大，单次就是几百次 stat，直接表现为
-    /// 「点开菜单栏要等一等」。
-    ///
-    /// 分两层缓存：
-    /// - `allItems()`：整份候选项（不做文件夹筛选），按「记录指纹」缓存。指纹只做
-    ///   内存遍历，比磁盘 stat 便宜几个数量级；
-    /// - `items(folderIDs:)`：在 allItems 上做内存过滤，并按选择缓存。
-    /// 「当前壁纸」也要出现在候选里，如果为它单独再构建一遍全量，就会把打开弹窗
-    /// 的 stat 开销翻倍 —— 所以全量构建只做一次。external（库里没有记录）的
-    /// 当前壁纸不进缓存，由 `currentItem(matching:)` 每次按当前屏 URL 实时合成。
-    private var cachedAllItems: [MenuBarQuickWallpaperItem] = []
-    private var cachedAllFingerprint: String?
-    private var cachedFilteredItems: [String: [MenuBarQuickWallpaperItem]] = [:]
-    /// 当前壁纸的定位结果（键 = 当前路径 + allItems 指纹），避免每次打开都全扫一遍。
-    private var cachedCurrentKey: String?
-    private var cachedCurrentItem: MenuBarQuickWallpaperItem?
-    /// 记录指纹按 0.5s 复用：一次打开会连着问两三次，没必要重复遍历整个库。
-    private var cachedFingerprint: String?
-    private var cachedFingerprintAt: Date = .distantPast
-
-    /// 打开耗时诊断（日志用）。
+    let changes = PassthroughSubject<Void, Never>()
+    private var subscriptions = Set<AnyCancellable>()
+    private var indexingTask: Task<Void, Never>?
+    private var generation: UInt64 = 0
+    private var index = MenuBarQuickIndex()
+    private var payloads: [String: MenuBarQuickWallpaperItem] = [:]
+    private var resolved: [String: MenuBarQuickPreviewResult] = [:]
+    private var previewVersions: [String: UInt64] = [:]
+    private var wallpaperRecords: [WallpaperDownloadRecord] = []
+    private var mediaRecords: [MediaDownloadRecord] = []
+    private var wallpaperFolders: [LibraryFolder] = []
+    private var mediaFolders: [LibraryFolder] = []
+    private var context: LibraryThumbnailLookupContext?
+    private var started = false
+    private var rootPreparationTask: Task<Void, Never>?
+    private var activePreviewReads = 0
+    private var posterIndexNeedsInvalidation = false
+    private(set) var isReady = false
     private(set) var lastAllItemsCacheHit = true
     private(set) var lastBuildDurationMS = 0
     private(set) var lastCurrentLookupMS = 0
 
-    func allItems() -> [MenuBarQuickWallpaperItem] {
-        let fingerprint = recordFingerprint()
-        if cachedAllFingerprint == fingerprint {
-            lastAllItemsCacheHit = true
-            return cachedAllItems
+    /// Start only after the Helper restored records AND folder definitions.
+    /// No file reads, bookmark resolution or service initialization in init.
+    func start() {
+        guard !started, BackgroundRuntimeRole.isHelper,
+              LibraryFolderStore.shared.didRestoreFromDisk else { return }
+        started = true
+        wallpaperRecords = WallpaperLibraryService.shared.downloadRecords
+        mediaRecords = MediaLibraryService.shared.downloadRecords
+        wallpaperFolders = LibraryFolderStore.shared.wallpaperFolders
+        mediaFolders = LibraryFolderStore.shared.mediaFolders
+        context = VideoThumbnailCache.libraryLookupContext()
+        rebuildIndex()
+        rootPreparationTask = Task { [weak self] in
+            await DownloadPathManager.shared.prepareLibraryRootSnapshot()
+            guard let self, !Task.isCancelled else { return }
+            let prepared = VideoThumbnailCache.libraryLookupContext()
+            if self.context != prepared {
+                self.context = prepared
+                self.resolved.removeAll()
+                self.rebuildIndex()
+            }
+            self.rootPreparationTask = nil
         }
-        lastAllItemsCacheHit = false
-        let buildStart = Date()
-        let items = buildItems()
-        lastBuildDurationMS = Int(Date().timeIntervalSince(buildStart) * 1000)
-        cachedAllItems = items
-        cachedAllFingerprint = fingerprint
-        cachedFilteredItems.removeAll(keepingCapacity: true)
-        cachedCurrentKey = nil
-        cachedCurrentItem = nil
-        return items
+        WallpaperLibraryService.shared.$downloadRecords.dropFirst().sink { [weak self] records in
+            self?.wallpaperRecords = records
+            self?.rebuildIndex()
+        }.store(in: &subscriptions)
+        MediaLibraryService.shared.$downloadRecords.dropFirst().sink { [weak self] records in
+            self?.mediaRecords = records
+            self?.rebuildIndex()
+        }.store(in: &subscriptions)
+        // Consume the published NEW value. Reading the store in willSet would retain old locks.
+        LibraryFolderStore.shared.$wallpaperFolders.dropFirst().sink { [weak self] folders in
+            self?.wallpaperFolders = folders
+            self?.rebuildIndex()
+        }.store(in: &subscriptions)
+        LibraryFolderStore.shared.$mediaFolders.dropFirst().sink { [weak self] folders in
+            self?.mediaFolders = folders
+            self?.rebuildIndex()
+        }.store(in: &subscriptions)
+        NotificationCenter.default.publisher(for: .downloadPathChanged)
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                guard let self else { return }
+                self.context = VideoThumbnailCache.libraryLookupContext()
+                self.resolved.removeAll()
+                self.rebuildIndex()
+            }.store(in: &subscriptions)
+        NotificationCenter.default.publisher(for: .sceneOfflineBakeThumbnailDidUpdate)
+            .receive(on: DispatchQueue.main).sink { [weak self] notification in
+                guard let self, let id = notification.object as? String else { return }
+                self.invalidatePreview(itemID: "media.\(id)")
+            }.store(in: &subscriptions)
     }
 
-    func items(folderIDs: [String]?) -> [MenuBarQuickWallpaperItem] {
-        let all = allItems()
-        guard let folderIDs else { return all }
-        let key = folderIDs.isEmpty ? "<unfiled>" : folderIDs.joined(separator: "|")
-        if let cached = cachedFilteredItems[key] {
-            return cached
+    private func rebuildIndex() {
+        generation &+= 1
+        isReady = false
+        let version = generation
+        indexingTask?.cancel()
+        let start = ProcessInfo.processInfo.systemUptime
+        let oldPayloads = payloads
+        var next: [String: MenuBarQuickWallpaperItem] = [:]
+        var entries: [MenuBarQuickIndexEntry] = []
+        let wpFolders = Dictionary(wallpaperFolders.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let mdFolders = Dictionary(mediaFolders.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        func visible(_ folderID: String?, folders: [String: LibraryFolder]) -> Bool {
+            var id = folderID
+            var visited = Set<String>()
+            while let raw = id {
+                let current = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !current.isEmpty else { return true }
+                guard visited.insert(current).inserted else { return false }
+                guard let folder = folders[current] else { return true }
+                guard !folder.isLocked else { return false }
+                id = folder.parentFolderID
+            }
+            return true
         }
-        let filtered = all.filter {
-            matchesFolderSelection($0.folderID, selectedFolderIDs: folderIDs)
+        for record in wallpaperRecords where record.isActive {
+            let id = "wallpaper.\(record.id)"
+            let allowed = visible(record.folderID, folders: wpFolders)
+            entries.append(.init(id: id, path: record.localFilePath, bakedPath: nil,
+                folderKey: record.folderID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "", downloadedAt: record.downloadedAt, visible: allowed))
+            if allowed {
+                next[id] = MenuBarQuickWallpaperItem(id: id, title: record.wallpaper.title ?? record.wallpaper.id,
+                    localURL: URL(filePath: record.localFilePath, directoryHint: .inferFromPath), thumbnailURL: nil, videoPreviewURL: nil,
+                    downloadedAt: record.downloadedAt, source: .wallpaper(record.wallpaper),
+                    sceneBakeItemID: nil, bakedVideoPath: nil, folderID: record.folderID)
+            }
         }
-        cachedFilteredItems[key] = filtered
-        return filtered
+        for record in mediaRecords where record.isActive {
+            let id = "media.\(record.id)"
+            let allowed = visible(record.folderID, folders: mdFolders)
+            entries.append(.init(id: id, path: record.localFilePath, bakedPath: record.sceneBakeArtifact?.videoPath,
+                folderKey: record.folderID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "", downloadedAt: record.downloadedAt, visible: allowed))
+            if allowed {
+                next[id] = MenuBarQuickWallpaperItem(id: id, title: record.item.title,
+                    localURL: URL(filePath: record.localFilePath, directoryHint: .inferFromPath), thumbnailURL: nil, videoPreviewURL: nil,
+                    downloadedAt: record.downloadedAt, source: .media(record.item),
+                    sceneBakeItemID: record.item.id, bakedVideoPath: record.sceneBakeArtifact?.videoPath,
+                    folderID: record.folderID)
+            }
+        }
+        // Privacy/deletions apply immediately, before a background index can complete.
+        // Preserve only preview results for identical sources and artifacts.
+        payloads = next
+        resolved = resolved.filter { id, _ in
+            guard let old = oldPayloads[id], let new = next[id] else { return false }
+            return old.localURL == new.localURL && old.bakedVideoPath == new.bakedVideoPath
+        }
+        previewVersions = previewVersions.filter { next[$0.key] != nil }
+        changes.send()
+        let snapshot = entries
+        indexingTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            let worker = Task.detached(priority: .utility) { MenuBarQuickIndex.build(snapshot) }
+            let built = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+            guard let self, !Task.isCancelled, self.generation == version else { return }
+            self.index = built
+            self.isReady = true
+            self.lastBuildDurationMS = Int((ProcessInfo.processInfo.systemUptime - start) * 1000)
+            self.indexingTask = nil
+            self.changes.send()
+        }
     }
 
-    /// 当前屏正在使用的壁纸对应的候选项。
-    ///
-    /// - 命中一条可见的下载记录：直接复用记录项（缩略图、详情、收藏都可用）。
-    /// - 命中记录但所在文件夹被锁定/隐藏：返回 nil —— 状态栏弹窗不展示锁定文件夹
-    ///   的内容，这条既有约束优先于「当前壁纸必须出现」。
-    /// - 没有记录：合成一个 external 项（文件必须仍存在），不进缓存。
-    ///
-    /// 打开弹窗是同步路径：先按未标准化的路径做纯字符串快筛，没命中才退回
-    /// `standardizedFileURL` 的等价判定（保持与旧实现相同的匹配语义），
-    /// 结果再按「路径 + 记录指纹」缓存 —— 库大时不能每次打开都 O(n) 全扫。
-    func currentItem(matching currentURL: URL?) -> MenuBarQuickWallpaperItem? {
-        guard let currentURL, currentURL.isFileURL else { return nil }
-        let lookupStart = Date()
-        let all = allItems()
-        let rawPath = Self.normalizedPath(currentURL.path)
-        let cacheKey = "\(rawPath)#\(cachedAllFingerprint ?? "")"
-        if cachedCurrentKey == cacheKey {
-            lastCurrentLookupMS = Int(Date().timeIntervalSince(lookupStart) * 1000)
-            return cachedCurrentItem
+    func item(id: String) -> MenuBarQuickWallpaperItem? {
+        guard let item = payloads[id] else { return nil }
+        if let preview = resolved[id], preview.exists {
+            return item.replacingPreview(thumbnailURL: preview.thumbnailURL,
+                videoURL: preview.videoURL, bakedVideoPath: preview.bakedVideoPath)
         }
-
-        var item = all.first { Self.matches(rawPath, item: $0) }
-        if item == nil {
-            let standardizedPath = Self.normalizedPath(currentURL.standardizedFileURL.path)
-            if standardizedPath != rawPath {
-                item = all.first {
-                    Self.matches(standardizedPath, item: $0, standardizeItemPaths: true)
-                }
-            }
-        }
-        if item == nil {
-            if matchingRecord(for: currentURL) != nil {
-                // 记录存在却没出现在 allItems 里：要么被锁定文件夹过滤（保持隐藏），
-                // 要么原片此刻不存在（没有可展示的项）。两种都不注入。
-                item = nil
-            } else {
-                item = externalItem(for: currentURL)
-            }
-        }
-        cachedCurrentKey = cacheKey
-        cachedCurrentItem = item
-        lastCurrentLookupMS = Int(Date().timeIntervalSince(lookupStart) * 1000)
+        if let preview = resolved[id], !preview.exists,
+           Date().timeIntervalSince(preview.checkedAt) < 5 { return nil }
         return item
     }
 
-    private func matchingRecord(
-        for currentURL: URL
-    ) -> (folderID: String?, contentType: LibraryFolder.FolderContentType)? {
-        let rawPath = Self.normalizedPath(currentURL.path)
-        let standardizedPath = Self.normalizedPath(currentURL.standardizedFileURL.path)
-        func matchesPath(_ candidate: String) -> Bool {
-            Self.pathMatches(rawPath, candidate) || Self.pathMatches(standardizedPath, candidate)
+    func sample(folderIDs: [String]?, excluding: Set<String>, limit: Int) -> [MenuBarQuickWallpaperItem] {
+        index.sample(folderIDs: folderIDs, excluding: excluding, limit: limit).compactMap {
+            guard let candidate = item(id: $0), contains(candidate, folderIDs: folderIDs) else { return nil }
+            return candidate
         }
-        if let record = WallpaperLibraryService.shared.downloadedWallpapers.first(where: {
-            matchesPath($0.localFilePath)
-        }) {
-            return (record.folderID, .wallpaper)
-        }
-        for record in MediaLibraryService.shared.downloadedItems {
-            if matchesPath(record.localFilePath) {
-                return (record.folderID, .media)
-            }
-            if let bakedPath = record.sceneBakeArtifact?.videoPath, matchesPath(bakedPath) {
-                return (record.folderID, .media)
-            }
-            // 解析后的视频路径也算命中（会做目录遍历，所以只在这条兜底链上查）。
-            if let resolved = record.resolvedVideoFileURL, matchesPath(resolved.path) {
-                return (record.folderID, .media)
-            }
-        }
-        return nil
     }
 
-    private func externalItem(for url: URL) -> MenuBarQuickWallpaperItem? {
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            return nil
-        }
-        let isVideo = !isDirectory.boolValue
-            && Self.videoExtensions.contains(url.pathExtension.lowercased())
-        let title = url.deletingPathExtension().lastPathComponent
-        return MenuBarQuickWallpaperItem(
-            id: "current.\(url.standardizedFileURL.path)",
-            title: title.isEmpty ? url.lastPathComponent : title,
-            localURL: url,
-            // 静态图直接拿原图当缩略图；视频/工程目录留给 previewURL(for:) 抽帧。
-            thumbnailURL: (!isDirectory.boolValue && !isVideo) ? url : nil,
-            videoPreviewURL: isVideo ? url : nil,
-            downloadedAt: .distantPast,
-            source: .external,
-            sceneBakeItemID: nil,
-            bakedVideoPath: nil,
-            folderID: nil
-        )
+    func contains(_ item: MenuBarQuickWallpaperItem, folderIDs: [String]?) -> Bool {
+        guard payloads[item.id] != nil else { return false }
+        let folder = item.folderID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return folderIDs.map { $0.isEmpty ? folder.isEmpty : $0.contains(folder) } ?? true
     }
 
-    private static func matches(
-        _ currentPath: String,
-        item: MenuBarQuickWallpaperItem,
-        standardizeItemPaths: Bool = false
-    ) -> Bool {
-        func candidatePath(_ url: URL) -> String {
-            normalizedPath(standardizeItemPaths ? url.standardizedFileURL.path : url.path)
-        }
-        if pathMatches(currentPath, candidatePath(item.localURL)) {
-            return true
-        }
-        if let videoPreviewURL = item.videoPreviewURL,
-           pathMatches(currentPath, candidatePath(videoPreviewURL)) {
-            return true
-        }
-        if let bakedVideoPath = item.bakedVideoPath,
-           pathMatches(currentPath, normalizedPath(bakedVideoPath)) {
-            return true
-        }
-        return false
+    func currentItem(matching url: URL?) -> MenuBarQuickWallpaperItem? {
+        guard let url, url.isFileURL, isReady else { return nil }
+        let start = ProcessInfo.processInfo.systemUptime
+        defer { lastCurrentLookupMS = Int((ProcessInfo.processInfo.systemUptime - start) * 1000) }
+        if let owner = index.owner(of: url.path) { return item(id: owner) }
+        // While a new library revision is indexing, unknown identities fail closed.
+        guard indexingTask == nil else { return nil }
+        // Derived images can belong to a hidden source; wait for async source identity.
+        if url.path.contains("/DerivedWallpapers/PortraitBlurFill/") { return nil }
+        let id = "current.\(MenuBarQuickIndex.normalizedPath(url.path))"
+        let cached = resolved[id].flatMap { $0.exists ? $0 : nil }
+        if let cached = resolved[id], !cached.exists, Date().timeIntervalSince(cached.checkedAt) < 5 { return nil }
+        return MenuBarQuickWallpaperItem(id: id, title: url.deletingPathExtension().lastPathComponent,
+            localURL: url, thumbnailURL: cached?.thumbnailURL, videoPreviewURL: cached?.videoURL,
+            downloadedAt: .distantPast, source: .external, sceneBakeItemID: nil,
+            bakedVideoPath: nil, folderID: nil)
     }
 
-    /// 纯字符串判定：当前壁纸可能就是记录本身、记录目录里的文件，或记录的父目录。
-    private static func pathMatches(_ currentPath: String, _ candidatePath: String) -> Bool {
-        guard !currentPath.isEmpty, !candidatePath.isEmpty else { return false }
-        let candidate = normalizedPath(candidatePath)
-        return currentPath == candidate
-            || currentPath.hasPrefix(candidate + "/")
-            || candidate.hasPrefix(currentPath + "/")
+    func previewRevision(for id: String) -> Int { Int(truncatingIfNeeded: previewVersions[id, default: 0]) }
+
+    private func invalidatePreview(itemID: String) {
+        guard payloads[itemID] != nil else { return }
+        previewVersions[itemID, default: 0] &+= 1
+        resolved.removeValue(forKey: itemID)
+        posterIndexNeedsInvalidation = true
+        changes.send()
     }
 
-    private static func normalizedPath(_ path: String) -> String {
-        var value = path
-        while value.count > 1, value.hasSuffix("/") {
-            value.removeLast()
+    /// Only the displayed batch reaches disk. At most two callers are admitted by the ViewModel.
+    func resolvePreview(for item: MenuBarQuickWallpaperItem) async -> MenuBarQuickWallpaperItem? {
+        // A cancelled slow read still owns its slot until it actually returns.
+        // Reopening cannot accumulate another batch of blocked filesystem calls.
+        while activePreviewReads >= 2 {
+            guard !Task.isCancelled else { return nil }
+            try? await Task.sleep(for: .milliseconds(16))
         }
-        return value
+        guard !Task.isCancelled, let context else { return nil }
+        activePreviewReads += 1
+        defer { activePreviewReads -= 1 }
+        let version = generation
+        let previewVersion = previewVersions[item.id, default: 0]
+        let source = MenuBarQuickPreviewRequest(id: item.id, localURL: item.localURL,
+            itemID: item.sceneBakeItemID, bakedPath: payloads[item.id]?.bakedVideoPath,
+            context: context)
+        let invalidatePosterIndex = posterIndexNeedsInvalidation
+        posterIndexNeedsInvalidation = false
+        var result = await MenuBarQuickPreviewReader.shared.read(source, invalidatePosterIndex: invalidatePosterIndex)
+        if result.exists, result.thumbnailURL == nil, let video = result.videoURL, !Task.isCancelled {
+            result.thumbnailURL = await VideoThumbnailCache.menuListThumbnail(for: video, cacheDirectory: context.videoCache)
+        }
+        if let url = result.thumbnailURL, previewVersion > 0, !Task.isCancelled {
+            let processor = DownsamplingImageProcessor(size: CGSize(width: 768, height: 768))
+            try? await ImageCache.default.removeImage(forKey: url.cacheKey, processorIdentifier: processor.identifier)
+        }
+        guard !Task.isCancelled, generation == version,
+              previewVersions[item.id, default: 0] == previewVersion,
+              self.context == context,
+              !item.isLibraryItem || payloads[item.id]?.localURL == item.localURL else { return nil }
+        if resolved.count >= 96 { resolved.removeAll(keepingCapacity: true) }
+        resolved[item.id] = result
+        guard result.exists else { return nil }
+        return item.replacingPreview(thumbnailURL: result.thumbnailURL,
+            videoURL: result.videoURL, bakedVideoPath: result.bakedVideoPath)
     }
 
-    private func recordFingerprint() -> String {
-        let now = Date()
-        if let cachedFingerprint,
-           now.timeIntervalSince(cachedFingerprintAt) < 0.5 {
-            return cachedFingerprint
-        }
-        var hasher = Hasher()
-        for record in WallpaperLibraryService.shared.downloadedWallpapers {
-            hasher.combine(record.id)
-            hasher.combine(record.folderID)
-            hasher.combine(record.localFilePath)
-        }
-        for record in MediaLibraryService.shared.downloadedItems {
-            hasher.combine(record.id)
-            hasher.combine(record.folderID)
-            hasher.combine(record.localFilePath)
-            hasher.combine(record.sceneBakeArtifact?.videoPath)
-        }
-        let value = String(hasher.finalize())
-        cachedFingerprint = value
-        cachedFingerprintAt = now
-        return value
+    func isTemporarilyUnavailable(id: String) -> Bool {
+        guard let preview = resolved[id], !preview.exists else { return false }
+        return Date().timeIntervalSince(preview.checkedAt) < 5
     }
 
-    private func buildItems() -> [MenuBarQuickWallpaperItem] {
-        let wallpaperItems = WallpaperLibraryService.shared.downloadedWallpapers
-            .filter {
-                MenuBarQuickSwitcherFolderVisibility.isVisible(
-                    folderID: $0.folderID,
-                    contentType: .wallpaper
-                )
-            }
-            .compactMap { makeWallpaperItem(from: $0) }
-        let mediaItems = MediaLibraryService.shared.downloadedItems
-            .filter {
-                MenuBarQuickSwitcherFolderVisibility.isVisible(
-                    folderID: $0.folderID,
-                    contentType: .media
-                )
-            }
-            .compactMap { makeMediaItem(from: $0) }
-        return (wallpaperItems + mediaItems)
-            .sorted { $0.downloadedAt > $1.downloadedAt }
+    func cachedPreviewIsFresh(for id: String) -> Bool {
+        guard let preview = resolved[id] else { return false }
+        return Date().timeIntervalSince(preview.checkedAt) < (preview.exists ? 30 : 5)
     }
+}
 
-    private func matchesFolderSelection(
-        _ folderID: String?,
-        selectedFolderIDs: [String]?
-    ) -> Bool {
-        guard let selectedFolderIDs else { return true }
-        let normalizedFolderID = folderID?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if selectedFolderIDs.isEmpty {
-            return normalizedFolderID?.isEmpty ?? true
+private struct MenuBarQuickPreviewRequest: Sendable {
+    let id: String
+    let localURL: URL
+    let itemID: String?
+    let bakedPath: String?
+    let context: LibraryThumbnailLookupContext
+}
+
+private struct MenuBarQuickPreviewResult: Sendable {
+    let exists: Bool
+    var thumbnailURL: URL?
+    var videoURL: URL?
+    var bakedVideoPath: String?
+    let checkedAt = Date()
+}
+
+/// No MainActor singletons. Performs source checks and existing-cache reads only;
+/// missing frame generation is separately bounded by the visible preview queue.
+private actor MenuBarQuickPreviewReader {
+    static let shared = MenuBarQuickPreviewReader()
+    private struct Poster { let url: URL; let date: Date }
+    private var posterContext: LibraryThumbnailLookupContext?
+    private var posterIndex: [String: [Poster]] = [:]
+    private var posterIndexAt = Date.distantPast
+
+    func read(_ request: MenuBarQuickPreviewRequest, invalidatePosterIndex: Bool) -> MenuBarQuickPreviewResult {
+        if invalidatePosterIndex { posterIndexAt = .distantPast }
+        let fm = FileManager.default
+        var directory: ObjCBool = false
+        guard !Task.isCancelled, fm.fileExists(atPath: request.localURL.path, isDirectory: &directory) else {
+            return MenuBarQuickPreviewResult(exists: false)
         }
-        guard let normalizedFolderID, !normalizedFolderID.isEmpty else { return false }
-        return selectedFolderIDs.contains(normalizedFolderID)
-    }
-
-    /// 清掉候选项缓存。抽帧/烘焙封面落盘不改下载记录，记录指纹不变，
-    /// 必须显式失效，否则下次打开仍拿建项时的旧 preview。
-    func invalidateItemsCache() {
-        cachedAllFingerprint = nil
-        cachedFilteredItems.removeAll(keepingCapacity: true)
-        cachedCurrentKey = nil
-        cachedCurrentItem = nil
-    }
-
-    /// - Parameter ignoringCurrentThumbnail: 封面更新通知后重新解析时为 true，
-    ///   跳过 item 上已有的（可能是旧 preview 的）thumbnailURL。
-    func previewURL(
-        for item: MenuBarQuickWallpaperItem,
-        ignoringCurrentThumbnail: Bool = false
-    ) async -> URL? {
-        if !ignoringCurrentThumbnail, let thumbnailURL = item.thumbnailURL {
-            return thumbnailURL
+        var result = MenuBarQuickPreviewResult(exists: true)
+        let videoExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
+        func usableImage(_ url: URL) -> URL? {
+            guard !Task.isCancelled else { return nil }
+            return LibraryThumbnailDiskReader.isUsableImage(at: url) ? url : nil
         }
-
-        if let videoURL = item.videoPreviewURL {
-            return await highQualityVideoPreviewURL(for: videoURL)
-        }
-
-        var isDirectory: ObjCBool = false
-        fileManager.fileExists(atPath: item.localURL.path, isDirectory: &isDirectory)
-
-        if isDirectory.boolValue {
-            // Scene/Web 工程：抽帧/烘焙封面优先，Workshop 自带 preview.* 只是最后兜底
-            //（它是商店缩略图，用户已有高清抽帧时不应再显示旧预览图）。
-            // 烘焙/抽帧封面直接返回原图 URL：KFImage 已按 768 降采样；
-            // LocalImageThumbnailCache 只按路径做键，重抽覆盖同路径后会命中旧小图。
-            // 1) 当前内容/属性身份匹配的 Scene/Web 高清封面
-            if let itemID = item.sceneBakeItemID,
-               let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfMatchingCurrentIdentity(
-                    itemID: itemID,
-                    contentRoot: WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: item.localURL)
-               ) {
-                return baked
-            }
-            // 列表旧缓存仅作显示回退；设置壁纸入口不使用此无来源重载。
-            if let itemID = item.sceneBakeItemID,
-               let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID) {
-                return baked
-            }
-            // 2) 烘焙 MP4 / 原视频的列表小图（有视频或烘焙资源时保持原逻辑）
-            if let bakedPath = item.bakedVideoPath,
-               let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(
-                   forLocalVideo: URL(fileURLWithPath: bakedPath)
-               ) {
-                return cached
-            }
-            if let videoURL = item.videoPreviewURL,
-               let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
-                return cached
-            }
-            // 3) 高清抽帧 scene_realtime_*（无视频/烘焙时的唯一高清来源）
-            if let itemID = item.sceneBakeItemID,
-               let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: itemID) {
-                return realtime
-            }
-            // 4) Workshop 自带 preview.*（最后兜底）
-            if let preview = MediaItem.resolveLocalWorkshopPreviewImage(from: item.localURL) {
-                return await localRasterPreviewURL(for: preview)
+        func namedImage(_ name: String) -> URL? {
+            for folder in [request.context.covers, request.context.videoCache] {
+                if let found = usableImage(folder.appendingPathComponent(name)) { return found }
             }
             return nil
         }
-
-        if LocalImageThumbnailCache.isGIFFile(item.localURL) {
-            return item.localURL
+        if let path = request.bakedPath, !Task.isCancelled,
+           SceneOfflineBakeService.isUsableBakedVideo(at: URL(fileURLWithPath: path)) {
+            result.bakedVideoPath = path
+            result.videoURL = URL(fileURLWithPath: path)
         }
-        if LocalImageThumbnailCache.isRasterImageFile(item.localURL) {
-            return await localRasterPreviewURL(for: item.localURL)
-        }
-        return nil
-    }
-
-    private func makeWallpaperItem(
-        from record: WallpaperDownloadRecord
-    ) -> MenuBarQuickWallpaperItem? {
-        guard fileManager.fileExists(atPath: record.localFilePath) else { return nil }
-        return MenuBarQuickWallpaperItem(
-            id: "wallpaper.\(record.id)",
-            title: record.wallpaper.title ?? record.wallpaper.id,
-            localURL: record.localFileURL,
-            thumbnailURL: record.localFileURL,
-            videoPreviewURL: nil,
-            downloadedAt: record.downloadedAt,
-            source: .wallpaper(record.wallpaper),
-            sceneBakeItemID: nil,
-            bakedVideoPath: nil,
-            folderID: record.folderID
-        )
-    }
-
-    private func makeMediaItem(
-        from record: MediaDownloadRecord
-    ) -> MenuBarQuickWallpaperItem? {
-        guard fileManager.fileExists(atPath: record.localFilePath) else { return nil }
-
-        let localURL = record.localFileURL
-        let videoPreviewURL = resolvedVideoPreviewURL(for: record)
-        let thumbnailURL: URL?
-        var isDirectory: ObjCBool = false
-        fileManager.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
-        // 顺序（与 previewURL(for:) 同序）：烘焙封面 → 视频/烘焙 MP4 帧 → 高清抽帧
-        // scene_realtime_* → Workshop preview.*（最后兜底，由预热补）。
-        // 有视频或烘焙资源时保持原逻辑；只有抽帧时必须显示抽帧高清图。
-        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: localURL)
-        if let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfMatchingCurrentIdentity(
-            itemID: record.item.id, contentRoot: contentRoot
-        ) {
-            thumbnailURL = baked
-        } else if let baked = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: record.item.id) {
-            thumbnailURL = baked
-        } else if let videoPreviewURL,
-           let thumbnail = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
-                forLocalFile: videoPreviewURL
-           ) {
-            thumbnailURL = thumbnail
-        } else if let bakedVideoPath = record.sceneBakeArtifact?.videoPath,
-           let thumbnail = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(
-                forLocalVideo: URL(fileURLWithPath: bakedVideoPath)
-           ) {
-            thumbnailURL = thumbnail
-        } else if !isDirectory.boolValue {
-            thumbnailURL = VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
-                forLocalFile: localURL
-            )
-        } else if let videoURL = videoPreviewURL ?? record.sceneBakeArtifact.map({ URL(fileURLWithPath: $0.videoPath) }),
-                  let cached = VideoThumbnailCache.shared.cachedListThumbnailFileURLIfExists(forLocalVideo: videoURL) {
-            thumbnailURL = cached
-        } else if let realtime = VideoThumbnailCache.shared.latestSceneRealtimePosterFileURLIfExists(itemID: record.item.id) {
-            thumbnailURL = realtime
-        } else {
-            thumbnailURL = nil
-        }
-
-        // 只暴露 usable 烘焙产物；过期/损坏路径留给 LocalWallpaperApplyService 再解析。
-        let usableBakePath = SceneOfflineBakeService.usableCurrentArtifact(from: record)?.videoPath
-
-        return MenuBarQuickWallpaperItem(
-            id: "media.\(record.id)",
-            title: record.item.title,
-            localURL: localURL,
-            thumbnailURL: thumbnailURL,
-            videoPreviewURL: videoPreviewURL,
-            downloadedAt: record.downloadedAt,
-            source: .media(record.item),
-            sceneBakeItemID: record.item.id,
-            bakedVideoPath: usableBakePath,
-            folderID: record.folderID
-        )
-    }
-
-    private func resolvedVideoPreviewURL(for record: MediaDownloadRecord) -> URL? {
-        if let artifact = SceneOfflineBakeService.usableCurrentArtifact(from: record) {
-            let bakedURL = URL(fileURLWithPath: artifact.videoPath)
-            if fileManager.fileExists(atPath: bakedURL.path) {
-                return bakedURL
+        if result.videoURL == nil {
+            if !directory.boolValue, videoExtensions.contains(request.localURL.pathExtension.lowercased()) {
+                result.videoURL = request.localURL
+            } else if directory.boolValue, !Task.isCancelled {
+                let type = MediaItem.localWorkshopProjectType(from: request.localURL)
+                if type == nil || type == "video" {
+                    result.videoURL = MediaItem.resolveLocalVideoFile(from: request.localURL)
+                }
             }
         }
-
-        let localURL = record.localFileURL
-        let projectType = MediaItem.localWorkshopProjectType(from: localURL)
-        if let projectType, projectType != "video" {
-            return nil
+        // Preserve menu priority: bake poster, video list frame, realtime poster, Workshop preview.
+        if let id = request.itemID { result.thumbnailURL = namedImage("scene_bake_\(id.md5).jpg") }
+        if result.thumbnailURL == nil, let video = result.videoURL {
+            let path = video.standardizedFileURL.path
+            result.thumbnailURL = usableImage(request.context.videoCache.appendingPathComponent("list_\(path.md5).jpg"))
+            if result.thumbnailURL == nil {
+                let prefix = request.context.root.standardizedFileURL.path + "/"
+                let key = path.hasPrefix(prefix) ? "lib:" + String(path.dropFirst(prefix.count)) : path
+                result.thumbnailURL = usableImage(request.context.covers.appendingPathComponent("poster_wallpaper_\(key.md5).jpg"))
+                    ?? usableImage(request.context.videoCache.appendingPathComponent("poster_wallpaper_\(path.md5).jpg"))
+            }
         }
-
-        if Self.videoExtensions.contains(localURL.pathExtension.lowercased()) {
-            return localURL
+        if result.thumbnailURL == nil, let id = request.itemID, !Task.isCancelled {
+            result.thumbnailURL = realtimePoster(itemID: id, context: request.context)
         }
-
-        if let videoURL = MediaItem.resolveLocalVideoFile(from: localURL),
-           Self.videoExtensions.contains(videoURL.pathExtension.lowercased()),
-           fileManager.fileExists(atPath: videoURL.path) {
-            return videoURL
+        if result.thumbnailURL == nil, !Task.isCancelled {
+            if !directory.boolValue, LocalImageThumbnailCache.isRasterImageFile(request.localURL)
+                || LocalImageThumbnailCache.isGIFFile(request.localURL) {
+                result.thumbnailURL = request.localURL
+            } else if directory.boolValue {
+                result.thumbnailURL = MediaItem.resolveLocalWorkshopPreviewImage(from: request.localURL)
+            }
         }
-
-        return nil
+        return result
     }
 
-    private func highQualityVideoPreviewURL(for videoURL: URL) async -> URL? {
-        // 弹窗 chip 只有 56px、hero 342pt —— 列表帧（960 上限、2 并发）完全够用。
-        // 不要落进 posterJPEGFileURL：那是 3840×2160 全分辨率 letterbox 扫描、
-        // 全局串行 1 并发，一张外置盘冷读 2.6s 的 4K 会把整条缩略图队列卡死
-        //（2026-10-13 弹窗图片/视频出得慢的主因之一）。
-        if let listThumbnail = await VideoThumbnailCache.shared.listThumbnailJPEGFileURL(
-            forLocalVideo: videoURL
-        ) {
-            return listThumbnail
+    private func realtimePoster(itemID: String, context: LibraryThumbnailLookupContext) -> URL? {
+        if posterContext != context || Date().timeIntervalSince(posterIndexAt) >= 10 {
+            var next: [String: [Poster]] = [:]
+            let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey]
+            for folder in [context.covers, context.videoCache] {
+                guard let files = FileManager.default.enumerator(at: folder,
+                    includingPropertiesForKeys: Array(keys),
+                    options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]) else { continue }
+                for case let file as URL in files {
+                    guard !Task.isCancelled else { return nil }
+                    let name = file.lastPathComponent
+                    guard name.hasPrefix("scene_realtime_"), file.pathExtension == "jpg" else { continue }
+                    let body = name.dropFirst("scene_realtime_".count)
+                    guard let separator = body.firstIndex(of: "_") else { continue }
+                    let values = try? file.resourceValues(forKeys: keys)
+                    guard values?.isRegularFile != false else { continue }
+                    next[String(body[..<separator]), default: []].append(
+                        Poster(url: file, date: values?.contentModificationDate ?? .distantPast))
+                }
+            }
+            posterIndex = next
+            posterContext = context
+            posterIndexAt = Date()
         }
-        // 仅当列表帧彻底生成失败时才退到 poster 缓存（只查已存在的，不再触发生成；
-        // 桌面/锁屏 poster 由设壁纸链路自己生成，弹窗只是读取方）。
-        return VideoThumbnailCache.shared.cachedStaticThumbnailFileURLIfExists(
-            forLocalFile: videoURL
-        )
+        return posterIndex[itemID.md5, default: []].sorted { $0.date > $1.date }
+            .first { !Task.isCancelled && LibraryThumbnailDiskReader.isUsableImage(at: $0.url) }?.url
     }
-
-    private func localRasterPreviewURL(for url: URL) async -> URL {
-        if LocalImageThumbnailCache.isGIFFile(url) {
-            return url
-        }
-        return await LocalImageThumbnailCache.shared.ensureThumbnail(forLocalFile: url) ?? url
-    }
-
-    private static let videoExtensions: Set<String> = [
-        "mp4", "mov", "webm", "m4v", "mkv"
-    ]
 }
 
 @MainActor

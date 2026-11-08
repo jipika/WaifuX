@@ -260,6 +260,7 @@ struct WallpaperExploreContentView: View {
     @ObservedObject var viewModel: WallpaperViewModel
     @Binding var selectedWallpaper: Wallpaper?
     var isVisible: Bool = true
+    let onPrepareCardTransition: ((CardTransitionSource?) -> Void)?
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: true)
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
     @ObservedObject private var sourceManager = WallpaperSourceManager.shared
@@ -270,10 +271,12 @@ struct WallpaperExploreContentView: View {
     // WallpaperExploreAtmosphereBackground 子视图内自行观察，只重建背景。
     @StateObject private var translationBridge = SearchTranslationBridge()
     @Environment(\.mainTopBarContentPadding) private var mainTopBarContentPadding
-    init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>, isVisible: Bool = true) {
+    init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>, isVisible: Bool = true,
+         onPrepareCardTransition: ((CardTransitionSource?) -> Void)? = nil) {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._selectedWallpaper = selectedWallpaper
         self.isVisible = isVisible
+        self.onPrepareCardTransition = onPrepareCardTransition
     }
 
     // MARK: State
@@ -1256,6 +1259,12 @@ struct WallpaperExploreContentView: View {
                 guard idx < visibleWallpapers.count else { return }
                 selectedWallpaper = visibleWallpapers[idx]
             },
+            onSelectionSource: { idx, source in
+                prepareCardTransition(at: idx, source: source)
+            },
+            selectionItemIdentifier: { idx in
+                visibleWallpapers.indices.contains(idx) ? visibleWallpapers[idx].id : ""
+            },
             onVisibleItemsChange: nil,
             onScrollOffsetChange: { offset in
                 handleGridScrollOffset(offset)
@@ -1292,6 +1301,27 @@ struct WallpaperExploreContentView: View {
                 gridPendingScrollDown = 0
             }
         )
+    }
+
+    private func prepareCardTransition(at index: Int, source: CardTransitionSource?) {
+        guard visibleWallpapers.indices.contains(index), let source else {
+            onPrepareCardTransition?(nil)
+            return
+        }
+        let wallpaper = visibleWallpapers[index]
+        let ext = URL(string: wallpaper.path)?.pathExtension.lowercased() ?? ""
+        let excluded = ["gif", "apng", "mp4", "webm", "mov", "m4v"]
+        let mime = wallpaper.fileType?.lowercased() ?? ""
+        // Pixiv maps ugoira to category=anime with a JPEG preview, so the file extension alone
+        // cannot distinguish that animated work from a static illustration.
+        let isPixivAnimation = wallpaper.source == "pixiv" && wallpaper.category.lowercased() == "anime"
+        guard isVisible, !wallpaper.isPixivManga, !isPixivAnimation,
+              !["image/gif", "image/apng"].contains(mime), !mime.hasPrefix("video/"), !excluded.contains(ext),
+              source.itemID == wallpaper.id else {
+            onPrepareCardTransition?(nil)
+            return
+        }
+        onPrepareCardTransition?(source)
     }
 
     /// 卡片整体（图像 + 46pt 底栏）的宽高比，供 ExploreGridCollectionViewLayout 计算 cell 高度。

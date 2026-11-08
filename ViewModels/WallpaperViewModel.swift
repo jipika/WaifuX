@@ -1781,9 +1781,15 @@ class WallpaperViewModel: ObservableObject {
             return try Data(contentsOf: downloadURL)
         }
 
-        let headers = wallpaper.source == "konachan"
-            ? KonachanRequestConfiguration.imageHeaders(for: downloadURL)
-            : [:]
+        let headers: [String: String]
+        switch wallpaper.source {
+        case "konachan":
+            headers = KonachanRequestConfiguration.imageHeaders(for: downloadURL)
+        case "4kwallpapers":
+            headers = FourKWallpapersService.imageHeaders(referer: wallpaper.url)
+        default:
+            headers = [:]
+        }
 
         return try await networkService.fetchImage(from: downloadURL, headers: headers) { progress in
             guard let taskID else { return }

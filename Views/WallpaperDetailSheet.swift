@@ -10,6 +10,12 @@ struct WallpaperDetailSheet: View {
     let onClose: () -> Void
     /// 当需要在 NavigationStack 中 push 新壁纸时调用（如作者列表点击）
     let onNavigateToWallpaper: ((Wallpaper) -> Void)?
+    let onTransitionReady: (() -> Void)?
+    let onTransitionImageReady: ((String, NSImage) -> Void)?
+    let onDisplayedWallpaperChange: ((String) -> Void)?
+    @State private var transitionSeed: NSImage?
+    private let usesCardTransition: Bool
+    @Environment(\.displayScale) private var displayScale
 
     @State private var resolvedWallpaper: Wallpaper
     @State private var downloadActivity = DetailDownloadActivity()
@@ -134,7 +140,7 @@ struct WallpaperDetailSheet: View {
                     .coordinateSpace(name: "scroll")
 
                 // 固定背景：宽 100% 高度按比例 + 不足处模糊渐变，不随 ScrollView 滚动
-                if isVisible {
+                if isVisible || activeTransitionSeed != nil {
                     fixedWallpaperBackground(width: viewW, height: viewH)
                         .id("wallpaper-bg-\(wallpaper.id)")
                         .transition(
@@ -149,7 +155,7 @@ struct WallpaperDetailSheet: View {
                 }
 
                 // 图片加载动画
-                if !isImageLoaded && !isNavigating {
+                if !isImageLoaded && !isNavigating && activeTransitionSeed == nil {
                     LoadingOverlayView()
                         .frame(width: viewW, height: viewH)
                         .transition(.opacity.animation(.easeInOut(duration: 0.3)))
@@ -325,9 +331,14 @@ struct WallpaperDetailSheet: View {
         .onAppear {
             AppLogger.info(.wallpaper, "详情页 onAppear",
                 metadata: ["wallpaperId": wallpaper.id, "isLocal": isLocalFile])
-            // iOS 丝滑入场：分阶段渐显，模拟原生页面转场
-            withAnimation(.easeOut(duration: 0.12).delay(0.02)) {
+            if usesCardTransition {
+                // The card already covers the viewport; seed it synchronously before revealing chrome.
                 isVisible = true
+                onTransitionReady?()
+            } else {
+                withAnimation(.easeOut(duration: 0.12).delay(0.02)) {
+                    isVisible = true
+                }
             }
             setupNextItemDataSource()
             setupKeyboardMonitor()
@@ -335,6 +346,10 @@ struct WallpaperDetailSheet: View {
             if !isLocalFile {
                 fetchDetailAndUpdateUploader()
             }
+        }
+        .onChange(of: wallpaper.id) { _, id in
+            transitionSeed = nil
+            onDisplayedWallpaperChange?(id)
         }
         .onChange(of: viewModel.wallpapers) { _, newWallpapers in
             // 本地上下文模式下不跟随线上列表变化
@@ -346,6 +361,8 @@ struct WallpaperDetailSheet: View {
         }
         .onDisappear {
             isVisible = false
+            portraitLoadTask?.cancel()
+            portraitLoadTask = nil
             // 清理预加载任务
             preloadTask?.cancel()
             ForegroundPrefetchManager.shared.stop(namespace: prefetchNamespace)
@@ -353,13 +370,26 @@ struct WallpaperDetailSheet: View {
         }
     }
 
-    init(wallpaper: Wallpaper, viewModel: WallpaperViewModel, contextWallpapers: [Wallpaper]? = nil, onClose: @escaping () -> Void, onNavigateToWallpaper: ((Wallpaper) -> Void)? = nil) {
+    init(wallpaper: Wallpaper, viewModel: WallpaperViewModel, contextWallpapers: [Wallpaper]? = nil,
+         onClose: @escaping () -> Void, onNavigateToWallpaper: ((Wallpaper) -> Void)? = nil,
+         transitionImage: NSImage? = nil, onTransitionReady: (() -> Void)? = nil,
+         onTransitionImageReady: ((String, NSImage) -> Void)? = nil,
+         onDisplayedWallpaperChange: ((String) -> Void)? = nil) {
         self.initialWallpaper = wallpaper
         self.viewModel = viewModel
         self.contextWallpapers = contextWallpapers
         self.onClose = onClose
         self.onNavigateToWallpaper = onNavigateToWallpaper
+        self.onTransitionReady = onTransitionReady
+        self.onTransitionImageReady = onTransitionImageReady
+        self.onDisplayedWallpaperChange = onDisplayedWallpaperChange
+        self.usesCardTransition = transitionImage != nil
+        _transitionSeed = State(initialValue: transitionImage)
         _resolvedWallpaper = State(initialValue: wallpaper)
+    }
+
+    private var activeTransitionSeed: NSImage? {
+        wallpaper.id == initialWallpaper.id ? transitionSeed : nil
     }
 
     /// 当前导航使用的壁纸列表（本地上下文优先，否则使用线上列表）
@@ -385,24 +415,44 @@ struct WallpaperDetailSheet: View {
     /// 固定背景：横图裁剪铺满整屏，竖图完整缩放并做左右模糊延伸
     @ViewBuilder
     private func fixedWallpaperBackground(width: CGFloat, height viewH: CGFloat) -> some View {
+        let imageItemID = wallpaper.id
         if isPortraitWallpaper {
             portraitWallpaperBackground(width: width, height: viewH)
         } else {
-            // 根据屏幕尺寸计算降采样目标大小（2x Retina），避免解码 4K/8K 全分辨率位图
-            let scale = NSScreen.main?.backingScaleFactor ?? 2
-            let downsampleSize = CGSize(width: width * scale, height: viewH * scale)
+            // Match the click-time decoded cache entry for the liquid reveal. Display scale
+            // belongs to this hosting window, including when it moves to a different display.
+            let downsampleSize = usesCardTransition
+                ? WallpaperTransitionImageLoader.targetPixelSize(viewportSize: CGSize(width: width, height: viewH), displayScale: displayScale)
+                : CGSize(width: width * displayScale, height: viewH * displayScale)
             // 使用 Kingfisher 加载，有可靠的回调
             KFImage(heroImageURL)
                 .setProcessor(DownsamplingImageProcessor(size: downsampleSize))
+                .scaleFactor(1)
                 .backgroundDecode()
-                .fade(duration: 0.3)
-                .onSuccess { _ in
+                // KF removes its placeholder as soon as loading finishes. A second fade would
+                // expose black after the morph's own image handoff, so this entry owns the fade.
+                .fade(duration: usesCardTransition && imageItemID == initialWallpaper.id ? 0 : 0.3)
+                .onSuccess { result in
+                    guard wallpaper.id == imageItemID else { return }
                     isImageLoaded = true
+                    onTransitionImageReady?(imageItemID, result.image)
+                    transitionSeed = nil
                 }
                 .onFailure { _ in
+                    guard wallpaper.id == imageItemID else { return }
                     isImageLoaded = true
                 }
-                .placeholder { _ in Color.clear }
+                .placeholder { _ in
+                    if let seed = activeTransitionSeed {
+                        Image(nsImage: seed)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: width, height: viewH)
+                            .clipped()
+                    } else {
+                        Color.clear
+                    }
+                }
                 .resizable()
                 .scaledToFill()
                 .frame(width: width, height: viewH)
@@ -414,7 +464,7 @@ struct WallpaperDetailSheet: View {
         ZStack {
             Color.black
 
-            if let image = sharedPortraitImage {
+            if let image = sharedPortraitImage ?? activeTransitionSeed {
                 // 左右延伸层：使用已加载的全分辨率图做横向拉伸和模糊
                 Image(nsImage: image)
                     .resizable()
@@ -427,8 +477,6 @@ struct WallpaperDetailSheet: View {
                     .mask(portraitWallpaperSideMask)
 
                 // 主图：降采样到屏幕分辨率（用已加载的同一张图，不再重复请求网络）
-                let scale = NSScreen.main?.backingScaleFactor ?? 2
-                let _ = CGSize(width: width * scale, height: height * scale)
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.medium)
@@ -454,15 +502,15 @@ struct WallpaperDetailSheet: View {
         .clipped()
         // 壁纸变化时重新加载；利用 Kingfisher 缓存，多数情况秒读
         .onChange(of: wallpaper.id) { _, _ in
-            loadPortraitImage()
+            loadPortraitImage(viewportSize: CGSize(width: width, height: height))
         }
         .onAppear {
-            loadPortraitImage()
+            loadPortraitImage(viewportSize: CGSize(width: width, height: height))
         }
     }
 
     /// 竖图专用：通过 Kingfisher 下载/缓存一次全分辨率图，供两个图层共用
-    private func loadPortraitImage() {
+    private func loadPortraitImage(viewportSize: CGSize) {
         guard let url = heroImageURL else {
             isImageLoaded = true
             return
@@ -471,14 +519,9 @@ struct WallpaperDetailSheet: View {
         portraitLoadTask?.cancel()
         // 重置共享图片（触发黑色背景，LoadingOverlay 保持显示）
         sharedPortraitImage = nil
-        isImageLoaded = false
-
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let screenSize = NSScreen.main?.frame.size ?? CGSize(width: 1512, height: 982)
-        let downsampleSize = CGSize(
-            width: max(screenSize.width, screenSize.height) * scale,
-            height: min(screenSize.width, screenSize.height) * scale
-        )
+        isImageLoaded = activeTransitionSeed != nil
+        let itemID = wallpaper.id
+        let downsampleSize = WallpaperTransitionImageLoader.targetPixelSize(viewportSize: viewportSize, displayScale: displayScale)
 
         portraitLoadTask = Task {
             do {
@@ -486,19 +529,22 @@ struct WallpaperDetailSheet: View {
                     with: url,
                     options: [
                         .processor(DownsamplingImageProcessor(size: downsampleSize)),
+                        .scaleFactor(1),
                         .backgroundDecode
                     ]
                 )
                 try Task.checkCancellation()
                 await MainActor.run {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, wallpaper.id == itemID else { return }
                     sharedPortraitImage = result.image
                     isImageLoaded = true
+                    onTransitionImageReady?(itemID, result.image)
+                    transitionSeed = nil
                 }
             } catch {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, wallpaper.id == itemID else { return }
                     isImageLoaded = true
                 }
             }

@@ -161,6 +161,25 @@ actor FourKWallpapersService {
         return html
     }
 
+    /// 原图下载请求。搜索页的浏览器头不能代替它：图片下载此前传空请求头，
+    /// Cloudflare 会对 CFNetwork 默认 UA 返回 403 challenge。
+    ///
+    /// 2026-11-07 用 `jisoo-glitter-3840x2160-27689.jpg` 实测：
+    /// 空请求头 / 模拟 App 默认 UA → 403；只加 Referer → 403；
+    /// 浏览器 UA（可单独生效）→ 200。补齐以下头后用 URLSession.download 连续两次
+    /// 完整取得 5,281,618B，并解码确认是 3840×2160 JPEG，含 403 后的重试。
+    static func imageHeaders(referer: String?) -> [String: String] {
+        var headers = [
+            "User-Agent": WallsflowService.browserUserAgent,
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        ]
+        if let referer, !referer.isEmpty {
+            headers["Referer"] = referer
+        }
+        return headers
+    }
+
     /// 伪装浏览器所需的请求头。UA 与 Wallsflow 共用同一份常量，避免各处漂移。
     static var browserLikeHeaders: [String: String] {
         [

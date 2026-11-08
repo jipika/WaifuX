@@ -198,6 +198,13 @@ class ExploreGridItem: NSCollectionViewItem {
     private var currentLoadingURL: URL?
     /// 上次 loadImage 的目标点尺寸；bounds 变大后需要按新尺寸重解码
     private var currentLoadingTargetSize: CGSize = .zero
+    /// 可见重配不经过 prepareForReuse；请求身份不能充当实际上屏图片的身份。
+    private var imageLoadGeneration: UInt64 = 0
+    private var currentLoadingImageIdentity: String?
+    private var displayedImageIdentity: String?
+    private weak var displayedIdentityImage: NSImage?
+    /// 默认不参与共享转场；由持有稳定模型 ID 的子类显式开启。
+    var cardTransitionItemID: String? { nil }
     private(set) var isHovered = false
     private var isHoverInteractionEnabled = true
     private var trackingArea: NSTrackingArea?
@@ -293,6 +300,10 @@ class ExploreGridItem: NSCollectionViewItem {
     override func prepareForReuse() {
         super.prepareForReuse()
 
+        imageLoadGeneration &+= 1
+        currentLoadingImageIdentity = nil
+        displayedImageIdentity = nil
+        displayedIdentityImage = nil
         kfDownloadTask?.cancel()
         kfDownloadTask = nil
         loadTask?.cancel()
@@ -382,6 +393,84 @@ class ExploreGridItem: NSCollectionViewItem {
         nil
     }
 
+    /// Alternate cover pipelines can register their successful displayed image without changing
+    /// cache ownership. The object check prevents an old completion from stamping a reused cover.
+    func recordDisplayedCardTransitionImage(_ image: NSImage?, itemID: String?) {
+        guard let image, let itemID, !itemID.isEmpty, coverImageView.image === image,
+              image.size.width > 0, image.size.height > 0 else {
+            displayedImageIdentity = nil
+            displayedIdentityImage = nil
+            return
+        }
+        displayedImageIdentity = itemID
+        displayedIdentityImage = image
+    }
+
+    /// 只捕获已经显示、且仍属于当前模型的封面，不触发加载或解码。
+    func cardTransitionSnapshot(for itemID: String) -> (image: NSImage, anchor: CardTransitionAnchor, window: NSWindow)? {
+        guard !itemID.isEmpty, cardTransitionItemID == itemID,
+              displayedImageIdentity == itemID,
+              isViewLoaded, let window = view.window,
+              window.isVisible, !window.isMiniaturized,
+              let windowContent = window.contentView,
+              coverImageView.window === window,
+              !coverImageView.isHiddenOrHasHiddenAncestor,
+              let image = coverImageView.image, displayedIdentityImage === image,
+              image.size.width > 0, image.size.height > 0,
+              let surfaceLayer = cardSurfaceView.layer,
+              surfaceLayer.superlayer === view.layer else { return nil }
+
+        // hover 只作用于内部 surface 的中心缩放；用同一 presentation 树映射到根视图，
+        // 不使用 layout frame，也不把 cover 的底栏算进源矩形。
+        // A just-mounted/reused card may still expose the previous zero-size presentation
+        // layer until Core Animation commits. It is not usable geometry for this visible cell.
+        let presentation = surfaceLayer.presentation()
+        let visualSurface = if let presentation, presentation.bounds.width > 8, presentation.bounds.height > 8,
+                               presentation.superlayer != nil {
+            presentation
+        } else {
+            surfaceLayer
+        }
+        guard let visualRoot = visualSurface.superlayer,
+              CATransform3DIsAffine(visualSurface.transform) else { return nil }
+        let transform = CATransform3DGetAffineTransform(visualSurface.transform)
+        guard transform.a > 0, transform.d > 0,
+              abs(transform.b) < 0.001, abs(transform.c) < 0.001,
+              abs(transform.a - transform.d) < 0.001 else { return nil }
+        let coverInSurface = cardSurfaceView.convert(coverImageView.bounds, from: coverImageView)
+        let coverInRoot = visualSurface.convert(coverInSurface, to: visualRoot)
+        let frameInWindow = view.convert(coverInRoot, to: nil)
+        let radius = coverImageView.layer?.presentation()?.cornerRadius
+            ?? coverImageView.layer?.cornerRadius ?? 0
+        let scale = frameInWindow.width / max(coverImageView.bounds.width, 1)
+        var visibleFrame = frameInWindow.intersection(windowContent.convert(windowContent.visibleRect, to: nil))
+        // The reveal needs a visible activation region, not an entirely visible photograph.
+        // Keep the full presentation rect for click fractions and intersect actual clipping roots.
+        var ancestor: NSView? = coverImageView
+        while let current = ancestor {
+            guard !current.isHidden, current.alphaValue > 0.01 else { return nil }
+            if current is NSClipView || current.layer?.masksToBounds == true,
+               current !== coverImageView, current !== containerView {
+                let visibleInWindow = current.convert(current.visibleRect, to: nil)
+                visibleFrame = visibleFrame.intersection(visibleInWindow)
+            }
+            ancestor = current.superview
+        }
+        guard CardTransitionAnchor(frameInWindow: frameInWindow, cornerRadius: radius * scale,
+                                   visibleFrameInWindow: visibleFrame).isUsable else { return nil }
+        let frameOnScreen = window.convertToScreen(visibleFrame)
+        let visibleOnScreens = NSScreen.screens.reduce(CGRect.null) { result, screen in
+            let intersection = screen.frame.intersection(frameOnScreen)
+            return intersection.isNull ? result : result.union(intersection)
+        }
+        guard !visibleOnScreens.isNull else { return nil }
+        visibleFrame = visibleFrame.intersection(window.convertFromScreen(visibleOnScreens))
+        let anchor = CardTransitionAnchor(frameInWindow: frameInWindow, cornerRadius: radius * scale,
+                                          visibleFrameInWindow: visibleFrame)
+        guard anchor.isUsable else { return nil }
+        return (image, anchor, window)
+    }
+
     /// 加载图片。传入单个 URL，使用 Kingfisher 内置缓存。
     func loadImage(url: URL?, targetSize: CGSize) {
         guard let url else { return }
@@ -407,23 +496,39 @@ class ExploreGridItem: NSCollectionViewItem {
     ///   提供该参数时启用渐进上屏：比例匹配的低清候选先显示，更高清候选下载完成后原地升级。
     /// - Parameter preferGIFMiddleFrame: true 时静态封面用 GIFAwareMiddleFrameImageProcessor：
     ///   候选确为多帧 GIF 就显示中间帧而非首帧（规避黑色开场帧常驻封面）。
+    /// - Parameter imageIdentity: 可选的稳定模型 ID；仅实际赋给封面后才标记为已显示。
     func loadImage(
         urls: [URL],
         targetSize: CGSize,
         preferredAspectRatio: CGFloat? = nil,
-        preferGIFMiddleFrame: Bool = false
+        preferGIFMiddleFrame: Bool = false,
+        imageIdentity: String? = nil
     ) {
-        guard !urls.isEmpty else { return }
+        guard !urls.isEmpty else {
+            if imageIdentity != nil || currentLoadingImageIdentity != nil {
+                imageLoadGeneration &+= 1
+                loadTask?.cancel()
+                loadTask = nil
+                kfDownloadTask?.cancel()
+                kfDownloadTask = nil
+                currentLoadingURL = nil
+                currentLoadingTargetSize = .zero
+                currentLoadingImageIdentity = imageIdentity
+                displayedImageIdentity = nil
+                displayedIdentityImage = nil
+            }
+            return
+        }
 
         let pointSize = CGSize(
             width: max(targetSize.width, 64),
             height: max(targetSize.height, 64)
         )
-        // URL 相同且目标尺寸没有明显变大时跳过（tab 切回 / 重复 configure）
+        // URL、模型身份相同且目标尺寸没有明显变大时跳过（tab 切回 / 重复 configure）。
         let sizeGrew =
             pointSize.width > currentLoadingTargetSize.width + 24
             || pointSize.height > currentLoadingTargetSize.height + 24
-        if urls.first == currentLoadingURL, !sizeGrew {
+        if urls.first == currentLoadingURL, currentLoadingImageIdentity == imageIdentity, !sizeGrew {
             return
         }
 
@@ -437,6 +542,13 @@ class ExploreGridItem: NSCollectionViewItem {
         // 0.90 才算够清晰；达不到则继续试下一档（original）。
         let goodEnoughPixelEdge = neededPixelEdge * 0.90
 
+        imageLoadGeneration &+= 1
+        let generation = imageLoadGeneration
+        if currentLoadingImageIdentity != imageIdentity {
+            displayedImageIdentity = nil
+            displayedIdentityImage = nil
+        }
+        currentLoadingImageIdentity = imageIdentity
         currentLoadingURL = urls.first
         currentLoadingTargetSize = pointSize
         // 取消上一轮的 Swift Task 与 Kingfisher 下载，避免重复下载堆积
@@ -444,7 +556,7 @@ class ExploreGridItem: NSCollectionViewItem {
         kfDownloadTask = nil
         loadTask?.cancel()
         loadTask = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled, self.imageLoadGeneration == generation else { return }
 
             let options: KingfisherOptionsInfo = [
                 .processor(
@@ -503,10 +615,11 @@ class ExploreGridItem: NSCollectionViewItem {
             var bestEdge: CGFloat = 0
             var bestAspectMatched = preferredAspectRatio == nil
             for url in urls {
-                guard !Task.isCancelled else { return }
-                guard let image = await self.retrieveImageCancellable(url: url, options: options) else {
+                guard !Task.isCancelled, self.imageLoadGeneration == generation else { return }
+                guard let image = await self.retrieveImageCancellable(url: url, options: options, generation: generation) else {
                     continue
                 }
+                guard !Task.isCancelled, self.imageLoadGeneration == generation else { return }
                 let pixelWidth = image.size.width * scale
                 let pixelHeight = image.size.height * scale
                 let imageEdge = max(pixelWidth, pixelHeight)
@@ -538,8 +651,10 @@ class ExploreGridItem: NSCollectionViewItem {
                     if preferredAspectRatio != nil, aspectMatched, !Task.isCancelled {
                         let candidate = image
                         _ = await MainActor.run { [weak self] in
-                            guard let self, !Task.isCancelled else { return }
+                            guard let self, !Task.isCancelled, self.imageLoadGeneration == generation else { return }
                             self.coverImageView.image = candidate
+                            self.displayedImageIdentity = imageIdentity
+                            self.displayedIdentityImage = candidate
                         }
                     }
                 }
@@ -557,25 +672,29 @@ class ExploreGridItem: NSCollectionViewItem {
             // Kingfisher 完成的句柄本身是死的，cancel 是 no-op；留着无害，
             // 由下次 loadImage / prepareForReuse / deinit 自然覆盖即可。
 
-            guard let finalImage = bestImage, !Task.isCancelled else { return }
+            guard let finalImage = bestImage, !Task.isCancelled, self.imageLoadGeneration == generation else { return }
             await MainActor.run { [weak self] in
-                guard let self, !Task.isCancelled else { return }
+                guard let self, !Task.isCancelled, self.imageLoadGeneration == generation else { return }
                 self.coverImageView.image = finalImage
+                self.displayedImageIdentity = imageIdentity
+                self.displayedIdentityImage = finalImage
             }
             // 列表默认只显示静态封面，不再自动探测/解码 GIF。
             // 历史路径会在每张图加载后 Range 探测 + gifRepresentation + 最多 20 帧解码，
             // 快速滚动时瞬时峰值可到数 GB；hover 时再按需启动动画即可。
-            guard !Task.isCancelled, shouldAutoAnimateGIFOnLoad, let probeURL = urls.first else { return }
+            guard !Task.isCancelled, self.imageLoadGeneration == generation,
+                  shouldAutoAnimateGIFOnLoad, let probeURL = urls.first else { return }
             try? await Task.sleep(nanoseconds: 200_000_000)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.imageLoadGeneration == generation else { return }
             let isGIF = await AnimatedImageProbeCache.shared.isAnimatedGIF(
                 probeURL,
                 maxByteCount: 18 * 1024 * 1024
             )
-            guard !Task.isCancelled, isGIF, let image = bestImage else { return }
+            guard !Task.isCancelled, self.imageLoadGeneration == generation, isGIF, let image = bestImage else { return }
             if let gifData = image.kf.gifRepresentation() {
                 await MainActor.run { [weak self] in
-                    self?.startAnimatingIfAnimated(data: gifData)
+                    guard let self, !Task.isCancelled, self.imageLoadGeneration == generation else { return }
+                    self.startAnimatingIfAnimated(data: gifData)
                 }
             }
         }
@@ -590,9 +709,11 @@ class ExploreGridItem: NSCollectionViewItem {
     @MainActor
     private func retrieveImageCancellable(
         url: URL,
-        options: KingfisherOptionsInfo
+        options: KingfisherOptionsInfo,
+        generation: UInt64
     ) async -> NSImage? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<NSImage?, Never>) in
+        guard !Task.isCancelled, imageLoadGeneration == generation else { return nil }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<NSImage?, Never>) in
             let task: Kingfisher.DownloadTask? = KingfisherManager.shared.retrieveImage(
                 with: .network(url),
                 options: options,

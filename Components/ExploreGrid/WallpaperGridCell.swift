@@ -58,6 +58,7 @@ final class WallpaperGridCell: ExploreGridItem {
     // - 1.02 缩放：肉眼可感受到的"卡片往前推一下"
     // - overlay flash：基类默认 0.02 的微亮提示，是 anime hover 主要的"动起来"感受
     // - 边框动画：保留（边框宽 1.0 → 1.5、alpha 0.08 → 0.18）
+    override var cardTransitionItemID: String? { currentWallpaper?.id }
     override var hoverScaleFactor: CGFloat { 1.02 }
     // hoverOverlayMaxOpacity 不再覆写，使用基类默认 0.02；之前显式设 0 关掉了 overlay
     // 是"hover 像没动画"的主要原因。
@@ -150,7 +151,12 @@ final class WallpaperGridCell: ExploreGridItem {
         let targetSize = preferredImageTargetSize()
         wallpaperImageURLs = preferredImageURLs(for: wallpaper, targetSize: targetSize)
         lastImageTargetSize = targetSize
-        loadImage(urls: wallpaperImageURLs, targetSize: targetSize, preferredAspectRatio: coverAspectRatio())
+        loadImage(
+            urls: wallpaperImageURLs,
+            targetSize: targetSize,
+            preferredAspectRatio: coverAspectRatio(),
+            imageIdentity: wallpaper.id
+        )
 
         // 在文本确定后立即计算并缓存各子视图的 fittingSize；
         // 后续 layoutContentFrames/layout 中直接读取缓存，避免重复测量。
@@ -216,7 +222,12 @@ final class WallpaperGridCell: ExploreGridItem {
             if urls != wallpaperImageURLs || sizeChanged {
                 wallpaperImageURLs = urls
                 lastImageTargetSize = targetSize
-                loadImage(urls: wallpaperImageURLs, targetSize: targetSize, preferredAspectRatio: coverAspectRatio())
+                loadImage(
+                    urls: wallpaperImageURLs,
+                    targetSize: targetSize,
+                    preferredAspectRatio: coverAspectRatio(),
+                    imageIdentity: currentWallpaper.id
+                )
             }
         }
     }

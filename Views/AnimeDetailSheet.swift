@@ -9,21 +9,47 @@ struct AnimeDetailSheet: View {
     // 使用 AnimeSearchResult 作为数据源
     let anime: AnimeSearchResult
     @Binding var isPresented: Bool
+    let onTransitionReady: (() -> Void)?
+    let onTransitionImageReady: ((String, NSImage) -> Void)?
+    let onDisplayedItemChange: ((String) -> Void)?
+    let onTransitionLayoutChange: ((Bool) -> Void)?
+    private let usesCardTransition: Bool
 
-    // 支持可选类型的 Binding（用于 ContentView 的 selectedAnime）
-    init(anime: AnimeSearchResult, isPresented: Binding<Bool>) {
+    // The transition image intentionally seeds this destination once. Route identity remains
+    // anime.id; later decoded images replace the seed without delaying destination readiness.
+    init(anime: AnimeSearchResult, isPresented: Binding<Bool>,
+         transitionImage: NSImage? = nil, onTransitionReady: (() -> Void)? = nil,
+         onTransitionImageReady: ((String, NSImage) -> Void)? = nil,
+         onDisplayedItemChange: ((String) -> Void)? = nil,
+         onTransitionLayoutChange: ((Bool) -> Void)? = nil) {
         self.anime = anime
         self._isPresented = isPresented
+        self.onTransitionReady = onTransitionReady
+        self.onTransitionImageReady = onTransitionImageReady
+        self.onDisplayedItemChange = onDisplayedItemChange
+        self.onTransitionLayoutChange = onTransitionLayoutChange
+        self.usesCardTransition = transitionImage != nil
+        self._transitionSeed = State(initialValue: transitionImage)
+        self._sharedPortraitImage = State(initialValue: transitionImage)
+        self._isImageLoaded = State(initialValue: transitionImage != nil)
         self._viewModel = StateObject(wrappedValue: AnimeDetailViewModel(anime: anime))
     }
 
-    init(anime: AnimeSearchResult, selectedAnime: Binding<AnimeSearchResult?>) {
-        self.anime = anime
-        self._isPresented = Binding(
-            get: { selectedAnime.wrappedValue != nil },
-            set: { if !$0 { selectedAnime.wrappedValue = nil } }
+    init(anime: AnimeSearchResult, selectedAnime: Binding<AnimeSearchResult?>,
+         transitionImage: NSImage? = nil, onTransitionReady: (() -> Void)? = nil,
+         onTransitionImageReady: ((String, NSImage) -> Void)? = nil,
+         onDisplayedItemChange: ((String) -> Void)? = nil,
+         onTransitionLayoutChange: ((Bool) -> Void)? = nil) {
+        self.init(
+            anime: anime,
+            isPresented: Binding(
+                get: { selectedAnime.wrappedValue != nil },
+                set: { if !$0 { selectedAnime.wrappedValue = nil } }
+            ),
+            transitionImage: transitionImage, onTransitionReady: onTransitionReady,
+            onTransitionImageReady: onTransitionImageReady, onDisplayedItemChange: onDisplayedItemChange,
+            onTransitionLayoutChange: onTransitionLayoutChange
         )
-        self._viewModel = StateObject(wrappedValue: AnimeDetailViewModel(anime: anime))
     }
 
     @StateObject private var viewModel: AnimeDetailViewModel
@@ -34,6 +60,10 @@ struct AnimeDetailSheet: View {
     @State private var isHeroContentHidden = false
     @State private var backdropAverageLuminance: Double?
     @State private var coverAverageLuminance: Double?
+    @State private var transitionSeed: NSImage?
+    @State private var landscapeImage: NSImage?
+    @State private var backdropLookupTask: Task<Void, Never>?
+    @Environment(\.displayScale) private var displayScale
 
     // MARK: - 键盘快捷键
     @State private var keyboardMonitor: Any?
@@ -43,8 +73,6 @@ struct AnimeDetailSheet: View {
     @State private var isLoadingBackdrop = false
     /// 竖图模式下全分辨率图加载一次，供模糊延伸层与主图层共用
     @State private var sharedPortraitImage: NSImage?
-    /// 竖图加载任务跟踪
-    @State private var portraitLoadTask: Task<Void, Never>?
 
     // 挤压动画配置
     private let squeezeThreshold: CGFloat = 80
@@ -139,10 +167,8 @@ struct AnimeDetailSheet: View {
                     .ignoresSafeArea()
                     .coordinateSpace(name: "scroll")
 
-                // 背景图区域（包含双图叠加过渡）
-                if isVisible {
-                    layeredBackgroundView(width: viewW, height: viewH)
-                }
+                // Render the seed on the first layout, before onAppear hands off the overlay.
+                layeredBackgroundView(width: viewW, height: viewH)
 
                 // 加载动画（仅在两张图都未加载完成时显示）
                 if !isImageLoaded {
@@ -235,24 +261,43 @@ struct AnimeDetailSheet: View {
                 )
                 .zIndex(100)
             }
+            .task(id: portraitRequestKey(viewportSize: geometry.size)) {
+                await loadPortraitImage(viewportSize: geometry.size)
+            }
         }
         .ignoresSafeArea()
         .navigationBarBackButtonHidden(true)
         .onAppear {
-            withAnimation(.easeOut(duration: 0.15).delay(0.05)) {
+            // Native chrome and the seeded backdrop are ready immediately; image/network
+            // completion must not gate the liquid overlay's handoff.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
                 isVisible = true
             }
+            onDisplayedItemChange?(anime.id)
+            onTransitionReady?()
             loadBackdrop()
-            loadPortraitImage()
             setupKeyboardMonitor()
-
-            // 加载规则数据
-            Task {
-                await viewModel.loadData()
-            }
+        }
+        .task(id: anime.id) {
+            await viewModel.loadData()
+        }
+        .onChange(of: anime.id) { _, itemID in
+            transitionSeed = nil
+            sharedPortraitImage = nil
+            landscapeImage = nil
+            backdropURL = nil
+            backdropAverageLuminance = nil
+            coverAverageLuminance = nil
+            isImageLoaded = false
+            onDisplayedItemChange?(itemID)
+            loadBackdrop()
         }
         .onDisappear {
             isVisible = false
+            backdropLookupTask?.cancel()
+            backdropLookupTask = nil
             removeKeyboardMonitor()
         }
     }
@@ -290,22 +335,20 @@ struct AnimeDetailSheet: View {
 
     // MARK: - 加载横屏背景
     private func loadBackdrop() {
+        backdropLookupTask?.cancel()
         isLoadingBackdrop = true
-        Task {
+        let itemID = anime.id
+        backdropLookupTask = Task { @MainActor in
             let url = await TMDBService.shared.fetchBackdropURL(
                 for: anime.displayTitle,
                 originalName: anime.originalName ?? anime.title
             )
-
-            await MainActor.run {
-                self.backdropURL = url
-                self.backdropAverageLuminance = nil
-                self.isLoadingBackdrop = false
-
-                // 图片加载状态会在 AsyncImage 的 onAppear 中设置
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    self.isImageLoaded = true
-                }
+            guard !Task.isCancelled, isVisible, anime.id == itemID else { return }
+            backdropURL = url
+            backdropAverageLuminance = nil
+            isLoadingBackdrop = false
+            if url == nil, coverImageURL == nil {
+                isImageLoaded = true
             }
         }
     }
@@ -355,22 +398,37 @@ struct AnimeDetailSheet: View {
         .ignoresSafeArea()
     }
 
-    /// 横图背景：铺满整屏
+    /// 横图背景：铺满整屏；请求期间保留已显示的封面，避免 seed 交接后闪黑。
     private func landscapeBackground(width: CGFloat, height: CGFloat) -> some View {
-        ZStack {
-            Color(hex: "0A0A0C").frame(width: width, height: height)
-            KFImage(backdropURL.flatMap { URL(string: $0) })
+        let itemID = anime.id
+        let imageURL = backdropURL
+        return ZStack {
+            if landscapeImage == nil {
+                portraitBackground(width: width, height: height)
+            }
+            KFImage(imageURL.flatMap { URL(string: $0) })
+                .setProcessor(DownsamplingImageProcessor(size: transitionTargetSize(viewportSize: CGSize(width: width, height: height))))
+                .scaleFactor(1)
+                .backgroundDecode()
                 .cacheMemoryOnly(false)
-                .fade(duration: 0.3)
+                .fade(duration: usesCardTransition ? 0 : 0.3)
                 .onSuccess { result in
+                    guard anime.id == itemID, backdropURL == imageURL else { return }
+                    landscapeImage = result.image
                     backdropAverageLuminance = Self.averageLuminance(from: result.image)
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        isImageLoaded = true
-                    }
+                    isImageLoaded = true
+                    transitionSeed = nil
+                    onTransitionLayoutChange?(true)
+                    onTransitionImageReady?(itemID, result.image)
                 }
                 .onFailure { _ in
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        isImageLoaded = true
+                    guard anime.id == itemID, backdropURL == imageURL else { return }
+                    backdropURL = nil
+                    landscapeImage = nil
+                    isImageLoaded = true
+                    if let image = sharedPortraitImage {
+                        onTransitionLayoutChange?(false)
+                        onTransitionImageReady?(itemID, image)
                     }
                 }
                 .placeholder { _ in Color.clear }
@@ -386,7 +444,7 @@ struct AnimeDetailSheet: View {
         ZStack {
             Color.black
 
-            if let image = sharedPortraitImage {
+            if let image = sharedPortraitImage ?? transitionSeed {
                 // 左右延伸层：横向拉伸和模糊
                 Image(nsImage: image)
                     .resizable()
@@ -436,42 +494,47 @@ struct AnimeDetailSheet: View {
         .frame(width: width, height: height, alignment: .center)
     }
 
-    /// 竖图专用：通过 Kingfisher 下载/缓存一次全分辨率图，供两个图层共用
-    private func loadPortraitImage() {
-        guard let url = coverImageURL else { return }
-        portraitLoadTask?.cancel()
-        sharedPortraitImage = nil
+    private func transitionTargetSize(viewportSize: CGSize) -> CGSize {
+        WallpaperTransitionImageLoader.targetPixelSize(viewportSize: viewportSize, displayScale: displayScale)
+    }
 
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let screenSize = NSScreen.main?.frame.size ?? CGSize(width: 1512, height: 982)
-        let downsampleSize = CGSize(
-            width: max(screenSize.width, screenSize.height) * scale,
-            height: min(screenSize.width, screenSize.height) * scale
-        )
+    private func portraitRequestKey(viewportSize: CGSize) -> String {
+        let size = transitionTargetSize(viewportSize: viewportSize)
+        return "\(anime.id)|\(coverImageURL?.absoluteString ?? "")|\(Int(size.width.rounded(.up)))x\(Int(size.height.rounded(.up)))"
+    }
 
-        portraitLoadTask = Task {
-            do {
-                let result = try await KingfisherManager.shared.retrieveImage(
-                    with: url,
-                    options: [
-                        .processor(DownsamplingImageProcessor(size: downsampleSize)),
-                        .backgroundDecode
-                    ]
-                )
-                try Task.checkCancellation()
-                await MainActor.run {
-                    guard !Task.isCancelled else { return }
-                    sharedPortraitImage = result.image
-                    coverAverageLuminance = Self.averageLuminance(from: result.image)
-                    isImageLoaded = true
-                }
-            } catch {
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard !Task.isCancelled else { return }
-                    isImageLoaded = true
-                }
+    /// Both portrait layers share one decoded image. Keep the initial seed visible throughout
+    /// loading, size changes and failure; size/scale belong to this hosting window.
+    @MainActor
+    private func loadPortraitImage(viewportSize: CGSize) async {
+        guard viewportSize.width > 0, viewportSize.height > 0 else { return }
+        guard let url = coverImageURL else {
+            if !isLoadingBackdrop, backdropURL == nil { isImageLoaded = true }
+            return
+        }
+        let itemID = anime.id
+        do {
+            let result = try await KingfisherManager.shared.retrieveImage(
+                with: url,
+                options: [
+                    .processor(DownsamplingImageProcessor(size: transitionTargetSize(viewportSize: viewportSize))),
+                    .scaleFactor(1),
+                    .backgroundDecode
+                ]
+            )
+            try Task.checkCancellation()
+            guard anime.id == itemID else { return }
+            sharedPortraitImage = result.image
+            coverAverageLuminance = Self.averageLuminance(from: result.image)
+            isImageLoaded = true
+            if landscapeImage == nil {
+                transitionSeed = nil
+                onTransitionLayoutChange?(false)
+                onTransitionImageReady?(itemID, result.image)
             }
+        } catch {
+            guard !Task.isCancelled, anime.id == itemID else { return }
+            isImageLoaded = true
         }
     }
 

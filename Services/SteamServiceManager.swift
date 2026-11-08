@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Security
 import CFNetwork
 
@@ -302,6 +303,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             self.updateOnMain {
                 self.loginState = .failed(message ?? "Steam 二维码登录失败。")
             }
+            self.resolveRestoreWaitersOnQueue(isLoggedIn: self.sessionIsLoggedIn)
         }
     }
 
@@ -351,6 +353,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             guard let self else { return }
             sendCommandOnQueue("cancelLogin")
             stopQRLoginOnQueue()
+            resolveRestoreWaitersOnQueue(isLoggedIn: sessionIsLoggedIn)
             finishLoginOnQueue(.failure(SteamServiceError.cancelled))
         }
     }
@@ -400,9 +403,8 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             throw sessionRestoreError()
         }
 
-        // 24 项一批的下载会在同一毫秒进入。启动前先尝试已有会话，避免第一批
-        // 在 Helper 尚未恢复时全被报成“未登录”。
-        start()
+        // waitForRestoredSessionIfNeeded starts and restores the service once;
+        // do not start another authentication between readiness and download.
         let taskID = UUID().uuidString
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
@@ -490,32 +492,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             return try await BackgroundRuntimeBridge.requestCodable("steam.subscriptions.wait", arguments: BackgroundPropertyList.encode(["start": startIndex]), resultKey: "page", as: SteamSubscriptionPage.self)
         }
 
-        let ready: Bool = await withCheckedContinuation { continuation in
-            ioQueue.async { [weak self] in
-                guard let self else {
-                    continuation.resume(returning: false)
-                    return
-                }
-                guard self.ensureStartedOnQueue() else {
-                    continuation.resume(returning: false)
-                    return
-                }
-                if self.sessionIsLoggedIn {
-                    continuation.resume(returning: true)
-                    return
-                }
-                if !self.restoringSession {
-                    self.restoreSessionOnQueue()
-                }
-                if self.restoringSession {
-                    self.restoreWaiters.append(continuation)
-                } else {
-                    // 无已保存会话可恢复（未登录或令牌失效）。
-                    continuation.resume(returning: false)
-                }
-            }
-        }
-        guard ready else {
+        guard await waitForRestoredSessionIfNeeded() else {
             throw sessionRestoreError()
         }
 
@@ -819,7 +796,12 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
 
     @discardableResult
     private func restoreSessionOnQueue() -> Bool {
-        guard loginContinuation == nil, !restoringSession else { return restoringSession }
+        // start() is also called by settings and downloads. Replaying a saved
+        // token into an already authenticated SteamClient yields InvalidParam;
+        // the subsequent failure used to erase the next launch's credentials.
+        guard !sessionIsLoggedIn, loginContinuation == nil, !qrLoginActive,
+              !restoringSession else { return restoringSession }
+        restoreLoginIDIfNeeded()
         guard let username = savedUsernameOnQueue(), !username.isEmpty else {
             return false
         }
@@ -906,7 +888,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 if !self.restoringSession {
                     self.restoreSessionOnQueue()
                 }
-                if self.restoringSession {
+                if self.restoringSession || self.loginContinuation != nil || self.qrLoginActive {
                     self.restoreWaiters.append(continuation)
                 } else {
                     continuation.resume(returning: false)
@@ -973,6 +955,9 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         case "connecting", "authenticating", "reconnecting":
             if state == "reconnecting" {
                 sessionIsLoggedIn = false
+                // SteamKit2 already owns this recovery. Downloads join it instead
+                // of replaying restoreSession into another active authentication.
+                restoringSession = true
             }
             updateOnMain {
                 self.loginState = .loggingIn
@@ -1002,20 +987,31 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         case "loggedIn":
             stopQRLoginOnQueue()
             let resolvedSteamID = event["steamId"] as? String ?? steamID
-            var persistedToken = true
+            var persistenceFailure: OSStatus?
             if let token = event["refreshToken"] as? String, !token.isEmpty {
                 let status = setKeychainValue(token, account: refreshTokenAccount(resolvedUsername))
-                persistedToken = status == errSecSuccess
-                if !persistedToken {
-                    AppLogger.error(.download, "Steam 会话令牌保存失败", metadata: ["keychainStatus": String(status)])
+                if status != errSecSuccess { persistenceFailure = status }
+            } else {
+                // Restored/reconnected events contain no new token. Do not report
+                // persistence success unless the existing item can still be read.
+                switch keychainRead(account: refreshTokenAccount(resolvedUsername)) {
+                case .value: break
+                case .notFound: persistenceFailure = errSecItemNotFound
+                case .failure(let status): persistenceFailure = status
                 }
+            }
+            let persistenceMessage = persistenceFailure.map { status in
+                "Steam 已连接，但会话未能保存到 macOS 钥匙串（错误 \(status)）。重启或更新后将需要重新登录，请检查钥匙串访问权限后重试登录。"
+            }
+            if let status = persistenceFailure {
+                AppLogger.error(.download, "Steam 会话令牌保存失败", metadata: ["keychainStatus": String(status)])
             }
             if let guardData = event["guardData"] as? String, !guardData.isEmpty {
                 _ = setKeychainValue(guardData, account: guardDataAccount(resolvedUsername))
             }
             WaifuXPreferences.shared.set(resolvedUsername, forKey: usernameKey)
             lastRestoreFailureMessage = nil
-            AppLogger.info(.download, "Steam 会话已连接", metadata: ["steamID": resolvedSteamID, "tokenPersisted": persistedToken ? "1" : "0"])
+            AppLogger.info(.download, "Steam 会话已连接", metadata: ["steamID": resolvedSteamID, "tokenPersisted": persistenceFailure == nil ? "1" : "0"])
             restoringSession = false
             restartCount = 0
             sessionIsLoggedIn = true
@@ -1024,13 +1020,22 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 self.isLoggedIn = true
                 self.accountName = resolvedUsername
                 self.steamID = resolvedSteamID
-                self.loginState = .success
+                self.loginState = persistenceMessage.map { .failed($0) } ?? .success
             }
             if loginContinuation != nil {
-                finishLoginOnQueue(.success(()))
+                if let persistenceMessage {
+                    finishLoginOnQueue(.failure(SteamServiceError.authenticationFailed(
+                        persistenceMessage, "SESSION_PERSIST_FAILED"
+                    )))
+                } else {
+                    finishLoginOnQueue(.success(()))
+                }
             }
         case "loggedOut":
             let wasRestoring = restoringSession
+            let message = event["message"] as? String
+                ?? "Steam 会话已断开，请重试；如仍失败，请到「设置 → Steam 服务」重新登录。"
+            if wasRestoring { lastRestoreFailureMessage = message }
             stopQRLoginOnQueue()
             restoringSession = false
             sessionIsLoggedIn = false
@@ -1038,12 +1043,10 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             updateOnMain {
                 self.isLoggedIn = false
                 self.steamID = ""
-                self.loginState = wasRestoring ? .failed("保存的 Steam 会话已失效，请重新登录。") : .idle
+                self.loginState = wasRestoring ? .failed(message) : .idle
             }
-            if wasRestoring, let username = savedUsernameOnQueue() {
-                _ = deleteKeychainValue(account: refreshTokenAccount(username))
-                _ = deleteKeychainValue(account: guardDataAccount(username))
-            }
+            // Cancellation, reconnects and auth replacement also emit loggedOut.
+            // Only explicit logout() removes persisted tokens and guard data.
         case "failed":
             let message = event["message"] as? String ?? "Steam 登录失败。"
             let errorCode = event["errorCode"] as? String
@@ -1059,11 +1062,9 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             restoringSession = false
             sessionIsLoggedIn = false
             resolveRestoreWaitersOnQueue(isLoggedIn: false)
-            if wasRestoring, errorCode == "AUTH_FAILED",
-               let username = savedUsernameOnQueue() {
-                _ = deleteKeychainValue(account: refreshTokenAccount(username))
-                _ = deleteKeychainValue(account: guardDataAccount(username))
-            }
+            // AUTH_FAILED also wraps InvalidParam and other login-state errors;
+            // it is not proof that the stored token or guard data is revoked.
+            // Keep both until explicit logout or a successful login replaces them.
             updateOnMain {
                 self.isLoggedIn = false
                 self.loginState = .failed(message)
@@ -1084,6 +1085,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         case .success:
             continuation.resume()
         case .failure(let error):
+            resolveRestoreWaitersOnQueue(isLoggedIn: sessionIsLoggedIn)
             continuation.resume(throwing: error)
         }
     }

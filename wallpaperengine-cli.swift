@@ -539,19 +539,65 @@ private func webWallpaperFileReadAccessURL(projectContentDir: URL, cliWallpaperP
     return projectContentDir
 }
 
-/// 解析 Workshop Web 壁纸的依赖路径。支持同级 workshop 目录与向上回溯 steamapps/workshop/content/431960。
+/// Find an installed dependency in either Steam or WaifuX's per-item download layout.
+/// Never treat a download container (or .staging contents) as a ready project.
 private func resolveWallpaperDependencyPath(from contentDir: URL, dependencyID: String) -> URL? {
+    guard !dependencyID.isEmpty,
+          dependencyID.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }) else { return nil }
     let fm = FileManager.default
-    // 1. 同级 workshop 目录（如 .../431960/<id>/ 的同级）
-    let candidate1 = contentDir.deletingLastPathComponent().appendingPathComponent(dependencyID)
-    if fm.fileExists(atPath: candidate1.path) { return candidate1 }
+    var visited: Set<String> = []
 
-    // 2. 向上回溯寻找 steamapps/workshop/content/431960/<dependencyID>
-    var current = contentDir
-    for _ in 0..<6 {
-        current = current.deletingLastPathComponent()
-        let candidate = current.appendingPathComponent("steamapps/workshop/content/431960/\(dependencyID)")
-        if fm.fileExists(atPath: candidate.path) { return candidate }
+    func installedProject(at candidate: URL) -> URL? {
+        var root = candidate.standardizedFileURL
+        // Only descend an unambiguous wrapper chain, never pick another project's
+        // alphabetically first directory out of a shared download container.
+        for _ in 0..<8 {
+            guard !root.pathComponents.contains(".staging"),
+                  !root.resolvingSymlinksInPath().pathComponents.contains(".staging"),
+                  visited.insert(root.path).inserted,
+                  (try? root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return nil }
+            let project = root.appendingPathComponent("project.json")
+            if fm.fileExists(atPath: project.path) {
+                guard !project.resolvingSymlinksInPath().pathComponents.contains(".staging"),
+                      (try? project.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                      let data = try? Data(contentsOf: project),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                if let projectID = json["workshopid"] as? String,
+                   !projectID.isEmpty, projectID != dependencyID { return nil }
+                return root
+            }
+            guard let entries = try? fm.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            ) else { return nil }
+            let directories = entries.filter {
+                (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }
+            guard directories.count == 1 else { return nil }
+            root = directories[0]
+        }
+        return nil
+    }
+
+    var ancestor = contentDir.standardizedFileURL
+    guard !ancestor.pathComponents.contains(".staging"),
+          !ancestor.resolvingSymlinksInPath().pathComponents.contains(".staging") else { return nil }
+    for _ in 0..<10 {
+        let parent = ancestor.deletingLastPathComponent()
+        if parent == ancestor { break }
+        ancestor = parent
+        let container = ancestor.appendingPathComponent("workshop_\(dependencyID)")
+        // Exact roots before wrappers. Covers Media/workshop_ID/ID, legacy Steam
+        // downloads, direct numeric siblings, and flattened local imports.
+        let candidates = [
+            ancestor.appendingPathComponent(dependencyID),
+            container.appendingPathComponent(dependencyID),
+            container.appendingPathComponent("steamapps/workshop/content/431960/\(dependencyID)"),
+            ancestor.appendingPathComponent("steamapps/workshop/content/431960/\(dependencyID)"),
+            container
+        ]
+        for candidate in candidates {
+            if let project = installedProject(at: candidate) { return project }
+        }
     }
     return nil
 }
@@ -564,23 +610,31 @@ private func mergeWallpaperWithDependency(contentDir: URL, dependencyDir: URL) -
         .appendingPathComponent("wallpaperengine_merged_\(contentDir.lastPathComponent)_\(dependencyDir.lastPathComponent)_\(UUID().uuidString.prefix(8))")
     do {
         try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        // 先复制依赖内容
-        if let depEntries = try? fm.contentsOfDirectory(at: dependencyDir, includingPropertiesForKeys: nil) {
-            for entry in depEntries {
-                let dest = tempDir.appendingPathComponent(entry.lastPathComponent)
-                if !fm.fileExists(atPath: dest.path) {
-                    try? fm.copyItem(at: entry, to: dest)
+        let tempRoot = tempDir.resolvingSymlinksInPath()
+        func overlay(_ source: URL, onto destination: URL) throws {
+            // All replacement targets belong to this newly created temporary tree.
+            // Never recurse through a dependency's directory symlink into its source.
+            let parent = destination.deletingLastPathComponent().resolvingSymlinksInPath()
+            guard parent.path == tempRoot.path || parent.path.hasPrefix(tempRoot.path + "/") else {
+                throw NSError(domain: "WallpaperDependencyMerge", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Merge destination escaped temporary directory"])
+            }
+            let sourceType = try fm.attributesOfItem(atPath: source.path)[.type] as? FileAttributeType
+            let destinationType = (try? fm.attributesOfItem(atPath: destination.path)[.type]) as? FileAttributeType
+            if sourceType == .typeDirectory, destinationType == .typeDirectory {
+                for entry in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) {
+                    try overlay(entry, onto: destination.appendingPathComponent(entry.lastPathComponent))
                 }
+            } else {
+                if destinationType != nil { try fm.removeItem(at: destination) }
+                try fm.copyItem(at: source, to: destination)
             }
         }
-        // 再复制主壁纸内容（覆盖依赖同名文件）
-        if let entries = try? fm.contentsOfDirectory(at: contentDir, includingPropertiesForKeys: nil) {
-            for entry in entries {
-                let dest = tempDir.appendingPathComponent(entry.lastPathComponent)
-                if fm.fileExists(atPath: dest.path) {
-                    try? fm.removeItem(at: dest)
-                }
-                try? fm.copyItem(at: entry, to: dest)
+        // Shared directories combine recursively; the preset wins only colliding
+        // files or file/directory conflicts, preserving unrelated dependency assets.
+        for directory in [dependencyDir, contentDir] {
+            for entry in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                try overlay(entry, onto: tempDir.appendingPathComponent(entry.lastPathComponent))
             }
         }
         dlog("[mergeWallpaperWithDependency] Merged to \(tempDir.path)")
@@ -589,6 +643,16 @@ private func mergeWallpaperWithDependency(contentDir: URL, dependencyDir: URL) -
         dlog("[mergeWallpaperWithDependency] Failed: \(error)")
         return nil
     }
+}
+
+private func webWallpaperIndexFile(in directory: URL, preferredFile: String) -> String? {
+    for file in [preferredFile, "index.html"] where !file.isEmpty {
+        let url = directory.appendingPathComponent(file)
+        if (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+            return file
+        }
+    }
+    return nil
 }
 
 private func resolveWebWallpaperEntry(path: String) -> (baseURL: URL, indexFile: String)? {
@@ -607,19 +671,25 @@ private func resolveWebWallpaperEntry(path: String) -> (baseURL: URL, indexFile:
         return nil
     }
     let file = json["file"] as? String ?? "index.html"
+    let dependency = json["dependency"] as? String
+    if let localIndex = webWallpaperIndexFile(in: contentDir, preferredFile: file) {
+        // Only our explicitly standalone template can bypass a declared dependency.
+        // Author pages may exist locally yet still need scripts/assets from it.
+        let localHTML = try? String(contentsOf: contentDir.appendingPathComponent(localIndex), encoding: .utf8)
+        let standalone = [2, 3].contains { version in
+            localHTML?.contains("<meta name=\"waifux-generated\" content=\"preset-slideshow-v\(version)\">") == true
+        }
+        if dependency?.isEmpty != false || standalone {
+            return (contentDir, localIndex)
+        }
+    }
 
     // 处理依赖：Web 预设（preset）常引用另一个壁纸作为依赖
-    if let dependency = json["dependency"] as? String, !dependency.isEmpty {
+    if let dependency, !dependency.isEmpty {
         if let depDir = resolveWallpaperDependencyPath(from: contentDir, dependencyID: dependency) {
             if let merged = mergeWallpaperWithDependency(contentDir: contentDir, dependencyDir: depDir) {
-                let mergedIndex = merged.appendingPathComponent(file)
-                if FileManager.default.fileExists(atPath: mergedIndex.path) {
-                    return (merged, file)
-                }
-                // 若指定文件不存在，尝试 fallback 到 index.html
-                let fallbackIndex = merged.appendingPathComponent("index.html")
-                if FileManager.default.fileExists(atPath: fallbackIndex.path) {
-                    return (merged, "index.html")
+                if let mergedIndex = webWallpaperIndexFile(in: merged, preferredFile: file) {
+                    return (merged, mergedIndex)
                 }
                 // fallback 失败，返回原始目录（至少主壁纸自己的文件存在）
                 dlog("[resolveWebWallpaperEntry] Merged dir missing \(file) and index.html, falling back to original dir")

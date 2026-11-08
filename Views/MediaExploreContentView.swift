@@ -103,6 +103,8 @@ struct MediaExploreContentView: View {
     @ObservedObject var viewModel: MediaExploreViewModel
     @Binding var selectedMedia: MediaItem?
     var isVisible: Bool = true
+    /// 点击时同步交给宿主；不发布源状态，避免整页因捕获封面而失效。
+    var onPrepareCardTransition: ((CardTransitionSource?) -> Void)? = nil
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
     @ObservedObject private var workshopSourceManager = WorkshopSourceManager.shared
@@ -442,9 +444,21 @@ struct MediaExploreContentView: View {
             },
             cellClass: MediaGridCell.self,
             onSelect: { idx in
-                guard idx < viewModel.items.count else { return }
+                guard viewModel.items.indices.contains(idx) else { return }
                 viewModel.preserveExploreFeedForDetailNavigation()
                 selectedMedia = viewModel.items[idx]
+            },
+            onSelectionSource: { idx, source in
+                guard isVisible, viewModel.items.indices.contains(idx),
+                      let source, source.itemID == viewModel.items[idx].id else {
+                    onPrepareCardTransition?(nil)
+                    return
+                }
+                // 所有封面比例均可参与；源只取 cell 已显示的静态 NSImage。
+                onPrepareCardTransition?(source)
+            },
+            selectionItemIdentifier: { idx in
+                viewModel.items.indices.contains(idx) ? viewModel.items[idx].id : ""
             },
             onVisibleItemsChange: nil,
             onScrollOffsetChange: { offset in
@@ -1800,6 +1814,7 @@ struct MediaExploreContentView: View {
                     isResolvingWorkshopURL = false
                     showWorkshopURLSheet = false
                     workshopURLInput = ""
+                    onPrepareCardTransition?(nil)
                     viewModel.preserveExploreFeedForDetailNavigation()
                     selectedMedia = item
                 }

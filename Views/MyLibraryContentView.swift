@@ -147,6 +147,8 @@ struct MyLibraryContentView: View {
     @Binding var wallpaperContext: [Wallpaper]
     @Binding var mediaContext: [MediaItem]
     let isVisible: Bool
+    // 默认值必须为 var 才会保留在 Swift 自动生成的 memberwise init 参数中。
+    var onPrepareCardTransition: ((CardTransitionSource?) -> Void)? = nil
     @State private var animeFavorites: [AnimeSearchResult] = []
 
     // 子标签：收藏 / 已下载
@@ -1358,6 +1360,22 @@ struct MyLibraryContentView: View {
                     handleWallpaperTap(item.wallpaper)
                 }
             },
+            onSelectionSource: { idx, source in
+                guard !editing, !isEditing, isVisible, selectedContentType == .wallpaper,
+                      !libraryGridPlaceholderVisible, entries.indices.contains(idx),
+                      case .item(let item) = entries[idx], !item.wallpaper.isPixivManga,
+                      libraryCardTransitionContentIsUnlocked(
+                          folderID: currentWallpaperFolderID, contentType: .wallpaper
+                      ), let source, source.itemID == item.wallpaper.id else {
+                    onPrepareCardTransition?(nil)
+                    return
+                }
+                onPrepareCardTransition?(source)
+            },
+            selectionItemIdentifier: { idx in
+                guard entries.indices.contains(idx), case .item(let item) = entries[idx] else { return "" }
+                return item.wallpaper.id
+            },
             onVisibleItemsChange: { indexPaths in
                 handleWallpaperVisibleChange(indexPaths, entries: entries)
             },
@@ -1479,7 +1497,12 @@ struct MyLibraryContentView: View {
             isCurrentWallpaper: isActiveWallpaperURL(item.localFileURL)
                 || isActiveWallpaperURL(item.wallpaper.fullImageURL),
             accent: accent,
-            makeMenuEntries: menuProvider
+            makeMenuEntries: menuProvider,
+            isCardTransitionAllowed: {
+                libraryCardTransitionContentIsUnlocked(
+                    folderID: currentWallpaperFolderID, contentType: .wallpaper
+                )
+            }
         )
     }
 
@@ -2236,6 +2259,22 @@ struct MyLibraryContentView: View {
                     handleMediaTap(item.mediaItem)
                 }
             },
+            onSelectionSource: { idx, source in
+                guard !editing, !isEditing, isVisible, selectedContentType == .video,
+                      !libraryGridPlaceholderVisible, entries.indices.contains(idx),
+                      case .item(let item) = entries[idx],
+                      libraryCardTransitionContentIsUnlocked(
+                          folderID: currentMediaFolderID, contentType: .media
+                      ), let source, source.itemID == item.mediaItem.id else {
+                    onPrepareCardTransition?(nil)
+                    return
+                }
+                onPrepareCardTransition?(source)
+            },
+            selectionItemIdentifier: { idx in
+                guard entries.indices.contains(idx), case .item(let item) = entries[idx] else { return "" }
+                return item.mediaItem.id
+            },
             onVisibleItemsChange: { indexPaths in
                 handleMediaVisibleChange(indexPaths, entries: entries)
             },
@@ -2374,7 +2413,12 @@ struct MyLibraryContentView: View {
             isCurrentWallpaper: isActiveWallpaperURL(item.localFileURL)
                 || isActiveWallpaperURL(item.resolvedVideoFileURL),
             accent: accent,
-            makeMenuEntries: menuProvider
+            makeMenuEntries: menuProvider,
+            isCardTransitionAllowed: {
+                libraryCardTransitionContentIsUnlocked(
+                    folderID: currentMediaFolderID, contentType: .media
+                )
+            }
         )
     }
 
@@ -3184,6 +3228,18 @@ struct MyLibraryContentView: View {
                 guard idx < items.count else { return }
                 handleAnimeTap(items[idx].searchResult)
             },
+            onSelectionSource: { idx, source in
+                guard !editing, !isEditing, isVisible, selectedContentType == .anime,
+                      selectedSubTab == .downloads, items.indices.contains(idx),
+                      let source, source.itemID == items[idx].searchResult.id else {
+                    onPrepareCardTransition?(nil)
+                    return
+                }
+                onPrepareCardTransition?(source)
+            },
+            selectionItemIdentifier: { idx in
+                items.indices.contains(idx) ? items[idx].searchResult.id : ""
+            },
             onVisibleItemsChange: { _ in },
             onScrollOffsetChange: { offset in
                 handleLibraryScroll(offset)
@@ -3235,6 +3291,18 @@ struct MyLibraryContentView: View {
             onSelect: { idx in
                 guard idx < items.count else { return }
                 handleAnimeTap(items[idx])
+            },
+            onSelectionSource: { idx, source in
+                guard !editing, !isEditing, isVisible, selectedContentType == .anime,
+                      selectedSubTab == .favorites, items.indices.contains(idx),
+                      let source, source.itemID == items[idx].id else {
+                    onPrepareCardTransition?(nil)
+                    return
+                }
+                onPrepareCardTransition?(source)
+            },
+            selectionItemIdentifier: { idx in
+                items.indices.contains(idx) ? items[idx].id : ""
             },
             onVisibleItemsChange: { indexPaths in
                 guard let maxIdx = indexPaths.map(\.item).max(), maxIdx < items.count else { return }
@@ -4082,6 +4150,23 @@ struct MyLibraryContentView: View {
     }
 
     // MARK: - Actions
+
+    /// 解锁状态在点击时重查；目录重配前的旧封面不能成为仍锁定内容的转场 seed。
+    private func libraryCardTransitionContentIsUnlocked(
+        folderID: String?,
+        contentType: LibraryFolder.FolderContentType
+    ) -> Bool {
+        var nextFolderID = folderID
+        var visited = Set<String>()
+        while let id = nextFolderID {
+            guard visited.insert(id).inserted,
+                  let folder = folderStore.folder(withID: id, contentType: contentType),
+                  !folder.isLocked || FolderLockService.shared.isFolderUnlocked(id) else { return false }
+            nextFolderID = folder.parentFolderID
+        }
+        return true
+    }
+
     private func handleWallpaperTap(_ wallpaper: Wallpaper) {
         if isEditing {
             toggleSelection(wallpaper.id)

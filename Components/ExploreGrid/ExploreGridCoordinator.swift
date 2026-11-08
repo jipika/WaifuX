@@ -99,12 +99,16 @@ private final class ExploreGridScrollView: NSScrollView {
 final class ExploreGridCollectionView: NSCollectionView {
     var defersClickUntilMouseUp = false
     var onDeferredClick: ((IndexPath) -> Void)?
+    private(set) var activationPointInWindow: CGPoint?
+    private var activationTimestamp: TimeInterval = 0
 
     private var isPressActive = false
     private var pressStartedDrag = false
     private var pendingClickIndexPath: IndexPath?
 
     override func mouseDown(with event: NSEvent) {
+        activationPointInWindow = event.locationInWindow
+        activationTimestamp = ProcessInfo.processInfo.systemUptime
         guard defersClickUntilMouseUp else {
             super.mouseDown(with: event)
             return
@@ -124,6 +128,29 @@ final class ExploreGridCollectionView: NSCollectionView {
         finishPress()
     }
 
+    override func keyDown(with event: NSEvent) {
+        activationPointInWindow = nil
+        super.keyDown(with: event)
+    }
+
+    /// Some AppKit selection callbacks arrive after mouseDown returns. Keep a single-use value
+    /// briefly, while keyboard/accessibility selection always falls back to the card center.
+    func consumeActivationPoint() -> CGPoint? {
+        defer { activationPointInWindow = nil }
+        if let event = NSApp.currentEvent, event.window === window {
+            switch event.type {
+            case .leftMouseDown, .leftMouseUp:
+                return event.locationInWindow
+            case .keyDown, .keyUp:
+                return nil
+            default:
+                break
+            }
+        }
+        guard isPressActive || ProcessInfo.processInfo.systemUptime - activationTimestamp < 0.35 else { return nil }
+        return activationPointInWindow
+    }
+
     /// 选中回调入口：按压进行中只暂存，返回 true；否则返回 false 由调用方立即执行。
     func deferClickIfPressing(_ indexPath: IndexPath) -> Bool {
         guard defersClickUntilMouseUp, isPressActive else { return false }
@@ -132,12 +159,14 @@ final class ExploreGridCollectionView: NSCollectionView {
     }
 
     func dragSessionDidBegin() {
+        activationPointInWindow = nil
         pressStartedDrag = true
         pendingClickIndexPath = nil
     }
 
     /// 拖拽会话吞掉了 mouseUp，这里收尾，避免按压状态残留到下一次键盘选择。
     func dragSessionDidEnd() {
+        activationPointInWindow = nil
         isPressActive = false
         pressStartedDrag = false
         pendingClickIndexPath = nil
@@ -145,6 +174,7 @@ final class ExploreGridCollectionView: NSCollectionView {
 
     private func finishPress() {
         guard isPressActive else { return }
+        defer { activationPointInWindow = nil }
         isPressActive = false
         let indexPath = pressStartedDrag ? nil : pendingClickIndexPath
         pendingClickIndexPath = nil
@@ -638,6 +668,52 @@ final class ExploreGridCoordinator: NSObject {
               parent.onPerformReorderDrop != nil else { return }
         collectionView.registerForDraggedTypes([.string])
         isRegisteredForReorderDrops = true
+    }
+
+    // MARK: - 封面共享转场源（可选）
+
+    private func selectionSource(at indexPath: IndexPath) -> CardTransitionSource? {
+        // A queued reload does not invalidate a read of an already displayed, identity-checked cell.
+        guard parent.isVisible,
+              let identify = parent.selectionItemIdentifier ?? parent.itemIdentifier,
+              collectionView.indexPathsForVisibleItems().contains(indexPath) else { return nil }
+        let itemID = identify(indexPath.item)
+        guard !itemID.isEmpty,
+              let cell = collectionView.item(at: indexPath) as? ExploreGridItem,
+              let snapshot = cell.cardTransitionSnapshot(for: itemID),
+              snapshot.window === collectionView.window,
+              snapshot.window === scrollView.window else { return nil }
+        let window = snapshot.window
+        return CardTransitionSource(
+            itemID: itemID,
+            image: snapshot.image,
+            anchor: snapshot.anchor,
+            window: window,
+            activationPointInWindow: (collectionView as? ExploreGridCollectionView)?.consumeActivationPoint()
+        ) { [weak self, weak window] in
+            guard let self, let window else { return nil }
+            return self.returnSelectionAnchor(for: itemID, in: window)
+        }
+    }
+
+    /// 根列表恢复可见并完成布局后，只在当前可见项里按稳定 ID 重找，不保留旧 indexPath/cell。
+    private func returnSelectionAnchor(for itemID: String, in window: NSWindow) -> CardTransitionAnchor? {
+        guard !itemID.isEmpty, parent.isVisible,
+              collectionView.window === window, scrollView.window === window,
+              let identify = parent.selectionItemIdentifier ?? parent.itemIdentifier else { return nil }
+        let count = parent.itemCount()
+        var anchor: CardTransitionAnchor?
+        for indexPath in collectionView.indexPathsForVisibleItems() {
+            guard indexPath.section == 0, indexPath.item >= 0, indexPath.item < count,
+                  identify(indexPath.item) == itemID else { continue }
+            // ID 重复、模型/已显示图片失配时回退；部分可见的封面仍可作为液滴锚点。
+            guard anchor == nil,
+                  let cell = collectionView.item(at: indexPath) as? ExploreGridItem,
+                  let snapshot = cell.cardTransitionSnapshot(for: itemID),
+                  snapshot.window === window else { return nil }
+            anchor = snapshot.anchor
+        }
+        return anchor
     }
 
     // MARK: - 换序移动动画（拖拽排序落地）
@@ -1275,6 +1351,9 @@ extension ExploreGridCoordinator: NSCollectionViewDelegate {
         guard indexPath.section == 0,
               indexPath.item >= 0,
               indexPath.item < parent.itemCount() else { return }
+        if let onSelectionSource = parent.onSelectionSource {
+            onSelectionSource(indexPath.item, selectionSource(at: indexPath))
+        }
         parent.onSelect?(indexPath.item)
     }
 

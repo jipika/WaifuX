@@ -12,6 +12,21 @@ struct MediaDetailSheet: View {
     let onClose: () -> Void
     /// 当需要在 NavigationStack 中 push 新媒体项时调用（如作者列表点击）
     let onNavigateToItem: ((MediaItem) -> Void)?
+    let onTransitionReady: (() -> Void)?
+    let onTransitionImageReady: ((String, NSImage) -> Void)?
+    let onDisplayedItemChange: ((String) -> Void)?
+    private let usesCardTransition: Bool
+    private let isCardTransitionActive: Bool
+    private let isCardTransitionClosing: Bool
+    private let isPreparingTransitionImage: Bool
+    private let preparedTransitionImage: NSImage?
+    @Environment(\.displayScale) private var displayScale
+    /// 有意只在创建详情时取一次种子；切换媒体项后不能复用原卡片图像。
+    @State private var transitionSeed: NSImage?
+    @State private var displayedVideoURL: URL?
+    @State private var loadedBackgroundCoverURL: URL?
+    @State private var loadedBackgroundCoverSize: CGSize = .zero
+    @State private var backgroundImageResult: DetailBackgroundImageResult?
 
     @ObservedObject private var wallpaperManager = VideoWallpaperManager.shared
     @ObservedObject private var mediaLibrary = MediaLibraryService.shared
@@ -93,6 +108,65 @@ struct MediaDetailSheet: View {
     @State private var coverForceRefresh = false
     /// 删除烘焙 / 本地预览源变化时递增，强制详情背景重建（避免仍挂已删 MP4 黑屏）
     @State private var mediaBackgroundEpoch: Int = 0
+    /// Read-through memoization, owned by this detail lifetime; no per-frame state publication.
+    @State private var localResourceQueries = DetailLocalResourceQueries()
+
+    private struct DetailLocalResourceContext: Equatable {
+        let itemID: String
+        let localPath: String?
+        let downloadedAt: Date?
+        let recordUpdatedAt: Date?
+        let backgroundEpoch: Int
+    }
+
+    private struct DetailBackgroundImageRequest: Equatable {
+        let context: DetailLocalResourceContext
+        let isBaking: Bool
+        let isPinnedRemote: Bool
+        let coverURL: URL
+        let isActive: Bool
+    }
+
+    private struct DetailBackgroundImageResult {
+        let request: DetailBackgroundImageRequest
+        let url: URL
+    }
+
+    private var backgroundImageRequest: DetailBackgroundImageRequest {
+        DetailBackgroundImageRequest(context: localResourceContext, isBaking: isBakingScene,
+                                     isPinnedRemote: isBackgroundPinnedToRemote,
+                                     coverURL: resolvedItem.coverImageURL,
+                                     isActive: shouldActivateMediaBackground)
+    }
+
+    private final class DetailLocalResourceQueries {
+        private struct Box<Value> { let value: Value }
+        private var context: DetailLocalResourceContext?
+        private var entries: [String: Any] = [:]
+
+        func invalidate() {
+            context = nil
+            entries.removeAll(keepingCapacity: true)
+        }
+
+        func value<Value>(for query: String, context: DetailLocalResourceContext, compute: () -> Value) -> Value {
+            if self.context != context {
+                self.context = context
+                entries.removeAll(keepingCapacity: true)
+            }
+            if let cached = entries[query] as? Box<Value> { return cached.value }
+            let result = compute()
+            entries[query] = Box(value: result)
+            return result
+        }
+    }
+
+    private var localResourceContext: DetailLocalResourceContext {
+        let record = currentDownloadRecord
+        return DetailLocalResourceContext(itemID: resolvedItem.id, localPath: record?.localFilePath,
+                                          downloadedAt: record?.downloadedAt, recordUpdatedAt: record?.metadata.updatedAt,
+                                          backgroundEpoch: mediaBackgroundEpoch)
+    }
     @State private var isResettingVideoOptimization = false
     @State private var isTranscodingVideo = false
     @State private var transcodeVideoProgress: Double = 0
@@ -126,13 +200,49 @@ struct MediaDetailSheet: View {
         workshopUpdateItemID == resolvedItem.id
     }
 
-    init(item: MediaItem, viewModel: MediaExploreViewModel, contextItems: [MediaItem]? = nil, onClose: @escaping () -> Void, onNavigateToItem: ((MediaItem) -> Void)? = nil) {
+    init(item: MediaItem, viewModel: MediaExploreViewModel, contextItems: [MediaItem]? = nil,
+         onClose: @escaping () -> Void, onNavigateToItem: ((MediaItem) -> Void)? = nil,
+         transitionImage: NSImage? = nil, onTransitionReady: (() -> Void)? = nil,
+         onTransitionImageReady: ((String, NSImage) -> Void)? = nil,
+         onDisplayedItemChange: ((String) -> Void)? = nil,
+         isCardTransitionActive: Bool = false, isCardTransitionClosing: Bool = false,
+         isPreparingTransitionImage: Bool = false) {
         self.initialItem = item
         self.viewModel = viewModel
         self.contextItems = contextItems
         self.onClose = onClose
         self.onNavigateToItem = onNavigateToItem
+        self.onTransitionReady = onTransitionReady
+        self.onTransitionImageReady = onTransitionImageReady
+        self.onDisplayedItemChange = onDisplayedItemChange
+        self.usesCardTransition = transitionImage != nil
+        self.isCardTransitionActive = isCardTransitionActive
+        self.isCardTransitionClosing = isCardTransitionClosing
+        self.isPreparingTransitionImage = isPreparingTransitionImage
+        self.preparedTransitionImage = transitionImage
+        _transitionSeed = State(initialValue: transitionImage)
         _resolvedItem = State(initialValue: item)
+        _isBakingScene = State(initialValue: SceneOfflineBakeProgressTracker.shared.progress(for: item.id) != nil)
+    }
+
+    private var activeTransitionSeed: NSImage? {
+        resolvedItem.id == initialItem.id ? transitionSeed : nil
+    }
+
+    private var shouldActivateMediaBackground: Bool {
+        isVisible && !isCardTransitionClosing
+    }
+
+    private var activeBackgroundVideoURL: URL? {
+        guard shouldActivateMediaBackground else { return nil }
+        if isCardTransitionActive {
+            // Finished local media can prepare under the glass; remote buffering stays separate.
+            return localResourceQueries.value(for: "transition-local-video-\(isBakingScene)", context: localResourceContext) {
+                WallpaperTransitionImageLoader.localMediaVideoURL(
+                    record: currentDownloadRecord, isBaking: isBakingScene)
+            }
+        }
+        return previewVideoURL
     }
 
     /// 当前导航使用的媒体列表（本地上下文优先，否则使用线上列表）
@@ -194,10 +304,10 @@ struct MediaDetailSheet: View {
 
     private var currentDownloadedWallpaperEngineProjectType: String? {
         guard let record = currentDownloadRecord else { return nil }
-        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(
-            startingAt: record.localFileURL
-        )
-        return Self.projectTypeString(at: contentRoot)
+        return localResourceQueries.value(for: "downloaded-project-type", context: localResourceContext) {
+            let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: record.localFileURL)
+            return Self.projectTypeString(at: contentRoot)
+        }
     }
 
     private var isCurrentDownloadedSceneProject: Bool {
@@ -247,7 +357,8 @@ struct MediaDetailSheet: View {
 
     /// 背景视图身份：变化才重建背景并显示加载遮罩。
     private var mediaBackgroundIdentityKey: String {
-        previewVideoURL?.path ?? heroImageURL.path
+        if isCardTransitionActive, activeTransitionSeed != nil { return "transition-seed" }
+        return previewVideoURL?.path ?? heroImageURL.path
     }
 
     /// 「推送到手机」入口可见性：仅壁纸引擎（Workshop）数据 — 工程目录里必须有 project.json
@@ -306,9 +417,10 @@ struct MediaDetailSheet: View {
                     .ignoresSafeArea()
                     .coordinateSpace(name: "scroll")
 
-                if isVisible {
+                if isVisible || activeTransitionSeed != nil {
                     fixedMediaBackground(width: viewW, height: viewH)
-                        .id("media-bg-\(resolvedItem.id)-\(mediaBackgroundEpoch)-\(mediaBackgroundIdentityKey)")
+                        // Seed → playback is an update inside this backdrop, not a new page.
+                        .id("media-bg-\(resolvedItem.id)-\(mediaBackgroundEpoch)")
                         .transition(
                             isAuthorPanelFade
                                 ? AnyTransition.opacity.animation(.easeInOut(duration: 0.28))
@@ -321,7 +433,7 @@ struct MediaDetailSheet: View {
                 }
 
                 // 媒体加载动画
-                if !isMediaLoaded && !isNavigating {
+                if !isMediaLoaded && !isNavigating && activeTransitionSeed == nil {
                     LoadingOverlayView()
                         .frame(width: viewW, height: viewH)
                         .transition(.opacity.animation(.easeInOut(duration: 0.3)))
@@ -561,17 +673,51 @@ struct MediaDetailSheet: View {
                         }
                     ])
         .navigationBarBackButtonHidden(true)
-        .task {
+        .onAppear {
             AppLogger.info(.media, "媒体详情页 onAppear",
                 metadata: ["itemId": initialItem.id, "title": initialItem.title])
             isVisible = true
+            onTransitionReady?()
             pinRemoteBackgroundIfNeeded()
             restoreSceneBakeProgressIfNeeded()
             setupNextItemDataSource()
             setupKeyboardMonitor()
+        }
+        .task {
             await loadDetailIfNeeded()
         }
-        .onChange(of: resolvedItem.id) { _, _ in
+        .task(id: backgroundImageRequest) {
+            let request = backgroundImageRequest
+            guard request.isActive else { return }
+            let item = resolvedItem
+            let url: URL?
+            if request.isPinnedRemote {
+                url = undownloadedStylePreviewImageURL
+            } else {
+                url = await WallpaperTransitionImageLoader.mediaImageURL(
+                    item: item, record: currentDownloadRecord, isBaking: request.isBaking)
+            }
+            guard !Task.isCancelled, request == backgroundImageRequest, let url else { return }
+            backgroundImageResult = DetailBackgroundImageResult(request: request, url: url)
+        }
+        .onChange(of: preparedTransitionImage) { _, image in
+            guard resolvedItem.id == initialItem.id, activeTransitionSeed != nil,
+                  !isCardTransitionClosing, displayedVideoURL == nil, let image else { return }
+            transitionSeed = image
+        }
+        .onChange(of: isCardTransitionActive) { _, active in
+            guard !active, !isCardTransitionClosing else { return }
+            synchronizeLoadedBackgroundCover()
+        }
+        .onChange(of: isPreparingTransitionImage) { _, preparing in
+            guard !preparing, !isCardTransitionClosing else { return }
+            synchronizeLoadedBackgroundCover()
+        }
+        .onChange(of: resolvedItem.id) { _, itemID in
+            transitionSeed = nil
+            displayedVideoURL = nil
+            loadedBackgroundCoverURL = nil
+            onDisplayedItemChange?(itemID)
             pinRemoteBackgroundIfNeeded()
             restoreSceneBakeProgressIfNeeded()
             hasWorkshopUpdateAvailable = false
@@ -643,8 +789,15 @@ struct MediaDetailSheet: View {
         }
     }
 
-    /// 无循环烘焙视频时，优先复用 Scene 高清抽帧，再回退 catalog/远程缩略图。
     private var heroImageURL: URL {
+        if let result = backgroundImageResult, result.request == backgroundImageRequest {
+            return result.url
+        }
+        return fallbackHeroImageURL
+    }
+
+    /// Resource resolution runs asynchronously; keep the existing backdrop until it completes.
+    private var fallbackHeroImageURL: URL {
         // 未下载打开的项：下载完成但还没有可播放资源（需烘焙）前，保持打开时的远程预览。
         if isBackgroundPinnedToRemote {
             return undownloadedStylePreviewImageURL
@@ -821,13 +974,13 @@ struct MediaDetailSheet: View {
     /// 已下载工程的明确内容类型。`nil` 表示没有 project.json，例如直接导入的普通视频。
     private var localProjectContentType: WorkshopContentType? {
         guard let localURL = currentDownloadRecord?.localFileURL else { return nil }
-        let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: localURL)
-        guard FileManager.default.fileExists(
-            atPath: contentRoot.appendingPathComponent("project.json").path
-        ) else {
-            return nil
+        return localResourceQueries.value(for: "local-project-content", context: localResourceContext) {
+            let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: localURL)
+            guard FileManager.default.fileExists(atPath: contentRoot.appendingPathComponent("project.json").path) else {
+                return nil as WorkshopContentType?
+            }
+            return determineWorkshopContentType(at: contentRoot)
         }
-        return determineWorkshopContentType(at: contentRoot)
     }
 
     private var isKnownNonVideoLocalProject: Bool {
@@ -841,6 +994,13 @@ struct MediaDetailSheet: View {
     /// 从下载记录 / Workshop 本地路径解析可用于详情页背景循环的原始视频。
     /// 仅允许直接视频文件或 `project.json.type == "video"` 的工程。
     private func resolvedLocalPreviewVideoURL() -> URL? {
+        guard isLocalContentSettled else { return nil }
+        return localResourceQueries.value(for: "local-preview-video", context: localResourceContext) {
+            resolveLocalPreviewVideoURLUncached()
+        }
+    }
+
+    private func resolveLocalPreviewVideoURLUncached() -> URL? {
         // 下载中 steamcmd / 直链会边下边写进 Media/，此时磁盘兜底扫描会拿到半截文件。
         // 下载记录只在文件校验完成后写入，以它为「本地资源已落地」的唯一信号。
         guard isLocalContentSettled else { return nil }
@@ -885,6 +1045,7 @@ struct MediaDetailSheet: View {
     @MainActor
     private func refreshResolvedItemAfterLocalDownload(for itemID: String) -> Bool {
         guard resolvedItem.id == itemID else { return false }
+        localResourceQueries.invalidate()
 
         let merged = mediaItemByMergingAuthorMetadata(resolvedItem, fallback: resolvedItem)
         var item = itemWithLocalWorkshopVideo(merged)
@@ -929,6 +1090,9 @@ struct MediaDetailSheet: View {
                 FileExistenceCache.shared.markExisting(atPath: nestedVideo.path)
             }
         }
+        // FileExistenceCache has just learned newly written paths. Revoke an earlier negative
+        // result from this same refresh before resolving the final background identity.
+        localResourceQueries.invalidate()
         if let localVideo = resolvedLocalPreviewVideoURL() {
             FileExistenceCache.shared.markExisting(atPath: localVideo.path)
         }
@@ -955,45 +1119,72 @@ struct MediaDetailSheet: View {
         ZStack {
             // 远程视频失败（如 CDN 鉴权）时仍有封面垫底，避免纯黑详情背景。
             let heroLayoutSize = CGSize(width: width, height: viewH)
-            let heroDownsampleSize = CGSize(
-                width: min(max(width * 2, 1), 2400),
-                height: min(max(viewH * 2, 1), 2400)
-            )
-            let showPosterUnderVideo = previewVideoURL != nil && !(previewVideoURL?.isFileURL ?? true)
+            let heroDownsampleSize = backgroundImagePixelSize(viewport: heroLayoutSize)
+            let backgroundVideoURL = activeBackgroundVideoURL
+            let showPosterUnderVideo = backgroundVideoURL != nil && !(backgroundVideoURL?.isFileURL ?? true)
+            let imageItemID = resolvedItem.id
+            let imageURL = heroImageURL
 
-            if previewVideoURL == nil || showPosterUnderVideo {
+            if shouldActivateMediaBackground,
+               activeTransitionSeed == nil || backgroundImageResult?.request == backgroundImageRequest,
+               backgroundVideoURL == nil || showPosterUnderVideo {
                 KFMediaCoverImage(
-                    url: heroImageURL,
+                    url: imageURL,
                     animated: resolvedItem.shouldRenderThumbnailAsAnimatedImage,
                     downsampleSize: heroDownsampleSize,
-                    fadeDuration: 0.3,
+                    fadeDuration: usesCardTransition && imageItemID == initialItem.id ? 0 : 0.3,
                     loadFinished: {
+                        guard resolvedItem.id == imageItemID, heroImageURL == imageURL else { return }
                         coverForceRefresh = false
+                        loadedBackgroundCoverURL = imageURL
+                        loadedBackgroundCoverSize = heroDownsampleSize
+                        synchronizeTransitionImage(itemID: imageItemID, url: imageURL, downsampleSize: heroDownsampleSize)
                         // 仅在没有视频、或视频尚未 ready 时由封面结束 loading
-                        if previewVideoURL == nil {
+                        if backgroundVideoURL == nil {
                             withAnimation(.easeInOut(duration: 0.3)) {
                                 isMediaLoaded = true
                             }
                         }
                     },
                     layoutSize: heroLayoutSize,
-                    playAnimatedImage: previewVideoURL == nil,
+                    playAnimatedImage: backgroundVideoURL == nil,
                     forceRefresh: coverForceRefresh
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            if let previewVideoURL {
+            if shouldActivateMediaBackground, let backgroundVideoURL {
                 LoopingVideoBackgroundView(
-                    url: previewVideoURL,
+                    url: backgroundVideoURL,
                     isMuted: isMuted,
                     fallbackURL: resolvedItem.previewVideoFallbackURL,
-                    onReady: { @MainActor in
-                        withAnimation(.easeInOut(duration: 0.3)) {
+                    onFirstFrame: { @MainActor in
+                        guard resolvedItem.id == imageItemID,
+                              activeBackgroundVideoURL == backgroundVideoURL else { return }
+                        displayedVideoURL = backgroundVideoURL
+                        withAnimation(.easeInOut(duration: 0.18)) {
                             isMediaLoaded = true
+                            transitionSeed = nil
                         }
+                    },
+                    onReady: { @MainActor in
+                        guard resolvedItem.id == imageItemID,
+                              activeBackgroundVideoURL == backgroundVideoURL else { return }
+                        // Errors/timeouts also call onReady. Keep the seed until a real frame exists.
+                        isMediaLoaded = true
                     }
                 )
+            }
+
+            if let seed = activeTransitionSeed {
+                // 与现有 KFMediaCoverImage 一致：所有封面居中 fill，按全屏范围裁切。
+                // 此层只复用点击时已显示的静帧，不触发 GIF 解码、抽帧或播放器。
+                Image(nsImage: seed)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: width, height: viewH)
+                    .clipped()
+                    .allowsHitTesting(false)
             }
 
             LinearGradient(
@@ -1023,6 +1214,40 @@ struct MediaDetailSheet: View {
         .frame(width: width, height: viewH)
         .clipped()
         .ignoresSafeArea()
+    }
+
+    private func backgroundImagePixelSize(viewport: CGSize) -> CGSize {
+        WallpaperTransitionImageLoader.targetPixelSize(viewportSize: viewport, displayScale: displayScale)
+    }
+
+    private func synchronizeLoadedBackgroundCover() {
+        guard let url = loadedBackgroundCoverURL, url == heroImageURL,
+              loadedBackgroundCoverSize.width > 0, loadedBackgroundCoverSize.height > 0 else { return }
+        synchronizeTransitionImage(itemID: resolvedItem.id, url: url,
+                                   downsampleSize: loadedBackgroundCoverSize)
+    }
+
+    /// KFMediaCoverImage 先写内存缓存再通知 loadFinished。沿同一 URL/cacheKey 和 processor
+    /// 同步取已解码封面；本地 file URL 也必须用 Kingfisher 的 cacheKey，不能用 absoluteString。
+    /// 不为转场重新下载/解码；GIF 动画层不保留此静帧缓存时也必须让位，维持原有播放行为。
+    private func synchronizeTransitionImage(itemID: String, url: URL, downsampleSize: CGSize) {
+        guard resolvedItem.id == itemID, heroImageURL == url,
+              activeTransitionSeed != nil || onTransitionImageReady != nil else { return }
+        // The click-time loader owns HQ selection until the liquid handoff finishes. A catalog
+        // cover loading underneath must not cancel it or replace its HD poster with a thumbnail.
+        guard !isCardTransitionActive, !isPreparingTransitionImage, !isCardTransitionClosing else { return }
+        // A catalog poster must never downgrade the prepared HD still while video buffers.
+        if activeTransitionSeed != nil, previewVideoURL != nil { return }
+        let options: KingfisherOptionsInfo = [.processor(DownsamplingImageProcessor(size: downsampleSize))]
+        if let image = KingfisherManager.shared.cache.retrieveImageInMemoryCache(
+            forKey: url.cacheKey, options: options
+        ), image.size.width > 0, image.size.height > 0 {
+            onTransitionImageReady?(itemID, image)
+            transitionSeed = nil
+        } else if previewVideoURL == nil {
+            // loadFinished 也覆盖动画层和失败；不让静态 seed 遮住已有 GIF 或失败占位。
+            transitionSeed = nil
+        }
     }
 
     private func fixedHeroChrome(viewportWidth: CGFloat, topBarTopInset: CGFloat) -> some View {
@@ -4792,82 +5017,6 @@ struct MediaDetailSheet: View {
             }
         }
         return nil
-    }
-
-    /// 如果目录是 preset 类型且还没有 index.html，根据 preset 配置生成 HTML 轮播页面
-    private func ensurePresetHTMLGenerated(at contentRoot: URL) {
-        let fm = FileManager.default
-        let htmlURL = contentRoot.appendingPathComponent("index.html")
-        guard !fm.fileExists(atPath: htmlURL.path) else { return } // 已有则跳过
-
-        let projectJSONURL = contentRoot.appendingPathComponent("project.json")
-        guard fm.fileExists(atPath: projectJSONURL.path),
-              let data = try? Data(contentsOf: projectJSONURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              json["type"] == nil,
-              let presetDict = json["preset"] as? [String: Any],
-              let customDir = presetDict["customdirectory"] as? String else { return }
-
-        let imagesDir = contentRoot.appendingPathComponent(customDir)
-        let imageExts: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
-        guard let contents = try? fm.contentsOfDirectory(
-            at: imagesDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
-        ) else { return }
-        let images = contents
-            .filter { imageExts.contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        guard !images.isEmpty else { return }
-
-        let multiplier = presetDict["imageswitchtimes"] as? Int ?? 1
-        let switchTime = max(multiplier * 5, 3)
-        let escapedPaths = images.map { url -> String in
-            let relPath = "directories/customdirectory/" + url.lastPathComponent
-            let escaped = relPath.replacingOccurrences(of: "\"", with: "\\\"")
-            return "\"\(escaped)\""
-        }
-        let imagesJS = "[\(escapedPaths.joined(separator: ","))]"
-
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-        .slideshow { position: relative; width: 100%; height: 100%; }
-        .slide {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background-size: cover; background-position: center; background-repeat: no-repeat;
-            opacity: 0; transition: opacity 1.2s ease-in-out;
-        }
-        .slide.active { opacity: 1; }
-        </style>
-        </head>
-        <body>
-        <div class="slideshow" id="slideshow"></div>
-        <script>
-        const images = \(imagesJS);
-        const switchTime = \(max(switchTime, 1)) * 1000;
-        const container = document.getElementById('slideshow');
-        let current = 0;
-        images.forEach((src, i) => {
-            const div = document.createElement('div');
-            div.className = 'slide' + (i === 0 ? ' active' : '');
-            div.style.backgroundImage = 'url("' + src + '")';
-            container.appendChild(div);
-        });
-        const slides = container.querySelectorAll('.slide');
-        setInterval(() => {
-            slides[current].classList.remove('active');
-            current = (current + 1) % slides.length;
-            slides[current].classList.add('active');
-        }, switchTime);
-        </script>
-        </body>
-        </html>
-        """
-        try? html.write(to: htmlURL, atomically: true, encoding: .utf8)
     }
 
     private func workshopContentDirectory(for item: MediaItem) -> URL? {

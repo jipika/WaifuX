@@ -14,6 +14,7 @@ struct MenuBarQuickSwitcherView: View {
     @State private var readyVideoURL: URL?
     /// hero 视频是否已「武装」：停留够久才真正加载视频预览（见 body 里的 .task）。
     @State private var videoPreviewArmed = false
+    @State private var armedVideoTaskID: String?
     private static let videoPreviewArmDelay = Duration.milliseconds(450)
 
     // Panel: previous height kept; width bumped slightly for breathing room.
@@ -56,6 +57,10 @@ struct MenuBarQuickSwitcherView: View {
     @State private var isRateExpanded = false
     @State private var volumeValue: Double = 1.0
     @State private var rateValue: Double = 1.0
+
+    private var videoTaskID: String {
+        "\(viewModel.isPreviewActive)|\(viewModel.activationGeneration)|\(viewModel.selectedItem?.id ?? "")|\(viewModel.selectedItem?.videoPreviewURL?.absoluteString ?? "")"
+    }
 
     private var hasAnyExpandedOverlay: Bool { isVolumeExpanded || isRateExpanded }
 
@@ -115,16 +120,25 @@ struct MenuBarQuickSwitcherView: View {
         .onAppear {
             refreshPlaybackControls()
         }
-        .task(id: [viewModel.selectedItem?.id, viewModel.selectedItem?.videoPreviewURL?.absoluteString]) {
+        .task(id: videoTaskID) {
             // 异步解析出视频 URL 后，候选 id 不变也要重新武装，延迟与动画保持原样。
             // hero 视频延迟武装：连点缩略图时不要每个都起一个播放器 —— 外置盘原片
             // 解码是弹窗里最贵的一步（CPU + IO + 一路 AVPlayer 内存）。停留超过
             // 这个时间才真正加载视频预览；快速划过时只显示静帧。
             videoPreviewArmed = false
-            guard viewModel.selectedItem?.videoPreviewURL != nil else { return }
+            armedVideoTaskID = nil
+            readyVideoURL = nil
+            guard viewModel.isPreviewActive, viewModel.selectedItem?.videoPreviewURL != nil else { return }
+            let request = videoTaskID
             try? await Task.sleep(for: Self.videoPreviewArmDelay)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, viewModel.isPreviewActive, videoTaskID == request else { return }
+            armedVideoTaskID = request
             videoPreviewArmed = true
+        }
+        .onChange(of: viewModel.isPreviewActive) { _, presented in
+            isVolumeExpanded = false
+            isRateExpanded = false
+            if presented { refreshPlaybackControls() }
         }
         .onChange(of: viewModel.selectedItem?.videoPreviewURL) { _, _ in
             readyVideoURL = nil
@@ -138,19 +152,23 @@ struct MenuBarQuickSwitcherView: View {
                 // cannot expand layout or poke past the rounded clip.
                 Color.black.opacity(0.10)
                     .overlay {
-                        QuickSwitcherImage(url: selected.thumbnailURL, fallbackSymbol: "photo")
-                            .id(selected.id + (selected.thumbnailURL?.absoluteString ?? "") + "#\(viewModel.coverRevision)")
+                        QuickSwitcherImage(url: selected.thumbnailURL, fallbackSymbol: "photo", isActive: viewModel.isPresented)
+                            .id(selected.id + (selected.thumbnailURL?.absoluteString ?? "") + "#\(viewModel.coverRevision(for: selected.id))")
                             .transition(.opacity)
                     }
                     .overlay {
-                        if videoPreviewArmed, let videoURL = selected.videoPreviewURL {
+                        if viewModel.isPreviewActive, videoPreviewArmed, armedVideoTaskID == videoTaskID,
+                           let videoURL = selected.videoPreviewURL {
                             LoopingVideoBackgroundView(
                                 url: videoURL,
                                 isMuted: true,
                                 contentMode: .fill,
                                 // Outer SwiftUI clip owns the corner; avoid double-radius mismatch.
                                 cornerRadius: 0,
+                                isActive: viewModel.isPreviewActive,
+                                activity: viewModel.playbackActivity,
                                 onReady: { @MainActor in
+                                    guard viewModel.isPreviewActive, viewModel.selectedItem?.videoPreviewURL == videoURL else { return }
                                     withAnimation(crossfadeAnimation) {
                                         readyVideoURL = videoURL
                                     }
@@ -286,6 +304,8 @@ struct MenuBarQuickSwitcherView: View {
                 $0.id == viewModel.selectedItem?.id
             },
             itemStride: thumbnailSize + thumbnailSpacing,
+            itemCount: viewModel.batchItems.count,
+            isActive: viewModel.isPresented,
             contentSignature: railContentSignature,
             railMinimumHeight: thumbnailSize + 4
         ) {
@@ -310,9 +330,10 @@ struct MenuBarQuickSwitcherView: View {
             hasher.combine(item.id)
             hasher.combine(item.thumbnailURL?.absoluteString)
             hasher.combine(item.title)
+            hasher.combine(viewModel.coverRevision(for: item.id))
         }
         hasher.combine(viewModel.selectedItem?.id)
-        hasher.combine(viewModel.coverRevision)
+        hasher.combine(viewModel.isPresented)
         hasher.combine(viewModel.isBlockingApply)
         return hasher.finalize()
     }
@@ -326,8 +347,8 @@ struct MenuBarQuickSwitcherView: View {
         } label: {
             Color.black.opacity(0.08)
                 .overlay {
-                    QuickSwitcherImage(url: item.thumbnailURL, fallbackSymbol: "photo")
-                        .id((item.thumbnailURL?.absoluteString ?? "") + "#\(viewModel.coverRevision)")
+                    QuickSwitcherImage(url: item.thumbnailURL, fallbackSymbol: "photo", isActive: viewModel.isPresented)
+                        .id((item.thumbnailURL?.absoluteString ?? "") + "#\(viewModel.coverRevision(for: item.id))")
                 }
                 .frame(width: thumbnailSize, height: thumbnailSize)
                 .clipped()
@@ -1018,6 +1039,8 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
     let selectedIndex: Int?
     /// 单个 chip 的横向步进（宽 + 间距），用于按下标算滚动目标。
     let itemStride: CGFloat
+    let itemCount: Int
+    let isActive: Bool
     /// 轨道显示依赖的签名：相同就不重赋 rootView、不重排（切换选中不再整条重排）。
     let contentSignature: Int
     /// 轨道最小行高：与 SwiftUI 侧 `.frame(height: thumbnailSize + 4)` 对齐，
@@ -1027,6 +1050,8 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
     init(
         selectedIndex: Int?,
         itemStride: CGFloat,
+        itemCount: Int,
+        isActive: Bool,
         contentSignature: Int,
         railMinimumHeight: CGFloat = 0,
         @ViewBuilder content: () -> Content
@@ -1034,6 +1059,8 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
         self.content = content()
         self.selectedIndex = selectedIndex
         self.itemStride = itemStride
+        self.itemCount = itemCount
+        self.isActive = isActive
         self.contentSignature = contentSignature
         self.railMinimumHeight = railMinimumHeight
     }
@@ -1050,11 +1077,13 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
         scrollView.hasVerticalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.documentView = context.coordinator.hostingView
+        scrollView.setInteractionActive(isActive)
         return scrollView
     }
 
     func updateNSView(_ scrollView: VerticalWheelHorizontalScrollView, context: Context) {
         let hostingView = context.coordinator.hostingView
+        scrollView.setInteractionActive(isActive)
         let updateStart = Date()
         let signatureChanged = context.coordinator.lastContentSignature != contentSignature
         if signatureChanged {
@@ -1077,25 +1106,10 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
         DispatchQueue.main.async {
             guard scrollView.documentView === hostingView else { return }
             if signatureChanged {
-                hostingView.layoutSubtreeIfNeeded()
-                let fittingSize = hostingView.fittingSize
-                // 轨道高度兜底：首帧内容未加载（缩略图 URL 未解析/图未解码）时
-                // fittingSize 可能塌成 0 高，documentView 高度跟着为 0，
-                // 视觉上整条 rail 坍缩、footer 跳位。内容真实高度与
-                // thumbnailSize+4 取大者，加载完成后再由正常 fittingSize 接管。
-                let minHeight = railMinimumHeight
-                let size = NSSize(
-                    width: max(fittingSize.width, scrollView.contentSize.width),
-                    height: max(fittingSize.height, scrollView.contentSize.height, minHeight)
-                )
-                if hostingView.frame.size != size {
-                    hostingView.setFrameSize(size)
-                }
-                if scrollView.contentSize.height < minHeight {
-                    // NSScrollView 不会自己长高；容器高度由 SwiftUI 侧固定，
-                    // 这里只把 clip view 的可见行高顶住，避免塌缩闪烁。
-                    scrollView.contentView.frame.size.height = max(scrollView.contentView.frame.height, minHeight)
-                }
+                // Chips have a fixed size. Never force SwiftUI fitting/layout for image updates.
+                let size = NSSize(width: max(CGFloat(itemCount) * itemStride - 6, scrollView.contentSize.width),
+                                  height: max(railMinimumHeight, scrollView.contentSize.height))
+                if hostingView.frame.size != size { hostingView.setFrameSize(size) }
             }
             if let revealIndex {
                 scrollView.revealItem(at: revealIndex, stride: stride)
@@ -1131,6 +1145,17 @@ private final class VerticalWheelHorizontalScrollView: NSScrollView {
     private var dragStartOffset: CGFloat = 0
     private var isDraggingRail = false
     private var dragMonitor: Any?
+    private var interactionActive = false
+
+    func setInteractionActive(_ active: Bool) {
+        interactionActive = active
+        if active { installDragMonitorIfNeeded() }
+        else {
+            removeDragMonitor()
+            dragStartLocation = nil
+            isDraggingRail = false
+        }
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1181,11 +1206,12 @@ private final class VerticalWheelHorizontalScrollView: NSScrollView {
     }
 
     private func installDragMonitorIfNeeded() {
-        guard dragMonitor == nil, window != nil else { return }
+        guard interactionActive, dragMonitor == nil, window != nil else { return }
         dragMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
         ) { [weak self] event in
-            guard let self else { return event }
+            guard let self, self.interactionActive, self.window?.isVisible == true,
+                  event.window === self.window else { return event }
             return self.handleDragEvent(event)
         }
     }
@@ -1268,10 +1294,11 @@ private final class VerticalWheelHorizontalScrollView: NSScrollView {
 private struct QuickSwitcherImage: View {
     let url: URL?
     let fallbackSymbol: String
+    let isActive: Bool
 
     var body: some View {
         Group {
-            if let url {
+            if let url, isActive {
                 KFImage(url)
                     .fade(duration: 0.16)
                     // chip 56px / hero 342pt@2x=684 —— 768 上限足够，避免把外置盘
@@ -1279,7 +1306,7 @@ private struct QuickSwitcherImage: View {
                     // 静图侧主因）。macOS 无 UIScreen；菜单栏面板 Retina 最高 2x，
                     // downsampling 按像素吃 768 已覆盖。
                     .downsampling(size: CGSize(width: 768, height: 768))
-                    .cacheOriginalImage()
+                    .backgroundDecode()
                     .cancelOnDisappear(true)
                     .resizable()
                     .placeholder {

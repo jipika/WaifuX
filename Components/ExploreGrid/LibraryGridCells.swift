@@ -205,6 +205,8 @@ struct LibraryWallpaperCellModel {
     /// 右键时才求值：构建过程含 optimizableVideoURL 的同步 workshop 探测
     /// （fileExists + 最多 8 层 project.json 读取），不能进 configureCell 滚动热路径。
     let makeMenuEntries: () -> [LibraryGridMenuEntry]
+    /// 点击与返回重新解析锚点时都核实祖先目录锁态。
+    var isCardTransitionAllowed: (() -> Bool)? = nil
 }
 
 struct LibraryMediaCellModel {
@@ -222,6 +224,8 @@ struct LibraryMediaCellModel {
     let accent: NSColor
     /// 右键时才求值（同 LibraryWallpaperCellModel，规避 configureCell 热路径磁盘探测）。
     let makeMenuEntries: () -> [LibraryGridMenuEntry]
+    /// 点击与返回重新解析锚点时都核实祖先目录锁态。
+    var isCardTransitionAllowed: (() -> Bool)? = nil
 }
 
 struct LibraryFolderCellModel {
@@ -405,6 +409,20 @@ final class LibraryEditCheckboxView: NSView {
     }
 }
 
+// MARK: - 库转场可见性
+
+/// 独立封面管线只登记实际显示的原图；模糊/保护层存在时不提供 seed。
+@MainActor
+private func libraryCardTransitionCoverIsUnfiltered(_ cell: ExploreGridItem) -> Bool {
+    guard cell.isViewLoaded else { return false }
+    var ancestor: NSView? = cell.coverImageView
+    while let current = ancestor {
+        guard current.layer?.filters?.isEmpty != false else { return false }
+        ancestor = current.superview
+    }
+    return true
+}
+
 // MARK: - 壁纸卡 Cell
 
 /// 还原 WallpaperEditCard 视觉：180pt 封面 + 44pt 信息栏（作者 + heart/eye/file 统计）
@@ -470,6 +488,17 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
     override var shouldAnimateBorderOnHover: Bool { true }
     override var allowsHoverInteraction: Bool { currentModel?.isEditing != true }
 
+    override var cardTransitionItemID: String? {
+        guard let model = currentModel, !model.isEditing, !model.wallpaper.isPixivManga,
+              model.isCardTransitionAllowed?() != false else { return nil }
+        return model.wallpaper.id
+    }
+
+    override func cardTransitionSnapshot(for itemID: String) -> (image: NSImage, anchor: CardTransitionAnchor, window: NSWindow)? {
+        guard libraryCardTransitionCoverIsUnfiltered(self) else { return nil }
+        return super.cardTransitionSnapshot(for: itemID)
+    }
+
     override func setupContentLayout() {
         containerView.layer?.backgroundColor = LibraryGridCellMetrics.cardBackground.cgColor
         contentView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -534,6 +563,7 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
             coverRetryCount = 0
             coverRetrySourceKey = nil
             coverImageView.image = LibraryCoverImageCache.snapshot(forKey: model.wallpaper.id)
+            recordDisplayedCardTransitionImage(coverImageView.image, itemID: model.wallpaper.id)
         }
         currentModel = model
         if model.isEditing {
@@ -838,6 +868,7 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
         // 详情返回/整表 reload 时不出现空白闪烁。
         if coverImageView.image == nil {
             coverImageView.image = LibraryCoverImageCache.snapshot(forKey: model.wallpaper.id)
+            recordDisplayedCardTransitionImage(coverImageView.image, itemID: model.wallpaper.id)
         }
         coverImageView.kf.setImage(
             with: candidates[index],
@@ -846,11 +877,13 @@ final class LibraryWallpaperGridCell: ExploreGridItem {
                 switch result {
                 case .success(let value):
                     LibraryCoverImageCache.storeSnapshot(value.image, forKey: model.wallpaper.id)
-                    self?.updateBackdrop(with: value.image, model: model)
-                    if self?.coverLoadGeneration == generation {
-                        self?.coverRetryTask?.cancel()
-                        self?.coverRetryTask = nil
-                    }
+                    guard let self, self.coverLoadGeneration == generation,
+                          self.currentModel?.wallpaper.id == model.wallpaper.id,
+                          self.coverImageView.image === value.image else { return }
+                    self.recordDisplayedCardTransitionImage(value.image, itemID: model.wallpaper.id)
+                    self.updateBackdrop(with: value.image, model: model)
+                    self.coverRetryTask?.cancel()
+                    self.coverRetryTask = nil
                 case .failure:
                     guard let self,
                           self.coverLoadGeneration == generation,
@@ -1068,6 +1101,17 @@ final class LibraryMediaGridCell: ExploreGridItem {
     override var usesGIFOverlay: Bool { true }
     override var allowsHoverInteraction: Bool { currentModel?.isEditing != true }
 
+    override var cardTransitionItemID: String? {
+        guard let model = currentModel, !model.isEditing,
+              model.isCardTransitionAllowed?() != false else { return nil }
+        return model.mediaItem.id
+    }
+
+    override func cardTransitionSnapshot(for itemID: String) -> (image: NSImage, anchor: CardTransitionAnchor, window: NSWindow)? {
+        guard libraryCardTransitionCoverIsUnfiltered(self) else { return nil }
+        return super.cardTransitionSnapshot(for: itemID)
+    }
+
     override func setupContentLayout() {
         containerView.layer?.backgroundColor = LibraryGridCellMetrics.cardBackground.cgColor
         contentView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -1172,6 +1216,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        if let id = currentModel?.mediaItem.id { WallpaperTransitionImageLoader.cancelPrewarm(itemID: id) }
         currentModel = nil
         titleLabel.stringValue = ""
         coverImageView.kf.cancelDownloadTask()
@@ -1202,7 +1247,8 @@ final class LibraryMediaGridCell: ExploreGridItem {
 
     override func configure(with item: Any, isFavorite: Bool) {
         guard let model = item as? LibraryMediaCellModel else { return }
-        if currentModel?.itemID != model.itemID {
+        if currentModel?.itemID != model.itemID || currentModel?.mediaItem.id != model.mediaItem.id {
+            if let id = currentModel?.mediaItem.id { WallpaperTransitionImageLoader.cancelPrewarm(itemID: id) }
             // 复用时不能把旧卡的 hover 直接带给新项目；滚动中的 hover
             // 由 coordinator 在滚停后根据真实鼠标位置统一恢复。
             shouldRestoreHoverAfterConfigure = !LibraryScrollHoverGate.shared.isScrolling && isHovered
@@ -1214,6 +1260,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
             coverRetryCount = 0
             coverRetrySourceKey = nil
             coverImageView.image = LibraryCoverImageCache.snapshot(forKey: model.itemID)
+            recordDisplayedCardTransitionImage(coverImageView.image, itemID: model.mediaItem.id)
             thumbnailRefreshTask?.cancel()
             thumbnailRefreshTask = nil
             if let token = thumbnailIdleToken {
@@ -1408,6 +1455,7 @@ final class LibraryMediaGridCell: ExploreGridItem {
         // 网格重建后的新 cell 封面从 nil 起步：先同步回填快照再走异步加载。
         if coverImageView.image == nil {
             coverImageView.image = LibraryCoverImageCache.snapshot(forKey: model.itemID)
+            recordDisplayedCardTransitionImage(coverImageView.image, itemID: model.mediaItem.id)
         }
         let url = candidates[index]
         // 512pt@2x 的中间帧出图 1024×1024 ≈ 4MB/张会挤爆内存缓存；512px 又实测
@@ -1434,10 +1482,13 @@ final class LibraryMediaGridCell: ExploreGridItem {
                 switch result {
                 case .success(let value):
                     LibraryCoverImageCache.storeSnapshot(value.image, forKey: model.itemID)
-                    if self?.coverLoadGeneration == generation {
-                        self?.coverRetryTask?.cancel()
-                        self?.coverRetryTask = nil
-                    }
+                    guard let self, self.coverLoadGeneration == generation,
+                          self.currentModel?.itemID == model.itemID,
+                          self.currentModel?.mediaItem.id == model.mediaItem.id,
+                          self.coverImageView.image === value.image else { return }
+                    self.recordDisplayedCardTransitionImage(value.image, itemID: model.mediaItem.id)
+                    self.coverRetryTask?.cancel()
+                    self.coverRetryTask = nil
                 case .failure:
                     guard let self,
                           self.coverLoadGeneration == generation,
@@ -1472,6 +1523,9 @@ final class LibraryMediaGridCell: ExploreGridItem {
     // MARK: hover GIF
 
     override func hoverStateDidChange(_ hovering: Bool) {
+        if !hovering, let id = currentModel?.mediaItem.id {
+            WallpaperTransitionImageLoader.cancelPrewarm(itemID: id)
+        }
         guard !LibraryScrollHoverGate.shared.isScrolling else {
             if !hovering {
                 teardownHoverGIFPlayback()
@@ -1479,6 +1533,11 @@ final class LibraryMediaGridCell: ExploreGridItem {
             return
         }
         if hovering {
+            if let model = currentModel, model.isCardTransitionAllowed?() != false,
+               let window = view.window, let content = window.contentView {
+                WallpaperTransitionImageLoader.prewarmMedia(item: model.mediaItem, viewportSize: content.bounds.size,
+                                                            displayScale: window.backingScaleFactor)
+            }
             startHoverGIFPlaybackIfNeeded()
         } else {
             teardownHoverGIFPlayback()
@@ -2416,6 +2475,11 @@ final class LibraryAnimeGridCell: ExploreGridItem {
     override var shouldAnimateBorderOnHover: Bool { true }
     override var allowsHoverInteraction: Bool { currentModel?.isEditing != true }
 
+    override var cardTransitionItemID: String? {
+        guard let model = currentModel, !model.isEditing else { return nil }
+        return model.anime.id
+    }
+
     override func setupContentLayout() {
         containerView.layer?.backgroundColor = LibraryGridCellMetrics.cardBackground.withAlphaComponent(0.6).cgColor
         contentView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -2524,9 +2588,12 @@ final class LibraryAnimeGridCell: ExploreGridItem {
         checkboxView.isHidden = !model.isEditing
         selectionMask.isHidden = !(model.isEditing && model.isSelected)
 
-        if let coverURL = model.anime.coverURL.flatMap(URL.init(string:)) {
-            loadImage(url: coverURL, targetSize: preferredImageTargetSize())
-        }
+        let coverURLs = model.anime.coverURL.flatMap(URL.init(string:)).map { [$0] } ?? []
+        loadImage(
+            urls: coverURLs,
+            targetSize: preferredImageTargetSize(),
+            imageIdentity: model.anime.id
+        )
 
         if containerView.bounds.width > 0, containerView.bounds.height > 0 {
             layoutContentFrames()

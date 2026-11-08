@@ -1714,6 +1714,17 @@ final class VideoThumbnailCache {
         return isUsableCachedImage(at: thumb) ? thumb : nil
     }
 
+    /// Menu previews use the existing generation budget without synchronous MainActor cache reads.
+    nonisolated static func menuListThumbnail(for videoURL: URL, cacheDirectory: URL) async -> URL? {
+        let path = stablePathKey(for: videoURL)
+        let output = cacheDirectory.appendingPathComponent("list_\(path.md5).jpg")
+        return await VideoListThumbnailGenerationCoordinator.shared.generate(key: path) {
+            guard !Task.isCancelled else { return nil }
+            try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+            return await extractListThumbnailJPEG(sourceURL: URL(fileURLWithPath: path), outputURL: output)
+        }
+    }
+
     /// 标准化路径键：去掉 file URL 编码差异，统一 `/private` 前缀形态。
     nonisolated private static func stablePathKey(for videoURL: URL) -> String {
         var path = videoURL.standardizedFileURL.path

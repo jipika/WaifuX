@@ -606,41 +606,135 @@ enum LocalWallpaperApplyService {
         return nil
     }
 
-    private static func ensurePresetHTMLGenerated(at contentRoot: URL) {
+    /// Only replace pages whose complete body matches one of our generated templates.
+    /// Author HTML and locally edited pages are never inferred from a filename/marker alone.
+    static func ensurePresetHTMLGenerated(at contentRoot: URL) {
         let fm = FileManager.default
         let htmlURL = contentRoot.appendingPathComponent("index.html")
-        guard !fm.fileExists(atPath: htmlURL.path) else { return }
+        let existing = try? String(contentsOf: htmlURL, encoding: .utf8)
+        if fm.fileExists(atPath: htmlURL.path), existing == nil { return }
 
         let projectJSONURL = contentRoot.appendingPathComponent("project.json")
-        guard fm.fileExists(atPath: projectJSONURL.path),
-              let data = try? Data(contentsOf: projectJSONURL),
+        guard let data = try? Data(contentsOf: projectJSONURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               json["type"] == nil,
+              json["file"] == nil,
               let presetDict = json["preset"] as? [String: Any],
               let customDir = presetDict["customdirectory"] as? String else { return }
 
         let imagesDir = contentRoot.appendingPathComponent(customDir)
         let imageExts: Set<String> = ["jpg", "jpeg", "png", "bmp", "gif", "webp", "tga", "tif", "tiff"]
         guard let contents = try? fm.contentsOfDirectory(
-            at: imagesDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+            at: imagesDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]
         ) else { return }
         let images = contents
-            .filter { imageExts.contains($0.pathExtension.lowercased()) }
+            .filter {
+                imageExts.contains($0.pathExtension.lowercased())
+                    && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !images.isEmpty else { return }
 
         let multiplier = presetDict["imageswitchtimes"] as? Int ?? 1
-        let switchTime = max(multiplier * 5, 3)
-        let imagePaths = images.map { url -> String in
-            let absPath = url.path
-            let dirPath = contentRoot.path.hasSuffix("/") ? contentRoot.path : contentRoot.path + "/"
-            if absPath.hasPrefix(dirPath) { return String(absPath.dropFirst(dirPath.count)) }
-            return url.lastPathComponent
+        let switchTime = multiplier <= 0 ? 3 : min(multiplier, Int.max / 5) * 5
+        let rootPath = contentRoot.standardizedFileURL.path + "/"
+        // Encode raw filenames once. urlPathAllowed retains CSS/URL punctuation such as
+        // parentheses and colons; percent-decoding first corrupts literal "%20" names.
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~/")
+        let imagePaths = images.compactMap { url -> String? in
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(rootPath) else { return nil }
+            return String(path.dropFirst(rootPath.count)).addingPercentEncoding(withAllowedCharacters: allowed)
         }
-        let imagesJS = "[\(imagePaths.map { "\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" }.joined(separator: ","))]"
-        let html = """
+        guard !imagePaths.isEmpty,
+              let pathsData = try? JSONSerialization.data(withJSONObject: imagePaths),
+              let imagesJS = String(data: pathsData, encoding: .utf8) else { return }
+        let html = presetSlideshowHTML(imagesJS: imagesJS, switchTime: switchTime)
+        if let existing {
+            if existing == html { return }
+            let rawPaths = images.map { String($0.standardizedFileURL.path.dropFirst(rootPath.count)) }
+            let legacyPaths = "[\(rawPaths.map { "\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" }.joined(separator: ","))]"
+            let legacyUIPaths = "[\(images.map { "\"directories/customdirectory/\($0.lastPathComponent.replacingOccurrences(of: "\"", with: "\\\""))\"" }.joined(separator: ","))]"
+            let legacyTime = multiplier <= 0 ? 3 : switchTime
+            // Even edits to a generated page's image list or interval are preserved.
+            guard existing == legacyCompactPresetHTML(imagesJS: legacyPaths, switchTime: legacyTime, legacy: true)
+                    || existing == legacyCompactPresetHTML(imagesJS: imagesJS, switchTime: switchTime)
+                    || existing == legacyExpandedPresetHTML(imagesJS: legacyUIPaths, switchTime: legacyTime) else { return }
+        }
+        try? html.write(to: htmlURL, atomically: true, encoding: .utf8)
+    }
+
+    private static func presetSlideshowHTML(imagesJS: String, switchTime: Int) -> String {
+        """
         <!DOCTYPE html><html><head><meta charset="utf-8">
+        <meta name="waifux-generated" content="preset-slideshow-v3">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
+        html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000}
+        #root{position:fixed;inset:0;width:100%;height:100%;overflow:hidden;isolation:isolate}
+        .slide{position:absolute;inset:0;display:block;width:100%;height:100%;max-width:none;max-height:none;object-fit:cover;object-position:center;opacity:0;transition:opacity 1.2s ease-in-out}
+        .slide.active{opacity:1}
+        </style></head><body><div id="root"></div>
+        <script>
+        const images=\(imagesJS); const switchTime=\(switchTime)*1000;
+        const root=document.getElementById('root');
+        // Keep only the displayed and incoming image. A layer for every full-size
+        // photo can exhaust WebKit's decoded image/texture budget before first paint.
+        const slides=[new Image(),new Image()];
+        slides.forEach(image=>{image.className='slide';image.decoding='async';image.draggable=false;root.appendChild(image);});
+        let active=-1,sequence=0,pending=-1,request=0,cleanup;
+        function showNext(){
+            if(pending!==-1)return;
+            const slot=active===0?1:0;
+            const image=slides[slot];
+            image.classList.remove('active');
+            image.style.zIndex='1';
+            const index=sequence++%images.length;
+            const token=++request;
+            pending=slot;
+            function current(){return pending===slot&&request===token;}
+            function failed(){
+                if(!current())return;
+                pending=-1;image.onload=null;image.onerror=null;image.removeAttribute('src');
+                window.setTimeout(showNext,Math.min(switchTime,1000));
+            }
+            image.onerror=failed;
+            image.onload=async()=>{
+                if(!current()||!image.naturalWidth){failed();return;}
+                try{if(image.decode)await image.decode();}catch(error){failed();return;}
+                if(!current())return;
+                image.onload=null;image.onerror=null;pending=-1;
+                const previous=active;
+                // Retain the fully opaque old frame under the incoming image.
+                // Fading both layers together would expose the black page beneath.
+                if(previous!==-1)slides[previous].style.zIndex='0';
+                void image.offsetWidth;
+                image.classList.add('active');active=slot;
+                window.clearTimeout(cleanup);
+                if(previous!==-1){
+                    cleanup=window.setTimeout(()=>{
+                        if(active!==previous&&pending!==previous){
+                            slides[previous].classList.remove('active');
+                            slides[previous].removeAttribute('src');
+                        }
+                    },1300);
+                }
+                if(images.length>1)window.setTimeout(showNext,switchTime);
+            };
+            image.src=images[index];
+        }
+        showNext();
+        </script></body></html>
+        """
+    }
+
+    /// Exact v1/v2 templates are kept only for conservative migration.
+    private static func legacyCompactPresetHTML(imagesJS: String, switchTime: Int, legacy: Bool = false) -> String {
+        let marker = legacy ? "" : "<meta name=\"waifux-generated\" content=\"preset-slideshow-v2\">\n"
+        let background = legacy ? "'url('+src+')'" : "'url(\"'+src+'\")'"
+        return """
+        <!DOCTYPE html><html><head><meta charset="utf-8">
+        \(marker)<style>
         html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000}
         .slide{position:absolute;inset:0;background-size:cover;background-position:center;opacity:0;transition:opacity 1.2s ease-in-out}
         .slide.active{opacity:1}
@@ -648,10 +742,53 @@ enum LocalWallpaperApplyService {
         <script>
         const images=\(imagesJS); const switchTime=\(switchTime)*1000; let current=0;
         const root=document.getElementById('root');
-        const slides=images.map((src,i)=>{const el=document.createElement('div');el.className='slide'+(i===0?' active':'');el.style.backgroundImage='url('+src+')';root.appendChild(el);return el;});
+        const slides=images.map((src,i)=>{const el=document.createElement('div');el.className='slide'+(i===0?' active':'');el.style.backgroundImage=\(background);root.appendChild(el);return el;});
         setInterval(()=>{slides[current].classList.remove('active');current=(current+1)%slides.length;slides[current].classList.add('active');},switchTime);
         </script></body></html>
         """
-        try? html.write(to: htmlURL, atomically: true, encoding: .utf8)
+    }
+
+    /// Exact pre-service UI template, retained only to migrate pages it previously wrote.
+    private static func legacyExpandedPresetHTML(imagesJS: String, switchTime: Int) -> String {
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+        .slideshow { position: relative; width: 100%; height: 100%; }
+        .slide {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-size: cover; background-position: center; background-repeat: no-repeat;
+            opacity: 0; transition: opacity 1.2s ease-in-out;
+        }
+        .slide.active { opacity: 1; }
+        </style>
+        </head>
+        <body>
+        <div class="slideshow" id="slideshow"></div>
+        <script>
+        const images = \(imagesJS);
+        const switchTime = \(switchTime) * 1000;
+        const container = document.getElementById('slideshow');
+        let current = 0;
+        images.forEach((src, i) => {
+            const div = document.createElement('div');
+            div.className = 'slide' + (i === 0 ? ' active' : '');
+            div.style.backgroundImage = 'url("' + src + '")';
+            container.appendChild(div);
+        });
+        const slides = container.querySelectorAll('.slide');
+        setInterval(() => {
+            slides[current].classList.remove('active');
+            current = (current + 1) % slides.length;
+            slides[current].classList.add('active');
+        }, switchTime);
+        </script>
+        </body>
+        </html>
+        """
     }
 }

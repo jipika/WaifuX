@@ -281,7 +281,7 @@ private final class TaskQueueRowView: NSView {
 
 @MainActor
 final class StatusBarController: NSObject {
-    private enum WallpaperDesignTarget {
+    private enum WallpaperDesignTarget: Sendable {
         case web(String)
         case scene(String)
         case sceneDesign(String)
@@ -371,6 +371,7 @@ final class StatusBarController: NSObject {
         self.releaseMemoryHandler = releaseMemory
         self.quitHandler = quit
         self.isConfigured = true
+        DispatchQueue.main.async { [weak self] in self?.quickSwitcherController.prewarm() }
         AppLogger.info(.startup, "Helper menu bar configured", metadata: backgroundSnapshot)
     }
 
@@ -448,6 +449,7 @@ final class StatusBarController: NSObject {
         let showQuickSwitcher = (event.type == .leftMouseUp) != clickActionsSwapped
 
         if showQuickSwitcher {
+            if quickSwitcherController.dismissForStatusItemClick() { return }
             let targetScreen = sender.window?.screen ?? NSScreen.main ?? NSScreen.screens.first
             // 打开前的参数准备（按屏查当前壁纸 / 解析设计目标）也可能是慢点，
             // 单独打点才能区分「点击到弹窗出现」到底耗在哪一段。
@@ -1127,9 +1129,8 @@ final class StatusBarController: NSObject {
 
     private func matchingMediaDownloadRecord(for currentURL: URL) -> MediaDownloadRecord? {
         MediaLibraryService.shared.downloadedItems.first { record in
-            [record.localFilePath, record.resolvedVideoFileURL?.path, record.sceneBakeArtifact?.videoPath]
-                .compactMap { $0 }
-                .contains { matchesWallpaperPath(currentURL, recordPath: $0) }
+            matchesWallpaperPath(currentURL, recordPath: record.localFilePath)
+                || record.sceneBakeArtifact.map { matchesWallpaperPath(currentURL, recordPath: $0.videoPath) } == true
         }
     }
 
@@ -1511,48 +1512,70 @@ final class StatusBarController: NSObject {
     private var cachedDesignTargetKey: String?
     private var cachedDesignTargetAt: Date?
     private static let designTargetCacheLifetime: TimeInterval = 30
+    private var designTargetTask: Task<Void, Never>?
+    private var designTargetGeneration: UInt64 = 0
+    private var designTargetTaskKey: String?
 
     private func invalidateDesignTargetCache() {
+        designTargetGeneration &+= 1
+        designTargetTask?.cancel()
+        designTargetTask = nil
+        designTargetTaskKey = nil
         cachedDesignTargetKey = nil
         cachedDesignTargetAt = nil
         cachedDesignTarget = nil
+        quickSwitcherController.updateDesignAvailability(false)
+        _ = resolvedWallpaperDesignTarget()
     }
 
+    /// The click and NSMenu tracking paths only consume a cached value.
+    /// Sidecars and project.json are read by a cancellable background worker.
     private func resolvedWallpaperDesignTarget() -> WallpaperDesignTarget? {
-        let key = (weBridge.currentWallpaperPathForDesign ?? "<none>")
-            + "|" + String(WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled"))
-        if let cachedDesignTargetKey, cachedDesignTargetKey == key,
-           let cachedDesignTargetAt,
-           Date().timeIntervalSince(cachedDesignTargetAt) < Self.designTargetCacheLifetime {
-            return cachedDesignTarget
+        let path = weBridge.currentWallpaperPathForDesign
+        let video = videoWallpaperManager.currentVideoURL
+        let isWeb = weBridge.isCurrentWallpaperWeb
+        let isScene = weBridge.isCurrentWallpaperScene
+        let realtime = WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
+        let key = "\(path ?? "")|\(video?.path ?? "")|\(isWeb)|\(isScene)|\(realtime)"
+        if cachedDesignTargetKey == key, let date = cachedDesignTargetAt,
+           Date().timeIntervalSince(date) < Self.designTargetCacheLifetime { return cachedDesignTarget }
+        if designTargetTask != nil, designTargetTaskKey != key {
+            designTargetGeneration &+= 1
+            designTargetTask?.cancel()
+            designTargetTask = nil
         }
-        let resolved = computeWallpaperDesignTarget()
-        cachedDesignTargetKey = key
-        cachedDesignTargetAt = Date()
-        cachedDesignTarget = resolved
-        return resolved
-    }
-
-    private func computeWallpaperDesignTarget() -> WallpaperDesignTarget? {
-        if let sceneWallpaperPath = currentSceneDesignWallpaperPath() {
-            return .sceneDesign(sceneWallpaperPath)
-        }
-
-        guard let wallpaperPath = weBridge.currentWallpaperPathForDesign else {
-            return nil
-        }
-        if weBridge.isCurrentWallpaperWeb {
-            guard WebWallpaperDesignService.shared.hasEditableProperties(for: wallpaperPath) else {
-                return nil
+        if designTargetTask == nil {
+            designTargetTaskKey = key
+            let generation = designTargetGeneration
+            designTargetTask = Task { [weak self] in
+                let worker = Task.detached(priority: .utility) { () -> WallpaperDesignTarget? in
+                    if let video, let sidecar = WallpaperDynamicTextParser.loadSidecar(for: video),
+                       sidecar.hasDynamicText, let source = sidecar.wallpaperPath, !source.isEmpty {
+                        return .sceneDesign(source)
+                    }
+                    guard !Task.isCancelled, let path else { return nil }
+                    if isWeb {
+                        guard let document = try? WebWallpaperDesignService.loadDocumentFromDisk(for: path),
+                              document.properties.contains(where: { $0.isEditable }) else { return nil }
+                        return .web(path)
+                    }
+                    if isScene { return realtime ? .scene(path) : .sceneDesign(path) }
+                    return nil
+                }
+                let value = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+                guard let self, !Task.isCancelled, self.designTargetGeneration == generation else { return }
+                self.designTargetTask = nil
+                self.designTargetTaskKey = nil
+                self.cachedDesignTargetKey = key
+                self.cachedDesignTargetAt = Date()
+                self.cachedDesignTarget = value
+                self.quickSwitcherController.updateDesignAvailability(value != nil)
+                self.designWallpaperItem.representedObject = value?.wallpaperPath
+                self.designWallpaperItem.isHidden = value == nil
+                self.designWallpaperItem.isEnabled = value != nil
             }
-            return .web(wallpaperPath)
         }
-        if weBridge.isCurrentWallpaperScene {
-            return WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
-                ? .scene(wallpaperPath)
-                : .sceneDesign(wallpaperPath)
-        }
-        return nil
+        return cachedDesignTargetKey == key ? cachedDesignTarget : nil
     }
 
     private func presentEditorPopover(_ present: @escaping (NSView) -> Void) {

@@ -3,6 +3,26 @@ import AVKit
 import AVFoundation
 import AppKit
 
+/// A retained hosting tree can be hidden without a SwiftUI dismantle pass.
+/// Owners use this signal to tear down decoding synchronously when dismissing.
+@MainActor
+final class LoopingVideoPlaybackActivity {
+    private var handlers: [UUID: () -> Void] = [:]
+    private(set) var isActive = false
+
+    func resume() { isActive = true }
+    func suspend() {
+        isActive = false
+        for handler in Array(handlers.values) { handler() }
+    }
+    func observeSuspension(_ handler: @escaping () -> Void) -> UUID {
+        let token = UUID()
+        handlers[token] = handler
+        return token
+    }
+    func removeObserver(_ token: UUID) { handlers.removeValue(forKey: token) }
+}
+
 struct LoopingVideoBackgroundView: NSViewRepresentable {
     enum ContentMode {
         case fill
@@ -13,12 +33,16 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
     let isMuted: Bool
     var contentMode: ContentMode = .fill
     var cornerRadius: CGFloat = 0
+    var isActive: Bool = true
+    var activity: LoopingVideoPlaybackActivity?
     /// 主源播放失败时的回退源（例如动态桌面：轻量预览片缺失 → 原片）。仅回退一次。
     var fallbackURL: URL?
+    /// Unlike onReady (which also settles errors/timeouts), this proves a displayable frame.
+    var onFirstFrame: (@MainActor @Sendable () -> Void)? = nil
     let onReady: (@MainActor @Sendable () -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onReady: onReady)
+        Coordinator(onReady: onReady, onFirstFrame: onFirstFrame)
     }
 
     func makeNSView(context: Context) -> LoopingVideoPlayerContainerView {
@@ -27,16 +51,20 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             cornerRadius: cornerRadius
         )
         context.coordinator.attach(to: view)
-        context.coordinator.update(url: url, isMuted: isMuted, fallbackURL: fallbackURL, in: view)
+        context.coordinator.bind(activity)
+        context.coordinator.update(url: url, isMuted: isMuted, isActive: isActive, fallbackURL: fallbackURL, in: view)
         return view
     }
 
     func updateNSView(_ nsView: LoopingVideoPlayerContainerView, context: Context) {
         nsView.setCornerRadius(cornerRadius)
-        context.coordinator.update(url: url, isMuted: isMuted, fallbackURL: fallbackURL, in: nsView)
+        context.coordinator.setCallbacks(onReady: onReady, onFirstFrame: onFirstFrame)
+        context.coordinator.bind(activity)
+        context.coordinator.update(url: url, isMuted: isMuted, isActive: isActive, fallbackURL: fallbackURL, in: nsView)
     }
 
     static func dismantleNSView(_ nsView: LoopingVideoPlayerContainerView, coordinator: Coordinator) {
+        coordinator.unbindActivity()
         coordinator.teardown()
     }
 
@@ -48,6 +76,10 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
         private var player: AVQueuePlayer?
         private var looper: AVPlayerLooper?
         private var onReady: (@MainActor @Sendable () -> Void)?
+        private var onFirstFrame: (@MainActor @Sendable () -> Void)?
+        private var firstFrameObservation: NSKeyValueObservation?
+        private var didSignalFirstFrame = false
+        private var requestedMuted = true
         private var readyObserver: NSObjectProtocol?
         private var failedObserver: NSObjectProtocol?
         private var statusObservation: NSKeyValueObservation?
@@ -56,18 +88,44 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
         /// 主源失败后的回退源与「只回退一次」标记
         private var fallbackURL: URL?
         private var didTryFallback = false
+        private var generation: UInt64 = 0
+        private weak var activity: LoopingVideoPlaybackActivity?
+        private var activityToken: UUID?
 
-        init(onReady: (@MainActor @Sendable () -> Void)?) {
+        func bind(_ activity: LoopingVideoPlaybackActivity?) {
+            guard self.activity !== activity else { return }
+            unbindActivity()
+            self.activity = activity
+            activityToken = activity?.observeSuspension { [weak self] in self?.teardown() }
+        }
+
+        func unbindActivity() {
+            if let activityToken { activity?.removeObserver(activityToken) }
+            activityToken = nil
+            activity = nil
+        }
+
+        init(onReady: (@MainActor @Sendable () -> Void)?,
+             onFirstFrame: (@MainActor @Sendable () -> Void)? = nil) {
             self.onReady = onReady
+            self.onFirstFrame = onFirstFrame
+        }
+
+        func setCallbacks(onReady: (@MainActor @Sendable () -> Void)?,
+                          onFirstFrame: (@MainActor @Sendable () -> Void)?) {
+            self.onReady = onReady
+            self.onFirstFrame = onFirstFrame
         }
 
         func attach(to view: LoopingVideoPlayerContainerView) {
             containerView = view
         }
 
-        func update(url: URL, isMuted: Bool, fallbackURL: URL?, in view: LoopingVideoPlayerContainerView) {
+        func update(url: URL, isMuted: Bool, isActive: Bool, fallbackURL: URL?, in view: LoopingVideoPlayerContainerView) {
             attach(to: view)
+            guard isActive, activity?.isActive != false else { teardown(); return }
             self.fallbackURL = fallbackURL
+            requestedMuted = isMuted
 
             if requestedURL != url {
                 configurePlayer(with: url, in: view)
@@ -79,6 +137,10 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
         }
 
         func teardown() {
+            generation &+= 1
+            firstFrameObservation?.invalidate()
+            firstFrameObservation = nil
+            didSignalFirstFrame = false
             resolveTask?.cancel()
             resolveTask = nil
             if let observer = readyObserver {
@@ -103,7 +165,7 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
         }
 
         private func signalReadyOnce() {
-            guard !didSignalReady else { return }
+            guard requestedURL != nil, !didSignalReady else { return }
             didSignalReady = true
             onReady?()
         }
@@ -111,6 +173,7 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
         private func configurePlayer(with url: URL, in view: LoopingVideoPlayerContainerView) {
             teardown()
             requestedURL = url
+            let requestGeneration = generation
             didSignalReady = false
 
             // 本地文件：可播性兜底——AVFoundation 打不开（如 elst 计数损坏的
@@ -121,18 +184,20 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
                     guard let self else { return }
                     do {
                         let playable = try await VideoRepairService.playableVideoURL(for: url)
-                        guard !Task.isCancelled, self.requestedURL == url else { return }
+                        guard !Task.isCancelled, self.generation == requestGeneration, self.requestedURL == url else { return }
                         guard let container = self.containerView else { return }
                         self.startPlayback(with: playable, in: container)
                     } catch is CancellationError {
                         // teardown 已清场
                     } catch {
+                        guard self.generation == requestGeneration, !Task.isCancelled else { return }
                         print("[LoopingVideoBackground] repair failed: \(url.lastPathComponent) \(error)")
                         self.signalReadyOnce()
                     }
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                    self?.signalReadyOnce()
+                    guard let self, self.generation == requestGeneration else { return }
+                    self.signalReadyOnce()
                 }
                 return
             }
@@ -143,17 +208,19 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
                     guard let self else { return }
                     do {
                         let playable = try await VideoPreloader.shared.resolvePlayableURL(for: url)
-                        guard !Task.isCancelled, self.requestedURL == url else { return }
+                        guard !Task.isCancelled, self.generation == requestGeneration, self.requestedURL == url else { return }
                         guard let container = self.containerView else { return }
                         self.startPlayback(with: playable, in: container)
                     } catch {
+                        guard self.generation == requestGeneration, !Task.isCancelled else { return }
                         print("[LoopingVideoBackground] resolve/download failed: \(url.lastPathComponent) \(error)")
                         self.signalReadyOnce()
                     }
                 }
                 // 下载期间先结束 loading 遮罩，由底层封面顶着
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                    self?.signalReadyOnce()
+                    guard let self, self.generation == requestGeneration else { return }
+                    self.signalReadyOnce()
                 }
                 return
             }
@@ -167,6 +234,12 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             in view: LoopingVideoPlayerContainerView,
             remoteHeaders: [String: String]? = nil
         ) {
+            guard requestedURL != nil else { return }
+            generation &+= 1
+            let playbackGeneration = generation
+            firstFrameObservation?.invalidate()
+            firstFrameObservation = nil
+            didSignalFirstFrame = false
             // 清理上一次播放器，但保留 requestedURL / resolveTask 语义
             if let observer = readyObserver {
                 NotificationCenter.default.removeObserver(observer)
@@ -203,18 +276,34 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             item.audioTimePitchAlgorithm = .timeDomain
 
             let queuePlayer = AVQueuePlayer()
+            queuePlayer.isMuted = requestedMuted
+            queuePlayer.volume = requestedMuted ? 0 : 1
             queuePlayer.actionAtItemEnd = .none
             queuePlayer.automaticallyWaitsToMinimizeStalling = true
 
             let looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
             view.playerLayer.player = queuePlayer
+            firstFrameObservation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+                let ready = layer.isReadyForDisplay
+                DispatchQueue.main.async { [weak self] in
+                    guard ready, let self, self.generation == playbackGeneration,
+                          self.containerView?.playerLayer.isReadyForDisplay == true,
+                          self.containerView?.playerLayer.player === self.player,
+                          !self.didSignalFirstFrame else { return }
+                    self.didSignalFirstFrame = true
+                    self.onFirstFrame?()
+                }
+            }
 
             readyObserver = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemNewAccessLogEntry,
                 object: item,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.signalReadyOnce() }
+                MainActor.assumeIsolated {
+                    guard let self, self.generation == playbackGeneration else { return }
+                    self.signalReadyOnce()
+                }
             }
 
             failedObserver = NotificationCenter.default.addObserver(
@@ -222,14 +311,17 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
                 object: item,
                 queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.signalReadyOnce() }
+                MainActor.assumeIsolated {
+                    guard let self, self.generation == playbackGeneration else { return }
+                    self.signalReadyOnce()
+                }
             }
 
             statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] observed, _ in
                 let status = observed.status
                 let errorDescription = observed.error?.localizedDescription ?? "?"
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self, self.generation == playbackGeneration else { return }
                     guard status == .readyToPlay || status == .failed else { return }
                     if status == .failed {
                         print("[LoopingVideoBackground] item failed: \(errorDescription)")
@@ -246,7 +338,8 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.signalReadyOnce()
+                guard let self, self.generation == playbackGeneration else { return }
+                self.signalReadyOnce()
             }
 
             queuePlayer.play()

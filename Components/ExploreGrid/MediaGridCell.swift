@@ -87,6 +87,8 @@ final class MediaGridCell: ExploreGridItem {
     private static let gifProbePreheatDelay: UInt64 = 250_000_000
     private var shouldRestoreHoverAfterConfigure = false
 
+    // 基类 snapshot 还会核对实际上屏 imageIdentity，复用中的旧封面不能成为新项的源。
+    override var cardTransitionItemID: String? { currentMedia?.id }
     override var hoverScaleFactor: CGFloat { 1.02 }
     override var shouldAnimateBorderOnHover: Bool { true }
     override var shouldShowShadowOnHover: Bool { true }
@@ -115,6 +117,7 @@ final class MediaGridCell: ExploreGridItem {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        if let id = currentMedia?.id { WallpaperTransitionImageLoader.cancelPrewarm(itemID: id) }
         currentMedia = nil
         titleLabel.stringValue = ""
         updateHeartSymbol(isFavorite: false)
@@ -134,6 +137,7 @@ final class MediaGridCell: ExploreGridItem {
         guard let media = item as? MediaItem else { return }
         // 复用 cell 换了数据：先停掉旧 hover GIF 播放与探测缓存
         if currentMedia?.id != media.id {
+            if let id = currentMedia?.id { WallpaperTransitionImageLoader.cancelPrewarm(itemID: id) }
             shouldRestoreHoverAfterConfigure = isHovered
             teardownHoverGIFPlayback()
             resolvedGIFURL = nil
@@ -162,7 +166,12 @@ final class MediaGridCell: ExploreGridItem {
         lastImageTargetSize = targetSize
         // preferGIFMiddleFrame：poster 本身是 GIF 时静态封面取中间帧，
         // 避免「前几帧全黑」的动图在非 hover 态常驻一张黑图。
-        loadImage(urls: preferredImageURLs(for: media), targetSize: targetSize, preferGIFMiddleFrame: true)
+        loadImage(
+            urls: preferredImageURLs(for: media),
+            targetSize: targetSize,
+            preferGIFMiddleFrame: true,
+            imageIdentity: media.id
+        )
 
         if containerView.bounds.width > 0, containerView.bounds.height > 0 {
             layoutContentFrames()
@@ -221,7 +230,12 @@ final class MediaGridCell: ExploreGridItem {
                 || targetSize.height > lastImageTargetSize.height + 24
             if sizeGrew {
                 lastImageTargetSize = targetSize
-                loadImage(urls: preferredImageURLs(for: media), targetSize: targetSize, preferGIFMiddleFrame: true)
+                loadImage(
+                    urls: preferredImageURLs(for: media),
+                    targetSize: targetSize,
+                    preferGIFMiddleFrame: true,
+                    imageIdentity: media.id
+                )
             }
         }
     }
@@ -243,8 +257,13 @@ final class MediaGridCell: ExploreGridItem {
 
     override func hoverStateDidChange(_ hovering: Bool) {
         if hovering {
+            if let media = currentMedia, let window = view.window, let content = window.contentView {
+                WallpaperTransitionImageLoader.prewarmMedia(item: media, viewportSize: content.bounds.size,
+                                                            displayScale: window.backingScaleFactor)
+            }
             startHoverGIFPlaybackIfNeeded()
         } else {
+            if let id = currentMedia?.id { WallpaperTransitionImageLoader.cancelPrewarm(itemID: id) }
             // 停止播放并释放 GIF 原始数据（大 GIF 可达数十 MB，连续 hover 多卡时会累积）；
             // 已探测的 URL 保留，再次 hover 命中 Kingfisher 磁盘缓存，无需重新探测
             teardownHoverGIFPlayback()

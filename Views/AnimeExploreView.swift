@@ -46,11 +46,14 @@ struct AnimeExploreView: View {
     @ObservedObject var viewModel: AnimeViewModel
     @Binding var selectedAnime: AnimeSearchResult?
     var isVisible: Bool = true
+    let onPrepareCardTransition: ((CardTransitionSource?) -> Void)?
 
-    init(viewModel: AnimeViewModel, selectedAnime: Binding<AnimeSearchResult?>, isVisible: Bool = true) {
+    init(viewModel: AnimeViewModel, selectedAnime: Binding<AnimeSearchResult?>, isVisible: Bool = true,
+         onPrepareCardTransition: ((CardTransitionSource?) -> Void)? = nil) {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._selectedAnime = selectedAnime
         self.isVisible = isVisible
+        self.onPrepareCardTransition = onPrepareCardTransition
     }
     @StateObject private var exploreAtmosphere = ExploreAtmosphereController(wallpaperMode: false)
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
@@ -77,6 +80,7 @@ struct AnimeExploreView: View {
     @State private var measuredHeaderHeight: CGFloat = 0
     @State private var isHeaderContentMounted = true
     @StateObject private var scrollCoordinator = AnimeExploreScrollCoordinator()
+    @StateObject private var cardTransitionRegistry = AnimeCardTransitionRegistry()
 
     private var shouldUseLightweightEffects: Bool {
         (videoWallpaperManager.isVideoWallpaperActive && !videoWallpaperManager.isPaused) ||
@@ -136,13 +140,18 @@ struct AnimeExploreView: View {
             }
         }
         .onAppear {
+            cardTransitionRegistry.isVisible = isVisible
             if isFirstAppearance {
                 Task { await performFirstAppearanceLoad() }
             } else {
                 handleAppear()
             }
         }
+        .onDisappear {
+            cardTransitionRegistry.isVisible = false
+        }
         .onChange(of: isVisible) { _, visible in
+            cardTransitionRegistry.isVisible = visible
             if !visible {
                 searchTask?.cancel()
                 loadMoreTask?.cancel()
@@ -448,13 +457,17 @@ struct AnimeExploreView: View {
             ForEach(0..<columnCount, id: \.self) { columnIndex in
                 LazyVStack(spacing: spacing) {
                     ForEach(columnItems[safe: columnIndex] ?? []) { anime in
-                        AnimeCardView(
+                        AnimeExploreGridCard(
                             anime: anime,
-                            cardWidth: cardWidth
-                        ) {
-                            selectedAnime = anime
+                            cardWidth: cardWidth,
+                            isVisible: isVisible,
+                            transitionRegistry: cardTransitionRegistry
+                        ) { selected, source in
+                            // Source identity is the model's existing String id, never an index,
+                            // URL, or title. All image aspect ratios can use the liquid reveal.
+                            onPrepareCardTransition?(source?.itemID == selected.id ? source : nil)
+                            selectedAnime = selected
                         }
-                        .equatable()
                         // ⚡ 显式设定卡片高度，让 LazyVStack 实现真正的懒加载。
                         .frame(height: cardWidth * 1.4 + 44)
                     }
