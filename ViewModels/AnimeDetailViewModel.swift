@@ -762,7 +762,7 @@ class AnimeDetailViewModel: ObservableObject {
                let url = URL(string: firstSource.url) {
                 self.setupPlayer(with: url, episode: episode, sourceIndex: sourceIndex)
             } else {
-                videoError = "未找到可播放的视频"
+                videoError = t("未找到可播放的视频")
             }
 
         case .error(let error):
@@ -773,7 +773,7 @@ class AnimeDetailViewModel: ObservableObject {
             presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex)
 
         case .timeout:
-            videoError = "视频解析超时，请重试或切换其他视频源"
+            videoError = t("视频解析超时，请重试或切换其他视频源")
         }
     }
 
@@ -789,7 +789,7 @@ class AnimeDetailViewModel: ObservableObject {
         guard FileManager.default.fileExists(atPath: record.localFilePath) else {
             // 缓存文件被外部清理：移除失效记录并提示
             AnimeDownloadStore.shared.removeRecord(id: record.id, deleteFile: false)
-            videoError = "本地缓存文件已失效，请重新下载"
+            videoError = t("本地缓存文件已失效，请重新下载")
             return
         }
 
@@ -855,7 +855,7 @@ class AnimeDetailViewModel: ObservableObject {
         switch result {
         case .success(let sources):
             guard let first = sources.first, let url = URL(string: first.url) else {
-                videoError = "无法解析视频地址，下载失败"
+                videoError = t("无法解析视频地址，下载失败")
                 return
             }
             // HLS 判定优先取 extractor 给的 type，URL 形态只作兜底
@@ -869,11 +869,11 @@ class AnimeDetailViewModel: ObservableObject {
                 isHLS: isHLS
             )
         case .error(let message):
-            videoError = "下载解析失败：\(message)"
+            videoError = String(format: t("下载解析失败：%@"), String(describing: message))
         case .captcha:
             presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex)
         case .timeout:
-            videoError = "下载解析超时，请重试"
+            videoError = t("下载解析超时，请重试")
         }
     }
 
@@ -954,7 +954,7 @@ class AnimeDetailViewModel: ObservableObject {
             SleepPreventer.shared.stopPreventingSleep()
         case .failed(let msg):
             print("[AnimeDetailViewModel] ❌ 播放器状态: error - \(msg)")
-            videoError = "视频播放失败，请尝试切换其他视频源"
+            videoError = t("视频播放失败，请尝试切换其他视频源")
             isBuffering = false
             isPlaying = false
             SleepPreventer.shared.stopPreventingSleep()
@@ -1003,7 +1003,7 @@ class AnimeDetailViewModel: ObservableObject {
         isBuffering = false
         SleepPreventer.shared.stopPreventingSleep()
         if let error = error {
-            videoError = "播放失败: \(error.localizedDescription)"
+            videoError = String(format: t("播放失败: %@"), String(describing: error.localizedDescription))
             print("[AnimeDetailViewModel] ❌ 播放完成(出错): \(error.localizedDescription)")
         } else {
             print("[AnimeDetailViewModel] ✅ 播放正常完成")

@@ -127,6 +127,7 @@ WaifuX 的主要数据源 [Wallhaven](https://wallhaven.cc) 托管在海外服�
 | 🇨🇳 简体中文 | ✅ 完整支持 |
 | 🇺🇸 English | ✅ Full Support |
 | 🇯🇵 日本語 | ✅ 完全対応 |
+| [🇪🇸 Español (España)](LOCALIZATION.md) | ✅ 完整支持 |
 
 ---
 

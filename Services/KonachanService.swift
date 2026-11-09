@@ -273,7 +273,7 @@ actor KonachanService {
         if let networkError = error as? NetworkError,
            case .loginRequired = networkError {
             return NetworkError.loginRequired(
-                message: "Konachan 请求被 Cloudflare 拦截。请在「设置 → Konachan」完成登录或人机验证后重试。"
+                message: LocalizationService.shared.t("Konachan 请求被 Cloudflare 拦截。请在「设置 → Konachan」完成登录或人机验证后重试。")
             )
         }
         return error
@@ -326,18 +326,20 @@ extension KonachanService {
     }
 
     /// 分类列表（≈ 10 个，类似 4K 源的分类）
-    static let categories: [KonachanCategory] = [
-        KonachanCategory(id: "genshin", name: "原神", query: "genshin_impact"),
-        KonachanCategory(id: "honkai", name: "崩坏", query: "honkai_impact"),
-        KonachanCategory(id: "zzz", name: "绝区零", query: "zenless_zone_zero"),
-        KonachanCategory(id: "fgo", name: "Fate", query: "fate_(series)"),
-        KonachanCategory(id: "touhou", name: "东方", query: "touhou"),
-        KonachanCategory(id: "blue_archive", name: "蔚蓝档案", query: "blue_archive"),
-        KonachanCategory(id: "azur_lane", name: "碧蓝航线", query: "azur_lane"),
-        KonachanCategory(id: "vocaloid", name: "VOCALOID", query: "vocaloid"),
-        KonachanCategory(id: "landscape", name: "风景", query: "landscape"),
-        KonachanCategory(id: "cyberpunk", name: "赛博朋克", query: "cyberpunk_2077"),
-    ]
+    static var categories: [KonachanCategory] {
+        [
+            KonachanCategory(id: "genshin", name: LocalizationService.shared.t("原神"), query: "genshin_impact"),
+            KonachanCategory(id: "honkai", name: LocalizationService.shared.t("崩坏"), query: "honkai_impact"),
+            KonachanCategory(id: "zzz", name: LocalizationService.shared.t("绝区零"), query: "zenless_zone_zero"),
+            KonachanCategory(id: "fgo", name: "Fate", query: "fate_(series)"),
+            KonachanCategory(id: "touhou", name: LocalizationService.shared.t("东方"), query: "touhou"),
+            KonachanCategory(id: "blue_archive", name: LocalizationService.shared.t("蔚蓝档案"), query: "blue_archive"),
+            KonachanCategory(id: "azur_lane", name: LocalizationService.shared.t("碧蓝航线"), query: "azur_lane"),
+            KonachanCategory(id: "vocaloid", name: "VOCALOID", query: "vocaloid"),
+            KonachanCategory(id: "landscape", name: LocalizationService.shared.t("风景"), query: "landscape"),
+            KonachanCategory(id: "cyberpunk", name: LocalizationService.shared.t("赛博朋克"), query: "cyberpunk_2077"),
+        ]
+    }
 
     /// 标签名 → 中文显示名映射。未收录的标签自动将下划线替换为空格。
     private static let tagDisplayNames: [String: String] = [
@@ -379,7 +381,7 @@ extension KonachanService {
 
     /// 获取标签的中文显示名
     static func displayName(for tagName: String) -> String {
-        if let localized = tagDisplayNames[tagName] { return localized }
+        if let localized = tagDisplayNames[tagName] { return LocalizationService.shared.legacyLabel(localized) }
         return tagName.replacingOccurrences(of: "_", with: " ")
     }
 }

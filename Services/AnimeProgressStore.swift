@@ -46,9 +46,9 @@ struct AnimeProgressSummary: Codable, Equatable {
     
     var continueWatchingText: String {
         if let epNum = lastEpisodeNumber {
-            return "看到第 \(epNum) 集"
+            return String(format: t("看到第 %@ 集"), String(describing: epNum))
         }
-        return "继续观看"
+        return t("animeDetail.continueWatching")
     }
 }
 

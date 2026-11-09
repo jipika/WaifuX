@@ -140,6 +140,7 @@ App Launch → Check for Updates → Load Latest Rules → Ready to Use
 | 🇨🇳 简体中文 | ✅ Full Support |
 | 🇺🇸 English | ✅ Full Support |
 | 🇯🇵 日本語 | ✅ Full Support |
+| [🇪🇸 Español (España)](LOCALIZATION.md) | ✅ Full Support |
 
 ---
 

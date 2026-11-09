@@ -1077,7 +1077,7 @@ private struct LocalEpisodeRow: View {
                     .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("第 \(record.episodeNumber) 集")
+                    Text(String(format: t("episode.number"), record.episodeNumber))
                         .font(.system(size: 14, weight: isPlaying ? .semibold : .regular))
                         .foregroundStyle(isPlaying ? Color(hex: "00AEEC") : .white.opacity(0.85))
                         .lineLimit(1)
@@ -1141,7 +1141,7 @@ private struct DownloadingTaskRow: View {
                 .frame(width: 24, height: 24)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(task.episodeName ?? "第 \(task.episodeNumber) 集")
+                Text(task.episodeName ?? String(format: t("episode.number"), task.episodeNumber))
                     .font(.system(size: 14))
                     .foregroundStyle(.white.opacity(0.8))
                     .lineLimit(1)

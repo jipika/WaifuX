@@ -820,7 +820,7 @@ class SettingsViewModel: ObservableObject {
             timedOut = true
             preflight.cancel()
             client.applicationQuitFailed(NSError(domain: "WaifuXHelper", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "后台服务停止超时，未重置任何数据"]))
+                userInfo: [NSLocalizedDescriptionKey: t("后台服务停止超时，未重置任何数据")]))
         }
         defer { deadline.cancel() }
         do {
@@ -862,7 +862,7 @@ class SettingsViewModel: ObservableObject {
         if let supportURL = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             let targets = [
                 supportURL.appendingPathComponent("WaifuX"),
-                supportURL.appendingPathComponent("WallHaven")
+                supportURL.appendingPathComponent(t("wallhaven"))
             ]
             for url in targets {
                 try? fm.removeItem(at: url)
@@ -907,14 +907,14 @@ class SettingsViewModel: ObservableObject {
         DataSourceProfileStore.setActiveProfileID(id)
         refreshDataSourceProfiles()
         Task { await MediaService.shared.clearCache() }
-        dataSourceStatusMessage = "已切换到 \(activeDataSourceProfile.name)"
+        dataSourceStatusMessage = String(format: t("已切换到 %@"), String(describing: activeDataSourceProfile.name))
     }
 
     func resetDataSourceProfiles() {
         DataSourceProfileStore.reset()
         refreshDataSourceProfiles()
         Task { await MediaService.shared.clearCache() }
-        dataSourceStatusMessage = "已恢复内置默认数据源配置"
+        dataSourceStatusMessage = t("已恢复内置默认数据源配置")
     }
 
     func removeImportedDataSourceProfile(id: String) {
@@ -922,7 +922,7 @@ class SettingsViewModel: ObservableObject {
             try DataSourceProfileStore.removeImportedProfile(id: id)
             refreshDataSourceProfiles()
             Task { await MediaService.shared.clearCache() }
-            dataSourceStatusMessage = "已移除导入的数据源配置"
+            dataSourceStatusMessage = t("已移除导入的数据源配置")
         } catch {
             dataSourceStatusMessage = error.localizedDescription
         }
@@ -934,7 +934,7 @@ class SettingsViewModel: ObservableObject {
             _ = try DataSourceProfileStore.importProfiles(from: data)
             refreshDataSourceProfiles()
             Task { await MediaService.shared.clearCache() }
-            dataSourceStatusMessage = "已导入数据源配置"
+            dataSourceStatusMessage = t("已导入数据源配置")
         } catch {
             dataSourceStatusMessage = error.localizedDescription
         }
@@ -946,16 +946,16 @@ class SettingsViewModel: ObservableObject {
 
             guard let httpResponse = response as? HTTPURLResponse,
                   httpResponse.statusCode == 200 else {
-                dataSourceStatusMessage = "下载失败: 服务器返回错误"
+                dataSourceStatusMessage = t("下载失败: 服务器返回错误")
                 return
             }
 
             _ = try DataSourceProfileStore.importProfiles(from: data)
             refreshDataSourceProfiles()
             await MediaService.shared.clearCache()
-            dataSourceStatusMessage = "已从远程 URL 导入数据源配置"
+            dataSourceStatusMessage = t("已从远程 URL 导入数据源配置")
         } catch {
-            dataSourceStatusMessage = "下载失败: \(error.localizedDescription)"
+            dataSourceStatusMessage = String(format: t("下载失败: %@"), String(describing: error.localizedDescription))
         }
     }
 
@@ -968,11 +968,11 @@ class SettingsViewModel: ObservableObject {
             if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
                 // 更新现有配置
                 profiles[index] = profile
-                dataSourceStatusMessage = "已更新配置: \(profile.name)"
+                dataSourceStatusMessage = String(format: t("已更新配置: %@"), String(describing: profile.name))
             } else {
                 // 添加新配置
                 profiles.append(profile)
-                dataSourceStatusMessage = "已创建配置: \(profile.name)"
+                dataSourceStatusMessage = String(format: t("已创建配置: %@"), String(describing: profile.name))
             }
 
             // 保存到 UserDefaults
@@ -980,7 +980,7 @@ class SettingsViewModel: ObservableObject {
             refreshDataSourceProfiles()
             Task { await MediaService.shared.clearCache() }
         } catch {
-            dataSourceStatusMessage = "保存失败: \(error.localizedDescription)"
+            dataSourceStatusMessage = String(format: t("保存失败: %@"), String(describing: error.localizedDescription))
         }
     }
 

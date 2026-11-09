@@ -1259,7 +1259,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "原始壁纸文件不存在"]
+                userInfo: [NSLocalizedDescriptionKey: t("原始壁纸文件不存在")]
             )
         }
 
@@ -1432,7 +1432,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "无法读取原始壁纸尺寸"]
+                userInfo: [NSLocalizedDescriptionKey: t("无法读取原始壁纸尺寸")]
             )
         }
 
@@ -1480,7 +1480,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "无法解码原始壁纸"]
+                userInfo: [NSLocalizedDescriptionKey: t("无法解码原始壁纸")]
             )
         }
 
@@ -1491,7 +1491,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "无法解码原始壁纸图像"]
+                userInfo: [NSLocalizedDescriptionKey: t("无法解码原始壁纸图像")]
             )
         }
 
@@ -1513,7 +1513,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 5,
-                userInfo: [NSLocalizedDescriptionKey: "壁纸图像尺寸无效"]
+                userInfo: [NSLocalizedDescriptionKey: t("壁纸图像尺寸无效")]
             )
         }
 
@@ -1562,7 +1562,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 6,
-                userInfo: [NSLocalizedDescriptionKey: "无法渲染模糊填充壁纸"]
+                userInfo: [NSLocalizedDescriptionKey: t("无法渲染模糊填充壁纸")]
             )
         }
 
@@ -1578,7 +1578,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 7,
-                userInfo: [NSLocalizedDescriptionKey: "无法创建模糊填充壁纸文件"]
+                userInfo: [NSLocalizedDescriptionKey: t("无法创建模糊填充壁纸文件")]
             )
         }
 
@@ -1591,7 +1591,7 @@ actor PortraitBlurFillWallpaperService {
             throw NSError(
                 domain: "PortraitBlurFillWallpaper",
                 code: 8,
-                userInfo: [NSLocalizedDescriptionKey: "无法写入模糊填充壁纸文件"]
+                userInfo: [NSLocalizedDescriptionKey: t("无法写入模糊填充壁纸文件")]
             )
         }
 

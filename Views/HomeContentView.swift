@@ -1940,11 +1940,11 @@ private struct HomeLoadFailedFallback: View {
                 Image(systemName: "wifi.exclamationmark")
                     .font(.system(size: 30, weight: .light))
                     .foregroundStyle(.white.opacity(0.5))
-                Text("首页内容加载失败，请检查网络")
+                Text(t("首页内容加载失败，请检查网络"))
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.white.opacity(0.6))
                 Button(action: onRetry) {
-                    Text("重试")
+                    Text(t("ruleMarket.retry"))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20)
@@ -1964,7 +1964,7 @@ private struct HomeShelfEmptyFallback: View {
         ZStack {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color.white.opacity(0.05))
-            Text("暂无内容")
+            Text(t("error.empty.title"))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.45))
         }

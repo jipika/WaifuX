@@ -719,13 +719,13 @@ enum PixivRankingMode: String, CaseIterable, Sendable {
     /// 显示名称
     var displayName: String {
         switch self {
-        case .daily: return "日榜"
-        case .weekly: return "周榜"
-        case .monthly: return "月榜"
-        case .rookie: return "新人"
-        case .original: return "原创"
-        case .male: return "男性人気"
-        case .female: return "女性人気"
+        case .daily: return t("日榜")
+        case .weekly: return t("周榜")
+        case .monthly: return t("月榜")
+        case .rookie: return t("新人")
+        case .original: return t("animeTag.original")
+        case .male: return t("男性人気")
+        case .female: return t("女性人気")
         }
     }
 }
@@ -741,10 +741,10 @@ public enum PixivWorkType: String, CaseIterable, Sendable {
 
     var displayName: String {
         switch self {
-        case .all: return "全部"
-        case .illust: return "插画"
-        case .manga: return "漫画"
-        case .ugoira: return "动图"
+        case .all: return t("ruleMarket.all")
+        case .illust: return t("插画")
+        case .manga: return t("漫画")
+        case .ugoira: return t("动图")
         }
     }
 
@@ -783,10 +783,10 @@ enum PixivSearchSort: String, CaseIterable, Sendable {
 
     var displayName: String {
         switch self {
-        case .dateD: return "最新"
-        case .popularD: return "人气"
-        case .popularWeekD: return "周人气"
-        case .popularMonthD: return "月人气"
+        case .dateD: return t("anime.sortByNewest")
+        case .popularD: return t("人气")
+        case .popularWeekD: return t("周人气")
+        case .popularMonthD: return t("月人气")
         }
     }
 

@@ -61,7 +61,7 @@ final class FolderLockService: ObservableObject {
     private func authenticate(reason: String) async -> Bool {
         let context = LAContext()
         context.localizedReason = reason
-        context.localizedFallbackTitle = "输入密码"
+        context.localizedFallbackTitle = LocalizationService.shared.t("输入密码")
 
         var error: NSError?
 

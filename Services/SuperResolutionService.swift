@@ -313,13 +313,13 @@ enum SuperResolutionError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .deviceNotAvailable:
-            return "Metal 设备不可用"
+            return t("Metal 设备不可用")
         case .processingFailed:
-            return "超分辨率处理失败"
+            return t("超分辨率处理失败")
         case .invalidInput:
-            return "无效的输入数据"
+            return t("无效的输入数据")
         case .modelNotLoaded:
-            return "AI 模型未加载"
+            return t("AI 模型未加载")
         }
     }
 }

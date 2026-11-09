@@ -205,7 +205,7 @@ private final class CropAdjustOverlayView: NSView {
 
         // 提示文字
         let text = CATextLayer()
-        text.string = "拖动平移 · 滚轮缩放 · ESC 退出"
+        text.string = LocalizationService.shared.t("拖动平移 · 滚轮缩放 · ESC 退出")
         text.foregroundColor = NSColor.white.cgColor
         text.fontSize = 16
         text.alignmentMode = .center

@@ -81,7 +81,7 @@ final class DynamicWallpaperService: ObservableObject {
             return true
         }
 
-        errorMessage = "未找到动态桌面数据文件，请将解密后的 JSON 文件放入应用支持目录"
+        errorMessage = t("未找到动态桌面数据文件，请将解密后的 JSON 文件放入应用支持目录")
         isDataReady = false
         return false
     }
@@ -98,7 +98,7 @@ final class DynamicWallpaperService: ObservableObject {
         let exclusiveURL = directory.appendingPathComponent(exclusiveFileName)
 
         guard loadJSONFiles(collectionURL: collectionURL, exclusiveURL: exclusiveURL) else {
-            errorMessage = "在 \(directory.path) 中未找到有效的 JSON 数据文件"
+            errorMessage = String(format: t("在 %@ 中未找到有效的 JSON 数据文件"), String(describing: directory.path))
             isDataReady = false
             return false
         }
@@ -126,7 +126,7 @@ final class DynamicWallpaperService: ObservableObject {
 
             guard parseAndAppend(data: colData, listType: .collection),
                   parseAndAppend(data: excData, listType: .exclusive) else {
-                errorMessage = "远程 JSON 数据解析失败"
+                errorMessage = t("远程 JSON 数据解析失败")
                 isDataReady = false
                 return false
             }
@@ -134,7 +134,7 @@ final class DynamicWallpaperService: ObservableObject {
             isDataReady = true
             return true
         } catch {
-            errorMessage = "远程数据加载失败: \(error.localizedDescription)"
+            errorMessage = String(format: t("远程数据加载失败: %@"), String(describing: error.localizedDescription))
             isDataReady = false
             return false
         }
@@ -302,24 +302,24 @@ final class DynamicWallpaperService: ObservableObject {
         }
         guard isDataReady else {
             throw NSError(domain: "DynamicWallpaperService", code: -1,
-                         userInfo: [NSLocalizedDescriptionKey: "动态桌面数据尚未加载"])
+                         userInfo: [NSLocalizedDescriptionKey: t("动态桌面数据尚未加载")])
         }
 
         // 从 URL 中提取 videoName（最后一段路径）
         guard let url = URL(string: urlString) else {
             throw NSError(domain: "DynamicWallpaperService", code: -2,
-                         userInfo: [NSLocalizedDescriptionKey: "无效的 URL"])
+                         userInfo: [NSLocalizedDescriptionKey: t("无效的 URL")])
         }
         let videoName = url.lastPathComponent
         guard !videoName.isEmpty else {
             throw NSError(domain: "DynamicWallpaperService", code: -3,
-                         userInfo: [NSLocalizedDescriptionKey: "无法从 URL 中提取视频文件名"])
+                         userInfo: [NSLocalizedDescriptionKey: t("无法从 URL 中提取视频文件名")])
         }
 
         // 在原始数据中查找匹配的 videoName
         guard let rawItem = allRawItems.first(where: { $0.videoName == videoName }) else {
             throw NSError(domain: "DynamicWallpaperService", code: -4,
-                         userInfo: [NSLocalizedDescriptionKey: "未找到与链接匹配的动态桌面视频"])
+                         userInfo: [NSLocalizedDescriptionKey: t("未找到与链接匹配的动态桌面视频")])
         }
 
         // 检查缓存

@@ -180,7 +180,7 @@ struct Wallpaper: Identifiable, Codable, Hashable {
         case "people":
             return t("people")
         case "manga":
-            return "漫画"
+            return t("漫画")
         default:
             return category.capitalized
         }

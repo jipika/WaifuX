@@ -163,7 +163,7 @@ final actor CloudSyncWebDAVClient {
     /// 检查 HTTP 响应
     private func checkResponse(_ response: URLResponse, url: URL) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw CloudSyncError.webDAVProtocolError(reason: "非 HTTP 响应")
+            throw CloudSyncError.webDAVProtocolError(reason: LocalizationService.shared.t("非 HTTP 响应"))
         }
 
         switch httpResponse.statusCode {
@@ -219,7 +219,7 @@ final actor CloudSyncWebDAVClient {
         let parser = WebDAVXMLParser(data: data)
         if !parser.parse() {
             throw CloudSyncError.webDAVProtocolError(
-                reason: "PROPFIND XML 解析失败"
+                reason: LocalizationService.shared.t("PROPFIND XML 解析失败")
             )
         }
         return parser.resources

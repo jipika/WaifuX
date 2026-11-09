@@ -17,10 +17,10 @@ enum SceneOfflineBakeError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .cliNotFound: return "未找到 wallpaper-wgpu"
-        case .webCliNotFound: return "未找到 wallpaperengine-cli"
-        case .ineligible: return "当前 Scene 不适合离线烘焙（资格不足）"
-        case .contentRootMissing: return "内容目录不存在，请重新下载"
+        case .cliNotFound: return t("未找到 wallpaper-wgpu")
+        case .webCliNotFound: return t("未找到 wallpaperengine-cli")
+        case .ineligible: return t("当前 Scene 不适合离线烘焙（资格不足）")
+        case .contentRootMissing: return t("内容目录不存在，请重新下载")
         case .insufficientMemory: return LocalizationService.shared.t("sceneBake.error.insufficientMemory.bake")
         case .concurrentBakeInProgress: return LocalizationService.shared.t("sceneBake.error.concurrent")
         case .screenCapturePermissionRequired: return LocalizationService.shared.t("sceneBake.error.screenCapturePermission")
@@ -1106,7 +1106,7 @@ enum SceneOfflineBakeService {
         let startedAt = Date()
 
         guard SceneBakeEligibilityAnalyzer.sceneContentRootIfEligibleForAnalysis(localFileURL: contentRoot) != nil else {
-            for t in targets { outcomes[t.screenID] = .failed("非 scene 工程") }
+            for t in targets { outcomes[t.screenID] = .failed(LocalizationService.shared.t("非 scene 工程")) }
             return outcomes
         }
 
@@ -1127,7 +1127,7 @@ enum SceneOfflineBakeService {
         var groups: [String: (spec: SceneTransitionPosterSpec, target: TransitionPosterTarget, screenIDs: [String])] = [:]
         for t in targets {
             guard t.cropSignature == (t.cropArguments.isEmpty ? "none" : t.cropArguments.joined(separator: " ")) else {
-                outcomes[t.screenID] = .failed("crop 签名与当前渲染参数不一致")
+                outcomes[t.screenID] = .failed(LocalizationService.shared.t("crop 签名与当前渲染参数不一致"))
                 continue
             }
             let value = spec(for: t)
@@ -1191,7 +1191,7 @@ enum SceneOfflineBakeService {
             }
             for key in missing where groups[key]!.screenIDs.contains(where: { outcomes[$0] == nil }) {
                 for id in groups[key]!.screenIDs {
-                    outcomes[id] = isCurrent() ? .failed("已有烘焙视频无法安全适配当前画布/crop，已保留原壁纸") : .cancelled
+                    outcomes[id] = isCurrent() ? .failed(LocalizationService.shared.t("已有烘焙视频无法安全适配当前画布/crop，已保留原壁纸")) : .cancelled
                 }
             }
             logTransitionPosterTiming(reason: reason, startedAt: startedAt, outcomes: outcomes)
@@ -1200,7 +1200,7 @@ enum SceneOfflineBakeService {
 
         // 2. 确实没有有效 HD/MP4 才允许 1 秒烘焙；此时再探测渲染器与分析资格。
         guard let wgpuBinary = WallpaperEngineXBridge.resolvedCLIExecutableURL() else {
-            for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed("渲染器不存在") } }
+            for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed(LocalizationService.shared.t("渲染器不存在")) } }
             return outcomes
         }
         let bakeSupportsCrop = SceneHandoffProtocol.binaryContains(SceneHandoffProtocol.bakeCropMarker, at: wgpuBinary)
@@ -1213,11 +1213,11 @@ enum SceneOfflineBakeService {
             } else if let analyzed = try await SceneBakeEligibilityAnalyzer.analyzeWithinGate(contentRoot: contentRoot) {
                 eligibility = analyzed
             } else {
-                for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed("内存不足无法分析") } }
+                for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed(LocalizationService.shared.t("内存不足无法分析")) } }
                 return outcomes
             }
         } catch {
-            for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed("分析失败: \(error.localizedDescription)") } }
+            for identity in missing { for id in groups[identity]!.screenIDs { outcomes[id] = .failed(String(format: LocalizationService.shared.t("分析失败: %@"), String(describing: error.localizedDescription))) } }
             return outcomes
         }
         let jobID = UUID()
@@ -1238,7 +1238,7 @@ enum SceneOfflineBakeService {
                 continue
             }
             if !group.target.cropArguments.isEmpty && !bakeSupportsCrop {
-                for id in group.screenIDs { outcomes[id] = .failed("渲染器 bake 不支持 --crop，无法生成与实时首帧一致的过渡图") }
+                for id in group.screenIDs { outcomes[id] = .failed(LocalizationService.shared.t("渲染器 bake 不支持 --crop，无法生成与实时首帧一致的过渡图")) }
                 continue
             }
             let bakeStartedAt = Date()
@@ -1281,7 +1281,7 @@ enum SceneOfflineBakeService {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
-            return .failed("临时目录创建失败: \(error.localizedDescription)")
+            return .failed(String(format: LocalizationService.shared.t("临时目录创建失败: %@"), String(describing: error.localizedDescription)))
         }
         defer {
             try? FileManager.default.removeItem(at: videoURL)
@@ -1306,15 +1306,15 @@ enum SceneOfflineBakeService {
         } catch is CancellationError {
             return .cancelled
         } catch {
-            return .failed("1 秒烘焙失败: \(error.localizedDescription)")
+            return .failed(String(format: LocalizationService.shared.t("1 秒烘焙失败: %@"), String(describing: error.localizedDescription)))
         }
         let bakedURL = URL(fileURLWithPath: artifact.videoPath)
-        guard isUsableBakedVideo(at: bakedURL) else { return .failed("烘焙产物不可用") }
+        guard isUsableBakedVideo(at: bakedURL) else { return .failed(LocalizationService.shared.t("烘焙产物不可用")) }
         guard let poster = await VideoThumbnailCache.shared.storeSceneTransitionPoster(
             forLocalVideo: bakedURL,
             spec: spec
         ) else {
-            return .failed("抽帧失败")
+            return .failed(LocalizationService.shared.t("抽帧失败"))
         }
         print("[SceneHandoff] 过渡图已生成(\(reason)): \(poster.lastPathComponent)")
         return .generated(poster)
@@ -3592,15 +3592,15 @@ enum SceneOfflineBakeService {
                 .suffix(20)
                 .joined(separator: "\n")
             let message = cleanStderr.isEmpty
-                ? "wallpaper-wgpu bake 执行失败 (exit=\(process.terminationStatus))\n完整日志: \(stderrCapture.logURL.path)"
-                : "wallpaper-wgpu bake 执行失败 (exit=\(process.terminationStatus))\n\(cleanStderr)\n完整日志: \(stderrCapture.logURL.path)"
+                ? String(format: LocalizationService.shared.t("wallpaper-wgpu bake 执行失败 (exit=%@)\n完整日志: %@"), String(describing: process.terminationStatus), String(describing: stderrCapture.logURL.path))
+                : String(format: LocalizationService.shared.t("wallpaper-wgpu bake 执行失败 (exit=%@)\n%@\n完整日志: %@"), String(describing: process.terminationStatus), String(describing: cleanStderr), String(describing: stderrCapture.logURL.path))
             throw SceneOfflineBakeError.bakeProcessFailed(message)
         }
 
         guard await inspectBakedVideo(at: tempURL, expectedWidth: width, expectedHeight: height) != nil else {
             try? FileManager.default.removeItem(at: tempURL)
             try? FileManager.default.removeItem(at: outURL)
-            throw SceneOfflineBakeError.bakeProcessFailed("bake 完成后未找到输出文件")
+            throw SceneOfflineBakeError.bakeProcessFailed(LocalizationService.shared.t("bake 完成后未找到输出文件"))
         }
         try? FileManager.default.removeItem(at: outURL)
         try FileManager.default.moveItem(at: tempURL, to: outURL)

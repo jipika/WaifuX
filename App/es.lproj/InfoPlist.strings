@@ -1,0 +1,4 @@
+"NSScreenCaptureDescription" = "WaifuX necesita permiso para grabar la pantalla y capturar el audio del sistema para mostrar fondos dinámicos, visualizar el audio y exportar vídeos renderizados.";
+"NSAppleMusicUsageDescription" = "WaifuX necesita leer la información de reproducción para mostrar el título, el artista y la portada en los fondos web con visualización de audio.";
+"NSAppleEventsUsageDescription" = "Cuando la interfaz multimedia del sistema no está disponible, WaifuX usa Apple Events para leer la información de reproducción de Música y compartirla con los fondos.";
+"NSAudioCaptureUsageDescription" = "WaifuX necesita capturar el audio de salida del sistema para ofrecer visualizaciones de audio en tiempo real en los fondos dinámicos y los widgets del escritorio.";

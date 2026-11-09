@@ -112,8 +112,8 @@ final class SleepPreventer {
 
     private func assertionReasonText() -> String {
         if activeReasons.contains(.userSetting) {
-            return "WaifuX 永不休眠"
+            return t("WaifuX 永不休眠")
         }
-        return "WaifuX 正在播放视频"
+        return t("WaifuX 正在播放视频")
     }
 }

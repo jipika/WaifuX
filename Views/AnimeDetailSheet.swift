@@ -893,7 +893,7 @@ struct AnimeDetailSheet: View {
                     .foregroundStyle(.white.opacity(0.96))
                     .lineLimit(2)
 
-                Text("Anime · TV Series")
+                Text(t("anime.tvSeriesLabel"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.62))
                     .tracking(0.6)

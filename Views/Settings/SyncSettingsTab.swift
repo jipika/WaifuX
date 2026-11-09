@@ -50,11 +50,11 @@ struct SyncSettingsTab: View {
                 .pickerStyle(.radioGroup)
 
                 if config.conflictStrategy == .localPreferred {
-                    Text("以本设备数据为准，云端数据将被覆盖。推荐用于主力设备。")
+                    Text(t("以本设备数据为准，云端数据将被覆盖。推荐用于主力设备。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("以云端数据为准，本设备数据将被覆盖。推荐用于新设备首次同步。")
+                    Text(t("以云端数据为准，本设备数据将被覆盖。推荐用于新设备首次同步。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -62,7 +62,7 @@ struct SyncSettingsTab: View {
 
             // MARK: 同步操作
             if config.isEnabled {
-                MacSettingsSection(header: "同步操作") {
+                MacSettingsSection(header: t("同步操作")) {
                     MacSettingsRow(
                         title: t("sync.syncNow"),
                         subtitle: ""
@@ -129,7 +129,7 @@ struct SyncSettingsTab: View {
                             title: t("sync.error"),
                             subtitle: error.localizedDescription
                         ) {
-                            Button("清除") {
+                            Button(t("design.clear")) {
                                 syncService.clearError()
                             }
                             .buttonStyle(.borderless)
@@ -150,7 +150,7 @@ struct SyncSettingsTab: View {
                 title: t("sync.folder"),
                 subtitle: config.syncDirectoryURL?.path ?? t("general")
             ) {
-                Button(config.syncDirectoryURL != nil ? "更改..." : "选择...") {
+                Button(config.syncDirectoryURL != nil ? t("更改...") : t("选择...")) {
                     showDirectoryPicker = true
                 }
                 .fileImporter(
@@ -172,7 +172,7 @@ struct SyncSettingsTab: View {
                     title: t("general"),
                     subtitle: ""
                 ) {
-                    Button("移除", role: .destructive) {
+                    Button(t("ruleMarket.remove"), role: .destructive) {
                         config.syncDirectoryURL = nil
                     }
                 }
@@ -187,7 +187,7 @@ struct SyncSettingsTab: View {
         MacSettingsSection(header: t("sync.mode.webdav")) {
             MacSettingsRow(
                 title: t("sync.webdav.url"),
-                subtitle: "例如 https://nas.local:5006/webdav"
+                subtitle: t("例如 https://nas.local:5006/webdav")
             ) {
                 TextField(t("sync.webdav.url"), text: $config.webDAVURLString)
                     .textFieldStyle(.roundedBorder)
@@ -232,7 +232,7 @@ struct SyncSettingsTab: View {
 
     private func testWebDAVConnection() async {
         guard let credentials = config.webDAVCredentials else {
-            testConnectionResult = "请填写完整的连接信息"
+            testConnectionResult = t("请填写完整的连接信息")
             return
         }
 
@@ -245,9 +245,9 @@ struct SyncSettingsTab: View {
                 credentials: credentials,
                 depth: 0
             )
-            testConnectionResult = "连接成功 ✅"
+            testConnectionResult = t("连接成功 ✅")
         } catch {
-            testConnectionResult = "连接失败: \(error.localizedDescription)"
+            testConnectionResult = String(format: t("sync.connectionFailed"), error.localizedDescription)
         }
 
         isTestingConnection = false

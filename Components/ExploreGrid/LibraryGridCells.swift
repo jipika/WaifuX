@@ -2536,12 +2536,12 @@ final class LibraryAnimeGridCell: ExploreGridItem {
             if summary.watchedEpisodes > 0 {
                 progressText = summary.continueWatchingText
             } else {
-                progressText = "开始观看"
+                progressText = t("animeDetail.startWatching")
             }
             if summary.totalEpisodes > 0 {
                 progressValue = summary.overallProgress
             } else if let lastEp = summary.lastEpisodeNumber {
-                progressText = "看到第 \(lastEp) 集"
+                progressText = String(format: t("episode.watchedThrough"), lastEp)
             }
         }
         if progressText == nil,

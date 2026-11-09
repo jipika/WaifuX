@@ -69,8 +69,8 @@ enum MangaReaderMode: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .singlePage: return "单页"
-        case .verticalScroll: return "纵向卷轴"
+        case .singlePage: return t("单页")
+        case .verticalScroll: return t("纵向卷轴")
         }
     }
 

@@ -20,11 +20,11 @@ enum DynamicWallpaperPosterError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .rangeUnsupported:
-            return "封面抽帧：服务端不支持 Range 分段请求"
+            return t("封面抽帧：服务端不支持 Range 分段请求")
         case .emptyPayload:
-            return "封面抽帧：分段数据为空"
+            return t("封面抽帧：分段数据为空")
         case .frameUnavailable:
-            return "封面抽帧：无法从视频中取出可用帧"
+            return t("封面抽帧：无法从视频中取出可用帧")
         }
     }
 }

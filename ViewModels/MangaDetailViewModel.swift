@@ -32,7 +32,7 @@ final class MangaDetailViewModel: ObservableObject {
     var hasPreviousPage: Bool { currentPageIndex > 0 }
     var hasNextPage: Bool { currentPageIndex + 1 < totalPageCount }
 
-    var seriesTitle: String { series?.title ?? "漫画" }
+    var seriesTitle: String { series?.title ?? t("漫画") }
     var authorName: String { series?.author ?? "" }
     var authorID: String? {
         guard let authorID = series?.authorId.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -98,7 +98,7 @@ final class MangaDetailViewModel: ObservableObject {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
-        loadingProgress = "加载中…"
+        loadingProgress = t("加载中…")
 
         defer {
             isLoading = false
@@ -120,7 +120,7 @@ final class MangaDetailViewModel: ObservableObject {
 
     // MARK: - Pixiv pipeline
     private func loadFromPixiv(illustId: String, seedTitle: String?, seedCover: String?) async throws {
-        loadingProgress = "加载作品信息…"
+        loadingProgress = t("加载作品信息…")
 
         // 1. 作品详情（拿 title、author、tags、seriesId、pageCount）
         let detail = try await pixiv.illustDetail(id: illustId)
@@ -154,7 +154,7 @@ final class MangaDetailViewModel: ObservableObject {
 
         if let seriesId = seriesId {
             do {
-                loadingProgress = "加载系列章节…"
+                loadingProgress = t("加载系列章节…")
                 let seriesBody = try await pixiv.seriesChapters(seriesId: seriesId)
                 seriesTitleFinal = seriesBody.series?.title ?? title
                 seriesDescriptionFinal = seriesBody.series?.caption ?? description
@@ -169,7 +169,7 @@ final class MangaDetailViewModel: ObservableObject {
                     // 当前作品已知，其他作品稍后按需加载 pages
                     let ch = MangaChapter(
                         id: entry.id,
-                        title: entry.title.isEmpty ? "第\(idx + 1)话" : entry.title,
+                        title: entry.title.isEmpty ? String(format: LocalizationService.shared.t("第%@话"), String(describing: idx + 1)) : entry.title,
                         coverURL: entry.coverUrl ?? detail.urls.regular,
                         pageCount: entry.pageCount ?? 0,
                         createdAt: Self.isoDate(from: entry.createDate),
@@ -264,7 +264,7 @@ final class MangaDetailViewModel: ObservableObject {
                 )
             } catch {
                 print("❌ [MangaDetailViewModel] load pages for chapter \(chosen.id) failed: \(error)")
-                errorMessage = "加载章节失败：\(error.localizedDescription)"
+                errorMessage = String(format: t("加载章节失败：%@"), String(describing: error.localizedDescription))
                 return
             }
         }
@@ -420,7 +420,7 @@ final class MangaDetailViewModel: ObservableObject {
             }
         } catch {
             print("❌ [MangaDetailViewModel] load initial pages failed: \(error)")
-            errorMessage = "加载页面失败：\(error.localizedDescription)"
+            errorMessage = String(format: t("加载页面失败：%@"), String(describing: error.localizedDescription))
         }
     }
 

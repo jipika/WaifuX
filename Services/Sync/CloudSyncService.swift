@@ -48,7 +48,7 @@ final class CloudSyncService: ObservableObject {
         isSyncing = true
         lastError = nil
         syncProgress = 0
-        syncStatusMessage = "准备同步..."
+        syncStatusMessage = t("准备同步...")
 
         defer {
             isSyncing = false
@@ -66,10 +66,10 @@ final class CloudSyncService: ObservableObject {
             }
         } catch let error as CloudSyncError {
             lastError = error
-            syncStatusMessage = "同步失败: \(error.localizedDescription)"
+            syncStatusMessage = String(format: t("同步失败: %@"), String(describing: error.localizedDescription))
         } catch {
             lastError = CloudSyncError.internalError(reason: error.localizedDescription)
-            syncStatusMessage = "同步失败: \(error.localizedDescription)"
+            syncStatusMessage = String(format: t("同步失败: %@"), String(describing: error.localizedDescription))
         }
         #endif
     }
@@ -82,12 +82,12 @@ final class CloudSyncService: ObservableObject {
         }
 
         // 1. 确保同步目录结构存在
-        syncStatusMessage = "检查同步目录..."
+        syncStatusMessage = t("检查同步目录...")
         try await fileEngine.ensureSyncDirectory(at: syncRoot)
         syncProgress = 0.05
 
         // 2. 读取云端 manifest
-        syncStatusMessage = "读取云端文件清单..."
+        syncStatusMessage = t("读取云端文件清单...")
         let cloudManifest = try await fileEngine.readManifest(from: config.manifestURL!)
         syncProgress = 0.1
 
@@ -113,7 +113,7 @@ final class CloudSyncService: ObservableObject {
         syncProgress = 0.7
 
         // 5. 导出元数据 + 写入云端
-        syncStatusMessage = "同步元数据..."
+        syncStatusMessage = t("同步元数据...")
         let metadataData = try metadataEngine.exportMetadata()
         try metadataData.write(to: config.metadataURL!, options: .atomic)
         syncProgress = 0.8
@@ -124,7 +124,7 @@ final class CloudSyncService: ObservableObject {
         syncProgress = 0.85
 
         // 7. GC
-        syncStatusMessage = "清理旧文件..."
+        syncStatusMessage = t("清理旧文件...")
         try await fileEngine.garbageCollect(objectsDir: objectsDir, referencedHashes: referencedHashes)
         syncProgress = 0.9
 
@@ -134,7 +134,7 @@ final class CloudSyncService: ObservableObject {
             try metadataEngine.importMetadata(from: cloudData, strategy: config.conflictStrategy)
         }
         syncProgress = 1.0
-        syncStatusMessage = "同步完成"
+        syncStatusMessage = t("同步完成")
     }
 
     // MARK: - WebDAV 同步
@@ -150,12 +150,12 @@ final class CloudSyncService: ObservableObject {
         let objectsBaseURL = credentials.objectsURL
 
         // 1. 确保远程目录结构存在
-        syncStatusMessage = "检查远程目录..."
+        syncStatusMessage = t("检查远程目录...")
         try await webDAVEngine.ensureSyncDirectory(baseURL: baseURL, credentials: credentials)
         syncProgress = 0.05
 
         // 2. 读取远程 manifest
-        syncStatusMessage = "读取文件清单..."
+        syncStatusMessage = t("读取文件清单...")
         let cloudManifest = try await webDAVEngine.readManifest(baseURL: syncBaseURL, credentials: credentials)
         syncProgress = 0.1
 
@@ -186,7 +186,7 @@ final class CloudSyncService: ObservableObject {
         syncProgress = 0.7
 
         // 5. 导出元数据 + 写入远程
-        syncStatusMessage = "同步元数据..."
+        syncStatusMessage = t("同步元数据...")
         let metadataData = try metadataEngine.exportMetadata()
         try await client.put(
             url: credentials.metadataURL,
@@ -202,7 +202,7 @@ final class CloudSyncService: ObservableObject {
         syncProgress = 0.85
 
         // 7. GC
-        syncStatusMessage = "清理旧文件..."
+        syncStatusMessage = t("清理旧文件...")
         try await webDAVEngine.garbageCollect(
             objectsBaseURL: objectsBaseURL,
             referencedHashes: referencedHashes,
@@ -220,7 +220,7 @@ final class CloudSyncService: ObservableObject {
             } else { throw error }
         }
         syncProgress = 1.0
-        syncStatusMessage = "同步完成"
+        syncStatusMessage = t("同步完成")
     }
 
     // 访问 WebDAV client 用于 PUT/GET metadata
@@ -265,7 +265,7 @@ final class CloudSyncService: ObservableObject {
         }
 
         // 上传
-        syncStatusMessage = "上传文件..."
+        syncStatusMessage = t("上传文件...")
         var totalFiles = localManifest.count
         var processedFiles = 0
         for (relativePath, localEntry) in localManifest {
@@ -285,7 +285,7 @@ final class CloudSyncService: ObservableObject {
         }
 
         // 下载
-        syncStatusMessage = "下载文件..."
+        syncStatusMessage = t("下载文件...")
         var cloudFilesToDownload: [(relativePath: String, hash: String)] = []
         for (relativePath, cloudEntry) in cloudManifest.files {
             let resolution = conflictResolver.resolveFile(
@@ -323,7 +323,7 @@ final class CloudSyncService: ObservableObject {
         isSyncing = true
         lastError = nil
         syncProgress = 0
-        syncStatusMessage = "从云端恢复..."
+        syncStatusMessage = t("从云端恢复...")
 
         defer {
             isSyncing = false
@@ -342,10 +342,10 @@ final class CloudSyncService: ObservableObject {
             lastSyncedAt = now
         } catch let error as CloudSyncError {
             lastError = error
-            syncStatusMessage = "恢复失败: \(error.localizedDescription)"
+            syncStatusMessage = String(format: t("恢复失败: %@"), String(describing: error.localizedDescription))
         } catch {
             lastError = CloudSyncError.internalError(reason: error.localizedDescription)
-            syncStatusMessage = "恢复失败: \(error.localizedDescription)"
+            syncStatusMessage = String(format: t("恢复失败: %@"), String(describing: error.localizedDescription))
         }
         #endif
     }
@@ -360,13 +360,13 @@ final class CloudSyncService: ObservableObject {
             throw CloudSyncError.metadataReadFailed
         }
 
-        syncStatusMessage = "读取文件清单..."
+        syncStatusMessage = t("读取文件清单...")
         let cloudManifest = try await fileEngine.readManifest(from: manifestURL)
         let objectsDir = config.objectsURL!
         let downloadMgr = DownloadPathManager.shared
         syncProgress = 0.1
 
-        syncStatusMessage = "下载文件..."
+        syncStatusMessage = t("下载文件...")
         var processedFiles = 0
         let totalFiles = cloudManifest.files.count
         for (relativePath, entry) in cloudManifest.files {
@@ -377,19 +377,19 @@ final class CloudSyncService: ObservableObject {
         }
         syncProgress = 0.6
 
-        syncStatusMessage = "导入元数据..."
+        syncStatusMessage = t("导入元数据...")
         let metadataData = try Data(contentsOf: metadataURL)
         try metadataEngine.importMetadata(from: metadataData, strategy: .cloudPreferred)
         syncProgress = 0.9
 
-        syncStatusMessage = "更新文件清单..."
+        syncStatusMessage = t("更新文件清单...")
         let newManifest = try await scanLocalFiles(downloadMgr: downloadMgr)
         try await fileEngine.writeManifest(
             CloudSyncManifest(files: newManifest, updatedAt: Date()),
             to: manifestURL
         )
         syncProgress = 1.0
-        syncStatusMessage = "恢复完成"
+        syncStatusMessage = t("恢复完成")
     }
 
     private func performWebDAVRestore() async throws {
@@ -398,13 +398,13 @@ final class CloudSyncService: ObservableObject {
         }
         let syncBaseURL = credentials.syncRootURL
 
-        syncStatusMessage = "读取文件清单..."
+        syncStatusMessage = t("读取文件清单...")
         let cloudManifest = try await webDAVEngine.readManifest(baseURL: syncBaseURL, credentials: credentials)
         let objectsBaseURL = credentials.objectsURL
         let downloadMgr = DownloadPathManager.shared
         syncProgress = 0.1
 
-        syncStatusMessage = "下载文件..."
+        syncStatusMessage = t("下载文件...")
         var processedFiles = 0
         let totalFiles = cloudManifest.files.count
         for (relativePath, entry) in cloudManifest.files {
@@ -420,12 +420,12 @@ final class CloudSyncService: ObservableObject {
         }
         syncProgress = 0.6
 
-        syncStatusMessage = "导入元数据..."
+        syncStatusMessage = t("导入元数据...")
         let metadataData = try await client.get(url: credentials.metadataURL, credentials: credentials)
         try metadataEngine.importMetadata(from: metadataData, strategy: .cloudPreferred)
         syncProgress = 0.9
 
-        syncStatusMessage = "更新文件清单..."
+        syncStatusMessage = t("更新文件清单...")
         let newManifest = try await scanLocalFiles(downloadMgr: downloadMgr)
         try await webDAVEngine.writeManifest(
             CloudSyncManifest(files: newManifest, updatedAt: Date()),
@@ -433,7 +433,7 @@ final class CloudSyncService: ObservableObject {
             credentials: credentials
         )
         syncProgress = 1.0
-        syncStatusMessage = "恢复完成"
+        syncStatusMessage = t("恢复完成")
     }
 
     // MARK: - 应用退出时自动同步

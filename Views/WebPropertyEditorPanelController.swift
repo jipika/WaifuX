@@ -17,7 +17,7 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
     private var webView: WKWebView?
     private var currentPath: String?
     private var currentType: WallpaperEditorType = .scene
-    private var currentTitle: String = "设计场景"
+    private var currentTitle: String = t("design.designScene")
     private var applyTask: Task<Void, Never>?
     private var pendingInject: String?
     private var navigationDelegate: PropertyEditorNavigationDelegate?
@@ -32,29 +32,29 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
 
     /// 场景壁纸设计弹窗
     func presentScene(for wallpaperPath: String, from anchorView: NSView) {
-        present(for: wallpaperPath, type: .scene, title: "设计场景", from: anchorView)
+        present(for: wallpaperPath, type: .scene, title: t("design.designScene"), from: anchorView)
     }
 
     /// Web 壁纸设计弹窗
     func presentWeb(for wallpaperPath: String, from anchorView: NSView) {
-        present(for: wallpaperPath, type: .web, title: "设计壁纸", from: anchorView)
+        present(for: wallpaperPath, type: .web, title: t("design.designWallpaper"), from: anchorView)
     }
 
     /// 场景高级设置弹窗（SceneConfigOverride）
     func presentSceneConfig(for wallpaperPath: String, from anchorView: NSView) {
-        present(for: wallpaperPath, type: .sceneConfig, title: "场景高级设置", from: anchorView)
+        present(for: wallpaperPath, type: .sceneConfig, title: t("statusbar.sceneAdvancedSettings"), from: anchorView)
     }
 
     /// 桌面动态元素设计弹窗（烘焙视频的文本覆盖编辑）
     func presentSceneDesign(for wallpaperPath: String, from anchorView: NSView) {
-        present(for: wallpaperPath, type: .sceneDesign, title: "设计壁纸", from: anchorView)
+        present(for: wallpaperPath, type: .sceneDesign, title: t("design.designWallpaper"), from: anchorView)
     }
 
     /// 自动检测类型并呈现（兼容旧调用方式）
-    func present(for wallpaperPath: String, title: String = "设计场景", from anchorView: NSView) {
+    func present(for wallpaperPath: String, title: String = t("design.designScene"), from anchorView: NSView) {
         let type = detectType(for: wallpaperPath)
-        let autoTitle = type == .scene ? "设计场景" : "设计壁纸"
-        present(for: wallpaperPath, type: type, title: title == "设计场景" ? autoTitle : title, from: anchorView)
+        let autoTitle = type == .scene ? t("design.designScene") : t("design.designWallpaper")
+        present(for: wallpaperPath, type: type, title: title == t("design.designScene") ? autoTitle : title, from: anchorView)
     }
 
     func closePanel() {
@@ -306,7 +306,7 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
     private func loadHTMLEditorContent() -> String {
         for url in Self.editorHTMLCandidates() {
             if let content = try? String(contentsOf: url, encoding: .utf8) {
-                return content
+                return LocalizationService.shared.localizedEditorHTML(content)
             }
         }
         print("[WebPropertyEditor] Editor HTML missing; searched \(Self.editorHTMLCandidates().map(\.path))")
@@ -706,11 +706,11 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
             }
         }
 
-        addSection("📷 相机", keys: [.cameraZoom, .cameraFov, .cameraNearz, .cameraFarz])
-        addSection("🎯 视差", keys: [.parallaxEnabled, .parallaxAmount, .parallaxDelay, .parallaxMouseInfluence])
-        addSection("🖥 显示", keys: [.orthoWidth, .orthoHeight, .textureReduction])
-        addSection("🎨 颜色", keys: [.clearColor, .ambientColor, .skylightColor])
-        addSection("⚙️ 其他", keys: [.clearEnabled, .cameraFade])
+        addSection(t("📷 相机"), keys: [.cameraZoom, .cameraFov, .cameraNearz, .cameraFarz])
+        addSection(t("🎯 视差"), keys: [.parallaxEnabled, .parallaxAmount, .parallaxDelay, .parallaxMouseInfluence])
+        addSection(t("🖥 显示"), keys: [.orthoWidth, .orthoHeight, .textureReduction])
+        addSection(t("🎨 颜色"), keys: [.clearColor, .ambientColor, .skylightColor])
+        addSection(t("⚙️ 其他"), keys: [.clearEnabled, .cameraFade])
 
         return PropertyLoadResult(
             properties: items,
@@ -782,7 +782,7 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
                 return abs(ox - ex) < 5 && abs(oy - ey) < 5
             }
 
-            let groupName = siblings.first(where: { !$0.name.isEmpty })?.name ?? "未命名"
+            let groupName = siblings.first(where: { !$0.name.isEmpty })?.name ?? t("design.unnamed")
 
             // 确定选中语言索引
             let selectedIndex: Int
@@ -806,7 +806,7 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
                    let range = Range(match.range(at: 1), in: trimmedName) {
                     return String(trimmedName[range]).uppercased()
                 }
-                return trimmedName.isEmpty ? "语言 \(idx + 1)" : trimmedName
+                return trimmedName.isEmpty ? String(format: t("design.languageNumber"), idx + 1) : trimmedName
             }
 
             // 构建每个条目的 JSON 数据
@@ -1050,7 +1050,7 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
     private static func wallpaperLocalizationTable(in general: [String: Any]) -> [String: String] {
         guard let raw = general["localization"] as? [String: Any] else { return [:] }
         var order: [String] = []
-        for tag in Locale.preferredLanguages {
+        for tag in [LocalizationService.shared.currentLanguage.rawValue] + Locale.preferredLanguages {
             let lower = tag.lowercased()
             if lower.hasPrefix("zh-hant") || lower.hasPrefix("zh-tw") || lower.hasPrefix("zh-hk") {
                 order.append("zh-cht")
@@ -1060,6 +1060,8 @@ final class WebPropertyEditorPanelController: NSObject, NSPopoverDelegate {
                 order.append("ja-jp")
             } else if lower.hasPrefix("ko") {
                 order.append("ko-kr")
+            } else if lower.hasPrefix("es") {
+                order.append("es-es")
             } else if lower.hasPrefix("en") {
                 order.append("en-us")
             }

@@ -29,13 +29,13 @@ enum NetworkConnectionState: Equatable {
     var description: String {
         switch self {
         case .wifi:
-            return "WiFi"
+            return t("network.wifi")
         case .cellular:
-            return "Cellular"
+            return t("network.cellular")
         case .other:
-            return "Connected"
+            return t("network.connected")
         case .offline:
-            return "Offline"
+            return t("network.offline")
         }
     }
 }

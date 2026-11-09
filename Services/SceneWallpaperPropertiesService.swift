@@ -125,7 +125,7 @@ enum WallpaperEnginePropertyLocalizer {
         let trimmed = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return fallback ?? "" }
         if let localized = bundledChineseLabels[trimmed] ?? fallbackChineseLabels[trimmed] {
-            return localized
+            return LocalizationService.shared.legacyLabel(localized)
         }
         return localizedWebLabel(trimmed) ?? fallback ?? trimmed
     }
@@ -133,13 +133,13 @@ enum WallpaperEnginePropertyLocalizer {
     private static func localizedWebLabel(_ rawLabel: String) -> String? {
         let lowercased = rawLabel.lowercased()
         if let localized = commonWebLabels[lowercased] {
-            return localized
+            return LocalizationService.shared.legacyLabel(localized)
         }
 
         guard let bracketIndex = rawLabel.firstIndex(of: "[") else { return nil }
         let name = rawLabel[..<bracketIndex].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard let localized = commonWebLabels[name] else { return nil }
-        return "\(localized) \(rawLabel[bracketIndex...])"
+        return "\(LocalizationService.shared.legacyLabel(localized)) \(rawLabel[bracketIndex...])"
     }
 
     private static func loadBundledChineseLabels() -> [String: String] {

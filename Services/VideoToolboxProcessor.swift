@@ -220,25 +220,25 @@ enum VideoToolboxError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noVideoTrack:
-            return "视频中没有找到视频轨道"
+            return t("视频中没有找到视频轨道")
         case .invalidFormat:
-            return "无效的视频格式"
+            return t("无效的视频格式")
         case .frameExtractionFailed:
-            return "帧提取失败"
+            return t("帧提取失败")
         case .bufferCreationFailed:
-            return "像素缓冲区创建失败"
+            return t("像素缓冲区创建失败")
         case .contextCreationFailed:
-            return "图形上下文创建失败"
+            return t("图形上下文创建失败")
         case .invalidPixelBuffer:
-            return "无效的像素缓冲区"
+            return t("无效的像素缓冲区")
         case .dataProviderCreationFailed:
-            return "数据提供者创建失败"
+            return t("数据提供者创建失败")
         case .imageCreationFailed:
-            return "图像创建失败"
+            return t("图像创建失败")
         case .sessionCreationFailed:
-            return "解码会话创建失败"
+            return t("解码会话创建失败")
         case .decodingFailed:
-            return "视频解码失败"
+            return t("视频解码失败")
         }
     }
 }

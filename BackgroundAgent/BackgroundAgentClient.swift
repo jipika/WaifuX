@@ -950,7 +950,7 @@ final class BackgroundAgentClient: ObservableObject {
         try Task.checkCancellation()
         guard try WaifuXPreferences.shared.pendingMutationData().isEmpty else {
             throw NSError(domain: "WaifuXHelper", code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "仍有设置等待后台保存，请稍后重试"])
+                userInfo: [NSLocalizedDescriptionKey: t("仍有设置等待后台保存，请稍后重试")])
         }
     }
 
@@ -1164,7 +1164,7 @@ final class BackgroundAgentClient: ObservableObject {
             try await Task.sleep(for: .milliseconds(100))
         }
         throw NSError(domain: "WaifuXHelper", code: 4,
-                      userInfo: [NSLocalizedDescriptionKey: "后台服务仍在退出，请重试退出 WaifuX"])
+                      userInfo: [NSLocalizedDescriptionKey: t("后台服务仍在退出，请重试退出 WaifuX")])
     }
 
     private func helperProcessGone(_ pid: Int32) -> Bool {
@@ -1190,7 +1190,7 @@ final class BackgroundAgentClient: ObservableObject {
             if helperProcessGone(pid) { return .alreadyStopped }
             if status != .enabled {
                 return .failure(NSError(domain: "WaifuXHelper", code: 4,
-                    userInfo: [NSLocalizedDescriptionKey: "后台服务仍在运行，但登录项不可用，请允许后台服务后重试退出"]))
+                    userInfo: [NSLocalizedDescriptionKey: t("后台服务仍在运行，但登录项不可用，请允许后台服务后重试退出")]))
             }
             return .failure(fallback)
         }
@@ -1240,7 +1240,7 @@ final class BackgroundAgentClient: ObservableObject {
         }
         // helperStopRequested 时保持 isClosing：Helper 正在不可逆地退出，
         // 自动重连只会把正在退出的后台服务重新拉起。
-        lastError = "退出未完成，WaifuX 界面已保留：\(error.localizedDescription)"
+        lastError = String(format: t("退出未完成，WaifuX 界面已保留：%@"), String(describing: error.localizedDescription))
     }
 
     func request(_ operation: String, _ arguments: [String: Any] = [:]) async throws -> [String: Any] {
@@ -1313,7 +1313,7 @@ final class BackgroundAgentClient: ObservableObject {
                 let timer = Task { @MainActor in
                     try? await Task.sleep(for: .seconds(timeoutSeconds))
                     guard !Task.isCancelled else { return }
-                    gate.finish(.failure(NSError(domain: "WaifuXHelper", code: 3, userInfo: [NSLocalizedDescriptionKey: "后台服务响应超时"])))
+                    gate.finish(.failure(NSError(domain: "WaifuXHelper", code: 3, userInfo: [NSLocalizedDescriptionKey: t("后台服务响应超时")])))
                 }
                 gate.setTimeout(timer)
             }

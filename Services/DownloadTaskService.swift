@@ -581,9 +581,9 @@ final class PersistentDownloadQueueService {
 
         var errorDescription: String? {
             switch self {
-            case .notConfigured: return "下载队列尚未完成启动配置"
-            case .missingResult: return "下载完成但没有返回本地文件"
-            case .persistenceFailed: return "无法将下载队列保存到本地"
+            case .notConfigured: return t("下载队列尚未完成启动配置")
+            case .missingResult: return t("下载完成但没有返回本地文件")
+            case .persistenceFailed: return t("无法将下载队列保存到本地")
             }
         }
     }

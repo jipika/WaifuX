@@ -72,7 +72,7 @@ struct MobilePushSheet: View {
             Image(systemName: "iphone.and.arrow.down")
                 .font(.system(size: 32, weight: .light))
                 .foregroundStyle(Color.accentColor)
-            Text("准备推送到手机")
+            Text(t("准备推送到手机"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(LiquidGlassColors.textPrimary)
             Text("正在转换「\(title)」为手机格式…")
@@ -90,7 +90,7 @@ struct MobilePushSheet: View {
             Image(systemName: "iphone.gen3.radiowaves.left.and.right")
                 .font(.system(size: 32, weight: .light))
                 .foregroundStyle(Color.accentColor)
-            Text("等待手机连接")
+            Text(t("等待手机连接"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(LiquidGlassColors.textPrimary)
             Text("已配对过：在 Wallpaper Engine 里选择「\(LocalizedBrand.name)」即可自动连接。\n新设备：选择电脑后输入下方配对码。")
@@ -120,7 +120,7 @@ struct MobilePushSheet: View {
                 copied = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
             } label: {
-                Label(copied ? "已复制" : "复制配对码",
+                Label(copied ? t("已复制") : t("复制配对码"),
                       systemImage: copied ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(LiquidGlassColors.textSecondary)
@@ -131,7 +131,7 @@ struct MobilePushSheet: View {
             }
             .buttonStyle(.plain)
 
-            Text("若传输中断，请保持此页面；重新选择电脑后会自动重传")
+            Text(t("若传输中断，请保持此页面；重新选择电脑后会自动重传"))
                 .font(.system(size: 11))
                 .foregroundStyle(LiquidGlassColors.textSecondary.opacity(0.7))
                 .multilineTextAlignment(.center)
@@ -144,7 +144,7 @@ struct MobilePushSheet: View {
             Image(systemName: "arrow.down.to.line.compact")
                 .font(.system(size: 32, weight: .light))
                 .foregroundStyle(Color.accentColor)
-            Text("正在推送到手机")
+            Text(t("正在推送到手机"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(LiquidGlassColors.textPrimary)
             Text(name)
@@ -166,10 +166,10 @@ struct MobilePushSheet: View {
             Image(systemName: "checkmark.circle")
                 .font(.system(size: 36, weight: .light))
                 .foregroundStyle(Color(hex: "30D158"))
-            Text("推送完成")
+            Text(t("推送完成"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(LiquidGlassColors.textPrimary)
-            Text("手机 Wallpaper Engine 列表里已出现新壁纸")
+            Text(t("手机 Wallpaper Engine 列表里已出现新壁纸"))
                 .font(.system(size: 12))
                 .foregroundStyle(LiquidGlassColors.textSecondary)
                 .multilineTextAlignment(.center)
@@ -182,7 +182,7 @@ struct MobilePushSheet: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 32, weight: .light))
                 .foregroundStyle(Color(hex: "FF9F0A"))
-            Text("推送未完成")
+            Text(t("推送未完成"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(LiquidGlassColors.textPrimary)
             Text(message)

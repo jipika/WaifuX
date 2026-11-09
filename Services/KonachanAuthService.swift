@@ -73,25 +73,25 @@ final class KonachanAuthService: ObservableObject {
 
     var statusTitle: String {
         if isLoggedIn && hasCloudflareClearance {
-            return "KonaChan 已登录，Cloudflare 验证已完成"
+            return t("KonaChan 已登录，Cloudflare 验证已完成")
         }
         if hasCloudflareClearance {
-            return "Cloudflare 验证已完成"
+            return t("Cloudflare 验证已完成")
         }
         if isLoggedIn {
-            return "KonaChan 账号已登录"
+            return t("KonaChan 账号已登录")
         }
-        return "尚未建立 KonaChan 会话"
+        return t("尚未建立 KonaChan 会话")
     }
 
     var statusSubtitle: String {
         if hasCloudflareClearance {
-            return "会话 Cookie 已同步到应用请求与图片加载器。"
+            return t("会话 Cookie 已同步到应用请求与图片加载器。")
         }
         if isLoggedIn {
-            return "账号会话已保存；若仍遇到 Cloudflare，请重新打开验证页完成挑战。"
+            return t("账号会话已保存；若仍遇到 Cloudflare，请重新打开验证页完成挑战。")
         }
-        return "登录 KonaChan 或完成 Cloudflare 人机验证后，可降低 403 / challenge 出现概率。"
+        return t("登录 KonaChan 或完成 Cloudflare 人机验证后，可降低 403 / challenge 出现概率。")
     }
 
     private init() {}

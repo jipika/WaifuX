@@ -77,7 +77,7 @@ actor PixivService {
             // Pixiv 对 R18 排行榜在未登录时返回 403：明确转译为"需要登录"，便于 UI 引导用户
             if case NetworkError.httpError(403) = error, mode.lowercased().contains("r18") {
                 print("⚠️ [PixivService] R18 排行榜 403：需要登录 Pixiv 账号")
-                throw NetworkError.loginRequired(message: "Pixiv R18 排行榜需要登录后才能查看，请先在设置中登录 Pixiv 账号")
+                throw NetworkError.loginRequired(message: LocalizationService.shared.t("Pixiv R18 排行榜需要登录后才能查看，请先在设置中登录 Pixiv 账号"))
             }
             print("❌ [PixivService] Error fetching ranking: \(error)")
             throw error

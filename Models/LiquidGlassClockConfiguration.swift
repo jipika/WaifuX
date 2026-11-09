@@ -11,10 +11,10 @@ public enum ClockCorner: String, CaseIterable, Codable, Sendable {
 
     public var label: String {
         switch self {
-        case .topLeft:     return "左上"
-        case .topRight:    return "右上"
-        case .bottomLeft:  return "左下"
-        case .bottomRight: return "右下"
+        case .topLeft:     return t("左上")
+        case .topRight:    return t("右上")
+        case .bottomLeft:  return t("左下")
+        case .bottomRight: return t("右下")
         }
     }
 }
@@ -37,9 +37,9 @@ public enum ClockFormat: String, CaseIterable, Codable, Sendable {
         switch self {
         case .hhmm:          return "HH:mm"
         case .hhmmss:        return "HH:mm:ss"
-        case .hhmmWithDate:  return "HH:mm + 日期"
-        case .hhmmssWithDate:return "HH:mm:ss + 日期"
-        case .full:          return "完整（含星期）"
+        case .hhmmWithDate:  return t("HH:mm + 日期")
+        case .hhmmssWithDate:return t("HH:mm:ss + 日期")
+        case .full:          return t("完整（含星期）")
         }
     }
 }
@@ -240,6 +240,7 @@ private struct WeekdayFormatter {
         "zh": ["周日", "周一", "周二", "周三", "周四", "周五", "周六"],
         "en": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
         "ja": ["日", "月", "火", "水", "木", "金", "土"],
+        "es": ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"],
     ]
 
     func string(from date: Date) -> String {

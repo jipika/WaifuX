@@ -228,13 +228,13 @@ private final class TaskQueueRowView: NSView {
         progressLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let symbolConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
-        cancelButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "取消下载")?
+        cancelButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: LocalizationService.shared.t("取消下载"))?
             .withSymbolConfiguration(symbolConfig)
         cancelButton.isBordered = false
         cancelButton.contentTintColor = .secondaryLabelColor
         cancelButton.target = self
         cancelButton.action = #selector(cancelClicked)
-        cancelButton.toolTip = "取消下载"
+        cancelButton.toolTip = LocalizationService.shared.t("取消下载")
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(titleLabel)

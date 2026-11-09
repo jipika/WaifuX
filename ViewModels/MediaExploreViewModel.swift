@@ -1964,7 +1964,7 @@ final class MediaExploreViewModel: ObservableObject {
             cancelPreload()
             items = []
             hasMorePages = false
-            currentTitle = "搜索: \(trimmedQuery)"
+            currentTitle = String(format: t("搜索: %@"), String(describing: trimmedQuery))
             errorKind = .chineseUnsupported
             errorMessage = String(
                 format: t("source.chineseSearchUnsupported"),
@@ -2237,7 +2237,7 @@ final class MediaExploreViewModel: ObservableObject {
             items = mediaItems
             workshopHasMore = response.hasMore
             hasMorePages = response.hasMore
-            currentTitle = query.isEmpty ? "Workshop" : "搜索: \(query)"
+            currentTitle = query.isEmpty ? "Workshop" : String(format: t("搜索: %@"), String(describing: query))
             if workshopHasMore {
                 triggerWorkshopPreload()
             }
@@ -2527,7 +2527,7 @@ final class MediaExploreViewModel: ObservableObject {
             let loaded = await dynamicWallpaperService.loadData()
             guard loaded else {
                 errorKind = .unknown
-                errorMessage = dynamicWallpaperService.errorMessage ?? "动态桌面数据加载失败"
+                errorMessage = dynamicWallpaperService.errorMessage ?? t("动态桌面数据加载失败")
                 return
             }
         }
@@ -2572,7 +2572,7 @@ final class MediaExploreViewModel: ObservableObject {
         items = result.items
         dongtaiHasMore = result.hasMore
         hasMorePages = result.hasMore
-        currentTitle = query.isEmpty ? t("dongtai") : "搜索: \(query)"
+        currentTitle = query.isEmpty ? t("dongtai") : String(format: t("搜索: %@"), String(describing: query))
         if dongtaiHasMore {
             triggerDongTaiPreload()
         }
@@ -2729,7 +2729,7 @@ final class MediaExploreViewModel: ObservableObject {
             if let query = query, !query.isEmpty {
                 // 搜索模式
                 page = try await wallsflowService.search(query: query, page: 1)
-                currentTitle = "搜索: \(query)"
+                currentTitle = String(format: t("搜索: %@"), String(describing: query))
             } else if let slug = categorySlug {
                 // 分类模式
                 page = try await wallsflowService.fetchCategory(slug: slug, page: 1)
@@ -2738,7 +2738,7 @@ final class MediaExploreViewModel: ObservableObject {
             } else {
                 // 默认首页
                 page = try await wallsflowService.fetchCategory(slug: wallsflowCurrentCategorySlug, page: 1)
-                currentTitle = "Wallsflow"
+                currentTitle = t("wallsflow")
             }
 
             // 源一致性检查：如果切换了源，丢弃这个过期结果

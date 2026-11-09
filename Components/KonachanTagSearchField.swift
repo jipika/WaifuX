@@ -198,7 +198,7 @@ struct KonachanTagSearchField: View {
             Image(systemName: "tag.slash")
                 .font(.system(size: 12))
                 .foregroundStyle(txt.secondary.opacity(0.4))
-            Text("没有找到匹配的标签")
+            Text(t("没有找到匹配的标签"))
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(txt.secondary.opacity(0.5))
         }

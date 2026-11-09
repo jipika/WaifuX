@@ -15,8 +15,8 @@ struct RendererComponentUpdateView: View {
                     .frame(width: 36, height: 40)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("渲染组件更新").font(.system(size: 20, weight: .semibold))
-                    Text("独立更新壁纸引擎，无需重新安装 WaifuX")
+                    Text(t("渲染组件更新")).font(.system(size: 20, weight: .semibold))
+                    Text(t("独立更新壁纸引擎，无需重新安装 WaifuX"))
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -28,7 +28,7 @@ struct RendererComponentUpdateView: View {
                 }
                 .modifier(RendererComponentActionStyle())
                 .controlSize(.small)
-                .accessibilityLabel("关闭组件更新窗口")
+                .accessibilityLabel(t("关闭组件更新窗口"))
             }
 
             ScrollViewReader { proxy in
@@ -44,7 +44,7 @@ struct RendererComponentUpdateView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if updater.isInstalling {
                     ProgressView(value: updater.progress)
-                        .accessibilityLabel("组件下载进度")
+                        .accessibilityLabel(t("组件下载进度"))
                 }
                 HStack(spacing: 8) {
                     if updater.isChecking { ProgressView().controlSize(.small) }
@@ -62,7 +62,7 @@ struct RendererComponentUpdateView: View {
                 }
                 .font(.callout).foregroundStyle(.secondary)
                 if !updater.updates.isEmpty || updater.didInstall {
-                    Text("更新不会中断当前壁纸。\n关闭并重新开启对应动态壁纸后使用新版本。")
+                    Text(t("更新不会中断当前壁纸。\n关闭并重新开启对应动态壁纸后使用新版本。"))
                         .font(.caption).foregroundStyle(.secondary)
                         .lineSpacing(2).fixedSize(horizontal: false, vertical: true)
                 }
@@ -95,18 +95,18 @@ struct RendererComponentUpdateView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(wallpaperTitle(release.component))
                         .font(.system(size: 13, weight: .semibold))
-                    Text(release.notes.isEmpty ? "更新至 \(release.version)" : release.notes)
+                    Text(release.notes.isEmpty ? String(format: t("components.updateTo"), release.version) : release.notes)
                         .font(.system(size: 13)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            DisclosureGroup("组件详情", isExpanded: $showsDetails) {
+            DisclosureGroup(t("组件详情"), isExpanded: $showsDetails) {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(RendererComponent.allCases) { component in
                         componentDetails(component)
                     }
                     Divider()
-                    Text("新版本在对应渲染进程下次启动时生效。仅切换壁纸或关闭主窗口可能复用原进程；关闭并重新开启对应动态壁纸后，才会使用新版本。")
+                    Text(t("新版本在对应渲染进程下次启动时生效。仅切换壁纸或关闭主窗口可能复用原进程；关闭并重新开启对应动态壁纸后，才会使用新版本。"))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .font(.caption).foregroundStyle(.secondary)
@@ -123,24 +123,24 @@ struct RendererComponentUpdateView: View {
     private var actions: some View {
         HStack(spacing: 8) {
             if updater.isInstalling {
-                Button("取消下载") { updater.cancelInstallation() }
+                Button(t("取消下载")) { updater.cancelInstallation() }
                     .modifier(RendererComponentActionStyle())
                 Spacer()
             } else if !updater.updates.isEmpty {
-                Button("跳过这些版本") { updater.skipVersions() }
+                Button(t("跳过这些版本")) { updater.skipVersions() }
                     .font(.callout).buttonStyle(.plain).foregroundStyle(.secondary)
                     .disabled(updater.isChecking)
                 Spacer()
-                Button("稍后") { updater.closeWindow() }
+                Button(t("settings.modules.closePending.later")) { updater.closeWindow() }
                     .modifier(RendererComponentActionStyle()).keyboardShortcut(.cancelAction)
-                Button("更新组件") { updater.install() }
+                Button(t("更新组件")) { updater.install() }
                     .modifier(RendererComponentActionStyle(isPrimary: true))
                     .keyboardShortcut(.defaultAction).disabled(updater.isChecking)
             } else {
-                Button("重新检查") { updater.check(userInitiated: true) }
+                Button(t("重新检查")) { updater.check(userInitiated: true) }
                     .modifier(RendererComponentActionStyle()).disabled(updater.isChecking)
                 Spacer()
-                Button("完成") { updater.closeWindow() }
+                Button(t("guide.finish")) { updater.closeWindow() }
                     .modifier(RendererComponentActionStyle(isPrimary: true)).keyboardShortcut(.defaultAction)
             }
         }
@@ -152,9 +152,9 @@ struct RendererComponentUpdateView: View {
 
     private func wallpaperTitle(_ component: RendererComponent) -> String {
         switch component {
-        case .wgpu: return "场景壁纸"
-        case .web: return "网页壁纸"
-        case .video: return "视频壁纸"
+        case .wgpu: return t("场景壁纸")
+        case .web: return t("网页壁纸")
+        case .video: return t("视频壁纸")
         }
     }
 
@@ -165,10 +165,10 @@ struct RendererComponentUpdateView: View {
                 Text(component.title)
                 Spacer(minLength: 12)
                 if let release {
-                    Text("\(updater.versions[component] ?? "读取中…") → \(release.version)")
+                    Text("\(updater.versions[component] ?? t("components.reading")) → \(release.version)")
                         .monospacedDigit()
                 } else {
-                    Text(updater.versions[component] ?? "读取中…").monospacedDigit()
+                    Text(updater.versions[component] ?? t("components.reading")).monospacedDigit()
                 }
             }
             Text(component.executable).font(.caption.monospaced())

@@ -19,8 +19,8 @@ enum ArcThemeMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .light: return "浅色"
-        case .dark: return "深色"
+        case .light: return t("浅色")
+        case .dark: return t("深色")
         }
     }
 }

@@ -27,7 +27,7 @@ final class SceneWallpaperPropertiesPanelController {
             backing: .buffered,
             defer: false
         )
-        window.title = "设计场景"
+        window.title = t("design.designScene")
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
@@ -407,10 +407,10 @@ private func translatedLabel(for property: SceneWallpaperProperty) -> String {
     }
     let keyLower = property.key.lowercased()
     if let translated = scenePropertyKeyTranslations[keyLower] {
-        return translated
+        return LocalizationService.shared.legacyLabel(translated)
     }
     if let translated = scenePropertyKeyTranslations[property.key] {
-        return translated
+        return LocalizationService.shared.legacyLabel(translated)
     }
     return property.key
 }
@@ -516,7 +516,7 @@ struct SceneWallpaperPropertiesPanel: View {
             ProgressView()
                 .scaleEffect(1.2)
                 .controlSize(.small)
-            Text("加载中...")
+            Text(t("ruleMarket.loading"))
                 .font(.system(size: 12))
                 .foregroundStyle(LiquidGlassColors.textSecondary)
         }
@@ -620,7 +620,7 @@ struct SceneWallpaperPropertiesPanel: View {
             glassCard {
                 fieldRow(label) {
                     HStack(spacing: 6) {
-                        Text(row.currentValue.stringValue.isEmpty ? "未选择" : URL(fileURLWithPath: row.currentValue.stringValue).lastPathComponent)
+                        Text(row.currentValue.stringValue.isEmpty ? t("未选择") : URL(fileURLWithPath: row.currentValue.stringValue).lastPathComponent)
                             .font(.system(size: 11))
                             .foregroundStyle(LiquidGlassColors.textSecondary)
                             .lineLimit(1)

@@ -45,57 +45,57 @@ enum CloudSyncError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .syncDirectoryNotSet:
-            return "尚未选择同步文件夹"
+            return t("尚未选择同步文件夹")
         case .syncDirectoryNotFound:
-            return "同步文件夹不存在"
+            return t("同步文件夹不存在")
         case .syncDirectoryNotWritable:
-            return "同步文件夹不可写"
+            return t("同步文件夹不可写")
         case .syncDirectoryNotReadable:
-            return "同步文件夹不可读"
+            return t("同步文件夹不可读")
         case .fileReadFailed(let path):
-            return "文件读取失败: \(path)"
+            return String(format: t("文件读取失败: %@"), String(describing: path))
         case .fileWriteFailed(let path):
-            return "文件写入失败: \(path)"
+            return String(format: t("文件写入失败: %@"), String(describing: path))
         case .fileHashFailed(let path):
-            return "文件 HASH 计算失败: \(path)"
+            return String(format: t("文件 HASH 计算失败: %@"), String(describing: path))
         case .fileCopyFailed(let source, let destination):
-            return "文件拷贝失败: \(source) → \(destination)"
+            return String(format: t("文件拷贝失败: %@ → %@"), String(describing: source), String(describing: destination))
         case .metadataReadFailed:
-            return "读取元数据失败"
+            return t("读取元数据失败")
         case .metadataWriteFailed:
-            return "写入元数据失败"
+            return t("写入元数据失败")
         case .metadataCorrupted:
-            return "元数据文件损坏"
+            return t("元数据文件损坏")
         case .metadataVersionMismatch(let v):
-            return "元数据版本不兼容：\(v)，请更新 WaifuX"
+            return String(format: t("元数据版本不兼容：%@，请更新 WaifuX"), String(describing: v))
         case .manifestReadFailed:
-            return "读取文件清单失败"
+            return t("读取文件清单失败")
         case .manifestWriteFailed:
-            return "写入文件清单失败"
+            return t("写入文件清单失败")
         case .manifestCorrupted:
-            return "文件清单损坏"
+            return t("文件清单损坏")
         case .syncInProgress:
-            return "正在同步中，请等待完成"
+            return t("正在同步中，请等待完成")
         case .recordMergeFailed(let id, let reason):
-            return "记录合并失败 [\(id)]: \(reason)"
+            return String(format: t("记录合并失败 [%@]: %@"), String(describing: id), String(describing: reason))
         case .settingsMergeFailed(let reason):
-            return "设置合并失败: \(reason)"
+            return String(format: t("设置合并失败: %@"), String(describing: reason))
         case .profileMergeFailed(let reason):
-            return "配置合并失败: \(reason)"
+            return String(format: t("配置合并失败: %@"), String(describing: reason))
         case .webDAVConnectionFailed(let reason):
-            return "WebDAV 连接失败: \(reason)"
+            return String(format: t("WebDAV 连接失败: %@"), String(describing: reason))
         case .webDAVAuthenticationFailed:
-            return "WebDAV 认证失败，请检查用户名和密码"
+            return t("WebDAV 认证失败，请检查用户名和密码")
         case .webDAVNotAuthorized:
-            return "WebDAV 权限不足"
+            return t("WebDAV 权限不足")
         case .webDAVNotFound(let path):
-            return "WebDAV 路径不存在: \(path)"
+            return String(format: t("WebDAV 路径不存在: %@"), String(describing: path))
         case .webDAVProtocolError(let reason):
-            return "WebDAV 协议错误: \(reason)"
+            return String(format: t("WebDAV 协议错误: %@"), String(describing: reason))
         case .internalError(let reason):
-            return "内部错误: \(reason)"
+            return String(format: t("内部错误: %@"), String(describing: reason))
         case .cancelled:
-            return "同步已取消"
+            return t("同步已取消")
         }
     }
 }

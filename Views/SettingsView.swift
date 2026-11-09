@@ -206,6 +206,7 @@ struct SettingsView: View {
         }
         .background(Color(hex: "1C1C1E"))
         .id(localization.currentLanguage)
+        .environment(\.locale, Locale(identifier: localization.currentLanguage.rawValue))
         .onAppear {
             let key = "settings.openSchedulerOnNextAppearance"
             if WaifuXPreferences.shared.bool(forKey: key) {
@@ -1488,7 +1489,7 @@ private struct SchedulerSettingsTab: View {
 
         var body: some View {
             HStack(spacing: 12) {
-                Text("文件夹")
+                Text(t("folders"))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.9))
 
@@ -1499,7 +1500,7 @@ private struct SchedulerSettingsTab: View {
                         viewModel.schedulerViewModel.updateDisplayFolderIDs(nil, for: screenID)
                     }) {
                         HStack {
-                            Text("全部")
+                            Text(t("ruleMarket.all"))
                             if folderIDs == nil {
                                 Image(systemName: "checkmark")
                             }
@@ -1593,12 +1594,12 @@ private struct SchedulerSettingsTab: View {
         }
 
         private var folderIDsLabel: String {
-            guard let folderIDs else { return "全部" }
-            if folderIDs.isEmpty { return "全部" }
+            guard let folderIDs else { return t("ruleMarket.all") }
+            if folderIDs.isEmpty { return t("ruleMarket.all") }
             let names = folderIDs.compactMap { id in
                 allFolders.first(where: { $0.id == id }).map(folderOptionLabel)
             }
-            if names.isEmpty { return "全部" }
+            if names.isEmpty { return t("ruleMarket.all") }
             if names.count == 1 { return names[0] }
             if names.count <= 3 {
                 return names.joined(separator: ", ")
@@ -1929,7 +1930,7 @@ private struct AboutSettingsTab: View {
                             .font(.system(size: 17, weight: .bold))
                             .foregroundStyle(Color.white.opacity(0.92))
 
-                        Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · \(WallpaperEngineAvailability.currentArchitecture)版")
+                        Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") · \(WallpaperEngineAvailability.currentArchitecture)")
                             .font(.system(size: 11.5, weight: .regular))
                             .foregroundStyle(Color.white.opacity(0.4))
                     }
@@ -1943,7 +1944,7 @@ private struct AboutSettingsTab: View {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 12))
-                            Text("检查更新")
+                            Text(t("checkForUpdates"))
                                 .font(.system(size: 13))
                         }
                         .frame(height: 28)
@@ -1957,12 +1958,12 @@ private struct AboutSettingsTab: View {
                         .font(.system(size: 20))
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("渲染组件").font(.system(size: 13, weight: .medium))
-                        Text("Scene、Web 与视频引擎可独立更新")
+                        Text(t("渲染组件")).font(.system(size: 13, weight: .medium))
+                        Text(t("Scene、Web 与视频引擎可独立更新"))
                             .font(.system(size: 11.5)).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("检查组件更新") {
+                    Button(t("检查组件更新")) {
                         RendererComponentUpdater.shared.check(userInitiated: true)
                     }
                     .buttonStyle(.bordered)
@@ -2239,7 +2240,7 @@ private struct WorkshopSettingsTab: View {
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
                 if case .available = sourceManager.steamCredentialState {
-                    Label("已保存用户名", systemImage: "person.crop.circle.badge.checkmark")
+                    Label(t("已保存用户名"), systemImage: "person.crop.circle.badge.checkmark")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -2251,7 +2252,7 @@ private struct WorkshopSettingsTab: View {
                         Text(String(format: t("accountSaved"), username))
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
-                        Text("下载会复用 WaifuX 的 Steam 会话。密码和 Guard 验证码不会保存。")
+                        Text(t("下载会复用 WaifuX 的 Steam 会话。密码和 Guard 验证码不会保存。"))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary.opacity(0.85))
                         if let steamLoginStatusText {
@@ -2276,7 +2277,7 @@ private struct WorkshopSettingsTab: View {
                         steamUsername = ""
                         steamPassword = ""
                         steamGuardCode = ""
-                        steamLoginStatusText = "已清除已保存账号。"
+                        steamLoginStatusText = t("已清除已保存账号。")
                         showLoginForm = true
                     }
                     .controlSize(.small)
@@ -2304,7 +2305,7 @@ private struct WorkshopSettingsTab: View {
                     steamPasswordField
                     TextField(t("steamGuardCodePlaceholder"), text: $steamGuardCode)
                         .textFieldStyle(.roundedBorder)
-                    Text("只有在邮箱验证码或备用令牌场景下才需要填写验证码；大多数情况下可以留空，按提示去 Steam App 里确认即可。")
+                    Text(t("只有在邮箱验证码或备用令牌场景下才需要填写验证码；大多数情况下可以留空，按提示去 Steam App 里确认即可。"))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
@@ -2313,11 +2314,11 @@ private struct WorkshopSettingsTab: View {
                             ProgressView()
                                 .scaleEffect(0.8)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(isWaitingForSteamGuardCode ? "Steam 正在等待验证码…" : "正在验证账号并连接 Steam…")
+                                Text(isWaitingForSteamGuardCode ? t("Steam 正在等待验证码…") : t("正在验证账号并连接 Steam…"))
                                     .font(.system(size: 11))
                                     .foregroundStyle(.secondary)
                                 Text(isWaitingForSteamGuardCode
-                                     ? "输入收到的 Steam Guard 验证码后提交。"
+                                     ? t("输入收到的 Steam Guard 验证码后提交。")
                                      : t("steamLoginMobileConfirmHint"))
                                     .font(.system(size: 10))
                                     .foregroundStyle(.tertiary)
@@ -2331,12 +2332,12 @@ private struct WorkshopSettingsTab: View {
                         Spacer()
 
                         if isVerifyingSteamLogin {
-                            Button("取消") {
+                            Button(t("cancel")) {
                                 SteamServiceManager.shared.cancelLogin()
                             }
                             .controlSize(.small)
                         } else if case .available = sourceManager.steamCredentialState {
-                            Button("取消") {
+                            Button(t("cancel")) {
                                 showLoginForm = false
                                 steamPassword = ""
                                 steamGuardCode = ""
@@ -2345,11 +2346,11 @@ private struct WorkshopSettingsTab: View {
                             .controlSize(.small)
                         }
 
-                        Button(isWaitingForSteamGuardCode ? "提交验证码" : "验证并保存") {
+                        Button(isWaitingForSteamGuardCode ? t("提交验证码") : t("验证并保存")) {
                             if isWaitingForSteamGuardCode {
                                 SteamServiceManager.shared.submitGuardCode(steamGuardCode)
                                 steamGuardCode = ""
-                                steamLoginStatusText = "验证码已提交，正在等待 Steam 验证。"
+                                steamLoginStatusText = t("验证码已提交，正在等待 Steam 验证。")
                                 return
                             }
 
@@ -2372,10 +2373,10 @@ private struct WorkshopSettingsTab: View {
                                         steamPassword = ""
                                         steamGuardCode = ""
                                         if case .available = sourceManager.steamCredentialState {
-                                            steamLoginStatusText = "Steam 会话验证成功。会话令牌已保存到 macOS 钥匙串，密码和验证码未保存。"
+                                            steamLoginStatusText = t("Steam 会话验证成功。会话令牌已保存到 macOS 钥匙串，密码和验证码未保存。")
                                             showLoginForm = false
                                         } else {
-                                            steamLoginStatusText = "账号验证成功，但本机保存状态未更新。可以先尝试下载，如仍提示需要登录，再重新保存一次。"
+                                            steamLoginStatusText = t("账号验证成功，但本机保存状态未更新。可以先尝试下载，如仍提示需要登录，再重新保存一次。")
                                         }
                                         isVerifyingSteamLogin = false
                                     }
@@ -2385,19 +2386,19 @@ private struct WorkshopSettingsTab: View {
                                         case .guardCodeRequired(let msg):
                                             steamLoginStatusText = msg
                                         case .timeout:
-                                            steamLoginStatusText = "连接 Steam 服务超时，请稍后重试。"
+                                            steamLoginStatusText = t("连接 Steam 服务超时，请稍后重试。")
                                         case .loginTimeout:
-                                            steamLoginStatusText = "Steam 登录超时，请检查网络或代理设置后重试。"
+                                            steamLoginStatusText = t("Steam 登录超时，请检查网络或代理设置后重试。")
                                         case .sessionExpired:
-                                            steamLoginStatusText = "Steam 会话需要重新登录。"
+                                            steamLoginStatusText = t("Steam 会话需要重新登录。")
                                         case .invalidCredentials:
-                                            steamLoginStatusText = "账号、密码或验证码不正确，请检查后重试。"
+                                            steamLoginStatusText = t("账号、密码或验证码不正确，请检查后重试。")
                                         case .steamLoginFailed(let msg):
                                             steamLoginStatusText = msg
                                         case .downloadFailed(let msg):
                                             steamLoginStatusText = msg
                                         case .executionFailed(let msg):
-                                            steamLoginStatusText = "Steam 服务执行失败：\(msg)"
+                                            steamLoginStatusText = String(format: t("steam.serviceFailed"), msg)
                                         default:
                                             steamLoginStatusText = error.localizedDescription
                                         }
@@ -2422,7 +2423,7 @@ private struct WorkshopSettingsTab: View {
                     if !isVerifyingSteamLogin {
                         HStack {
                             Spacer()
-                            Button("改用二维码扫码登录") {
+                            Button(t("改用二维码扫码登录")) {
                                 showLoginForm = false
                                 steamLoginMethod = .qr
                                 steamLoginStatusText = nil
@@ -2439,7 +2440,7 @@ private struct WorkshopSettingsTab: View {
                 .cornerRadius(8)
             }
 
-            Text("扫码登录的二维码在本机生成，凭据不经过第三方。Steam 下载只保存会话令牌到 macOS 钥匙串，密码与 Guard 验证码仅用于当前登录，不会写入本地。")
+            Text(t("扫码登录的二维码在本机生成，凭据不经过第三方。Steam 下载只保存会话令牌到 macOS 钥匙串，密码与 Guard 验证码仅用于当前登录，不会写入本地。"))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
@@ -2457,7 +2458,7 @@ private struct WorkshopSettingsTab: View {
                 Text(t("steamServiceStatus"))
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Button("刷新") {
+                Button(t("刷新")) {
                     steamService.start()
                 }
                 .controlSize(.small)
@@ -2533,11 +2534,11 @@ private struct WorkshopSettingsTab: View {
             HStack(spacing: 8) {
                 ProgressView()
                     .scaleEffect(0.8)
-                Text("正在连接 Steam，请稍候…")
+                Text(t("正在连接 Steam，请稍候…"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("取消登录") {
+                Button(t("取消登录")) {
                     SteamServiceManager.shared.cancelLogin()
                 }
                 .controlSize(.small)
@@ -2546,21 +2547,21 @@ private struct WorkshopSettingsTab: View {
             HStack(spacing: 8) {
                 ProgressView()
                     .scaleEffect(0.8)
-                Text("已扫码，请在 Steam 手机 App 上确认登录…")
+                Text(t("已扫码，请在 Steam 手机 App 上确认登录…"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("取消登录") {
+                Button(t("取消登录")) {
                     SteamServiceManager.shared.cancelLogin()
                 }
                 .controlSize(.small)
             }
         case .waitingForCode:
             VStack(alignment: .leading, spacing: 8) {
-                Text("Steam 要求补充验证码，请改用账号密码登录后提交。")
+                Text(t("Steam 要求补充验证码，请改用账号密码登录后提交。"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                Button("改用账户密码登录") {
+                Button(t("改用账户密码登录")) {
                     SteamServiceManager.shared.cancelLogin()
                     steamLoginMethod = .password
                     showLoginForm = true
@@ -2568,7 +2569,7 @@ private struct WorkshopSettingsTab: View {
                 .controlSize(.small)
             }
         case .success:
-            Label("登录成功。", systemImage: "checkmark.circle.fill")
+            Label(t("登录成功。"), systemImage: "checkmark.circle.fill")
                 .font(.system(size: 12))
                 .foregroundStyle(.green)
         case .idle, .failed:
@@ -2576,12 +2577,12 @@ private struct WorkshopSettingsTab: View {
                 Button {
                     SteamServiceManager.shared.loginWithQR()
                 } label: {
-                    Label("使用 Steam 手机 App 扫码登录", systemImage: "qrcode")
+                    Label(t("使用 Steam 手机 App 扫码登录"), systemImage: "qrcode")
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.small)
 
-                Button("改用账户密码登录") {
+                Button(t("改用账户密码登录")) {
                     steamLoginMethod = .password
                     showLoginForm = true
                     steamLoginStatusText = nil
@@ -2605,7 +2606,7 @@ private struct WorkshopSettingsTab: View {
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .id(challenge)
                 } else {
-                    Text("二维码生成失败，请点击下方刷新。")
+                    Text(t("二维码生成失败，请点击下方刷新。"))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .frame(width: 168, height: 168)
@@ -2615,9 +2616,9 @@ private struct WorkshopSettingsTab: View {
             }
             .frame(maxWidth: .infinity)
 
-            Text("使用 Steam 手机 App 扫描二维码")
+            Text(t("使用 Steam 手机 App 扫描二维码"))
                 .font(.system(size: 12, weight: .medium))
-            Text("打开 Steam 手机 App 的扫码功能，扫描后按提示确认登录；二维码会自动更新。")
+            Text(t("打开 Steam 手机 App 的扫码功能，扫描后按提示确认登录；二维码会自动更新。"))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -2626,18 +2627,18 @@ private struct WorkshopSettingsTab: View {
                 Button {
                     SteamServiceManager.shared.loginWithQR()
                 } label: {
-                    Label("刷新二维码", systemImage: "arrow.clockwise")
+                    Label(t("刷新二维码"), systemImage: "arrow.clockwise")
                 }
                 .controlSize(.small)
 
-                Button("取消登录") {
+                Button(t("取消登录")) {
                     SteamServiceManager.shared.cancelLogin()
                 }
                 .controlSize(.small)
 
                 Spacer()
 
-                Button("改用账户密码登录") {
+                Button(t("改用账户密码登录")) {
                     SteamServiceManager.shared.cancelLogin()
                     steamLoginMethod = .password
                     showLoginForm = true
@@ -2675,7 +2676,7 @@ private struct WorkshopSettingsTab: View {
             isVerifyingSteamLogin = false
             steamPassword = ""
             steamGuardCode = ""
-            steamLoginStatusText = "登录成功。会话令牌已保存到 macOS 钥匙串，密码和验证码未保存。"
+            steamLoginStatusText = t("登录成功。会话令牌已保存到 macOS 钥匙串，密码和验证码未保存。")
             showLoginForm = false
         case .failed(let message):
             // 密码登录路径的失败信息由 verifySteamLogin 的 catch 分支负责展示。
@@ -2705,8 +2706,8 @@ private struct WorkshopSettingsTab: View {
                     .frame(width: 18, height: 18)
             }
             .buttonStyle(.borderless)
-            .help(isSteamPasswordVisible ? "隐藏密码" : "显示密码")
-            .accessibilityLabel(isSteamPasswordVisible ? "隐藏 Steam 密码" : "显示 Steam 密码")
+            .help(isSteamPasswordVisible ? t("隐藏密码") : t("显示密码"))
+            .accessibilityLabel(isSteamPasswordVisible ? t("隐藏 Steam 密码") : t("显示 Steam 密码"))
         }
     }
 
@@ -2716,24 +2717,24 @@ private struct WorkshopSettingsTab: View {
                 Image(systemName: "trash.circle.fill")
                     .font(.system(size: 14))
                     .foregroundStyle(.orange)
-                Text("清理下载缓存")
+                Text(t("清理下载缓存"))
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
             }
 
-            Text("删除下载失败产生的空文件夹，释放磁盘空间")
+            Text(t("删除下载失败产生的空文件夹，释放磁盘空间"))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 12) {
                 if let result = cleanupResult, result.count > 0 {
-                    Label("已清理 \(result.count) 个文件夹，释放 \(WorkshopService.formattedByteCount(result.bytesFreed))",
+                    Label(String(format: t("downloads.cleanupResult"), result.count, WorkshopService.formattedByteCount(result.bytesFreed)),
                           systemImage: "checkmark.circle.fill")
                         .font(.system(size: 12))
                         .foregroundStyle(.green)
                         .transition(.opacity)
                 } else if let result = cleanupResult, result.count == 0 {
-                    Label("没有需要清理的文件夹", systemImage: "checkmark.circle")
+                    Label(t("没有需要清理的文件夹"), systemImage: "checkmark.circle")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .transition(.opacity)
@@ -2755,7 +2756,7 @@ private struct WorkshopSettingsTab: View {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Text("清理")
+                        Text(t("清理"))
                     }
                 }
                 .controlSize(.small)
@@ -2787,21 +2788,21 @@ private struct WorkshopSettingsTab: View {
     private var steamServiceStatusText: String {
         if steamService.isAvailable {
             return steamService.isLoggedIn
-                ? "Steam 会话已连接，将在后续下载中复用。"
-                : "Steam 服务已就绪，登录后会自动恢复会话。"
+                ? t("Steam 会话已连接，将在后续下载中复用。")
+                : t("Steam 服务已就绪，登录后会自动恢复会话。")
         }
         if case .failed(let message) = steamService.loginState {
             return String(format: t("steamServiceError"), message)
         }
-        return "正在启动 Steam 服务…"
+        return t("正在启动 Steam 服务…")
     }
 
     private var steamServiceStatusLabel: String {
         if steamService.isAvailable {
-            return steamService.isLoggedIn ? "已登录" : t("steamServiceReady")
+            return steamService.isLoggedIn ? t("已登录") : t("steamServiceReady")
         }
         if case .failed = steamService.loginState {
-            return "不可用"
+            return t("不可用")
         }
         return t("downloading")
     }
@@ -2818,10 +2819,15 @@ private struct WorkshopSettingsTab: View {
 
     private var loginStatusColor: Color {
         guard let steamLoginStatusText else { return .secondary }
-        if steamLoginStatusText.contains("成功") || steamLoginStatusText.contains("已保存") {
+        if steamLoginStatusText.contains("成功") || steamLoginStatusText.contains("已保存")
+            || steamLoginStatusText.localizedCaseInsensitiveContains("sesión iniciada")
+            || steamLoginStatusText.localizedCaseInsensitiveContains("verificada") {
             return .green
         }
-        if steamLoginStatusText.contains("超时") || steamLoginStatusText.contains("错误") || steamLoginStatusText.contains("失败") {
+        if steamLoginStatusText.contains("超时") || steamLoginStatusText.contains("错误") || steamLoginStatusText.contains("失败")
+            || steamLoginStatusText.localizedCaseInsensitiveContains("error")
+            || steamLoginStatusText.localizedCaseInsensitiveContains("agotado")
+            || steamLoginStatusText.localizedCaseInsensitiveContains("incorrect") {
             return .orange
         }
         return .secondary
@@ -2830,26 +2836,26 @@ private struct WorkshopSettingsTab: View {
     private var credentialStateTitle: String {
         switch sourceManager.steamCredentialState {
         case .unknown:
-            return "尚未加载本地账号"
+            return t("尚未加载本地账号")
         case .missing:
-            return "未发现 Steam 会话账号"
+            return t("未发现 Steam 会话账号")
         case .failure:
-            return "读取本地账号失败"
+            return t("读取本地账号失败")
         case .available(let username):
-            return "已检测到账号 \(username)"
+            return String(format: t("steam.accountDetected"), username)
         }
     }
 
     private var credentialStateDescription: String {
         switch sourceManager.steamCredentialState {
         case .unknown:
-            return "正在准备本地账号信息。"
+            return t("正在准备本地账号信息。")
         case .missing:
-            return "当前没有可用于会话探测的 Steam 用户名。登录成功后只保存用户名，不保存密码。"
+            return t("当前没有可用于会话探测的 Steam 用户名。登录成功后只保存用户名，不保存密码。")
         case .failure(let message):
-            return "读取本地已保存账号时发生错误：\(message)"
+            return String(format: t("steam.accountReadFailed"), message)
         case .available:
-            return "本机已记录 Steam 账号。启动时会从 macOS 钥匙串恢复会话。"
+            return t("本机已记录 Steam 账号。启动时会从 macOS 钥匙串恢复会话。")
         }
     }
 

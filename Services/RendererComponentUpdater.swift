@@ -27,7 +27,7 @@ final class RendererComponentUpdater: ObservableObject {
         isChecking = true
         didInstall = false
         errorMessage = nil
-        status = "正在检查渲染组件…"
+        status = t("正在检查渲染组件…")
         operation = Task {
             defer { isChecking = false; operation = nil; presentWhenFinished = false }
             versions = await installer.currentVersions()
@@ -35,15 +35,15 @@ final class RendererComponentUpdater: ObservableObject {
                 let result = try await installer.check()
                 versions = result.versions
                 updates = result.updates
-                status = result.published ? (updates.isEmpty ? "渲染组件已是最新版本" : "有 \(updates.count) 个组件可更新")
-                    : "组件发布源暂未提供更新清单，当前组件保持不变。"
+                status = result.published ? (updates.isEmpty ? t("渲染组件已是最新版本") : String(format: t("有 %@ 个组件可更新"), String(describing: updates.count)))
+                    : LocalizationService.shared.t("组件发布源暂未提供更新清单，当前组件保持不变。")
                 let hasUnskipped = updates.contains {
                     WaifuXPreferences.shared.integer(forKey: skipKey($0.component)) != $0.revision
                 }
                 if presentWhenFinished || hasUnskipped { showWindow() }
             } catch {
                 errorMessage = error.localizedDescription
-                status = "组件检查未完成"
+                status = t("组件检查未完成")
             }
         }
     }
@@ -63,7 +63,7 @@ final class RendererComponentUpdater: ObservableObject {
             do {
                 for release in releases {
                     try Task.checkCancellation()
-                    status = "正在下载并校验\(release.component.title)…"
+                    status = String(format: t("正在下载并校验%@…"), String(describing: release.component.title))
                     let offset = completed
                     try await installer.install(release) { [weak self] received in
                         Task { @MainActor in
@@ -79,12 +79,12 @@ final class RendererComponentUpdater: ObservableObject {
                 }
                 progress = 1
                 didInstall = true
-                status = "组件已安装"
+                status = t("组件已安装")
             } catch {
                 if Task.isCancelled {
-                    status = installed == 0 ? "已取消，当前组件保持不变。" : "已安装 \(installed) 个组件，其余下载已取消。"
+                    status = installed == 0 ? t("已取消，当前组件保持不变。") : String(format: t("已安装 %@ 个组件，其余下载已取消。"), String(describing: installed))
                 } else {
-                    status = installed == 0 ? "安装未完成，当前组件保持不变。" : "已安装 \(installed) 个组件，其余更新未完成。"
+                    status = installed == 0 ? t("安装未完成，当前组件保持不变。") : String(format: t("已安装 %@ 个组件，其余更新未完成。"), String(describing: installed))
                     errorMessage = error.localizedDescription
                 }
             }
@@ -105,7 +105,7 @@ final class RendererComponentUpdater: ObservableObject {
         if windowController == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 440),
                                   styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-            window.title = "渲染组件更新"
+            window.title = t("渲染组件更新")
             window.isReleasedWhenClosed = false
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden

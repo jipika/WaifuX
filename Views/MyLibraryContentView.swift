@@ -966,21 +966,21 @@ struct MyLibraryContentView: View {
                     actions: [
                         GlassAlertAction("OK", role: .cancel)
                     ])
-        .glassAlert("获取订阅列表失败", isPresented: $showSyncFetchErrorAlert,
+        .glassAlert(t("获取订阅列表失败"), isPresented: $showSyncFetchErrorAlert,
                     message: syncErrorMessage,
                     icon: "exclamationmark.triangle.fill",
                     iconTint: LiquidGlassColors.warningOrange,
                     actions: [
                         GlassAlertAction("OK", role: .cancel)
                     ])
-        .glassAlert("Steam 服务未登录", isPresented: $showSyncServiceLoginHint,
-                    message: "订阅同步与下载都通过 Steam 服务进行。请到「设置 → Steam 服务」登录后重试。",
+        .glassAlert(t("Steam 服务未登录"), isPresented: $showSyncServiceLoginHint,
+                    message: t("订阅同步与下载都通过 Steam 服务进行。请到「设置 → Steam 服务」登录后重试。"),
                     icon: "exclamationmark.triangle.fill",
                     iconTint: LiquidGlassColors.warningOrange,
                     actions: [
                         GlassAlertAction("OK", role: .cancel)
                     ])
-        .glassAlert("同步订阅", isPresented: $showSyncResultAlert,
+        .glassAlert(t("sync.subscriptions"), isPresented: $showSyncResultAlert,
                     message: syncResultMessage,
                     icon: syncResultIsWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
                     iconTint: syncResultIsWarning ? LiquidGlassColors.warningOrange : LiquidGlassColors.onlineGreen,
@@ -1052,7 +1052,7 @@ struct MyLibraryContentView: View {
             let summary = progressStore.animeSummaries[favorite.id]
             let latestEp: String?
             if let summary, let epNum = summary.lastEpisodeNumber {
-                latestEp = "第 \(epNum) 集"
+                latestEp = String(format: t("episode.number"), epNum)
             } else {
                 latestEp = nil
             }
@@ -3217,7 +3217,7 @@ struct MyLibraryContentView: View {
                         isEditing: editing,
                         isSelected: selection.contains(items[idx].id),
                         accent: LibraryGridAccent.violet,
-                        badgeText: "\(items[idx].downloadedCount) 集"
+                        badgeText: String(format: t("episodes.count"), items[idx].downloadedCount)
                     ),
                     isFavorite: false
                 )
@@ -3361,11 +3361,11 @@ struct MyLibraryContentView: View {
                 .font(.system(size: 32))
                 .foregroundStyle(Color.accentColor)
 
-            Text("同步 Steam 订阅")
+            Text(t("同步 Steam 订阅"))
                 .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(.white)
 
-            Text("请输入你的 Steam 社区档案 ID（64位数字ID 或 自定义URL）\n例如：76561198113134000 或 customurl")
+            Text(t("请输入你的 Steam 社区档案 ID（64位数字ID 或 自定义URL）\n例如：76561198113134000 或 customurl"))
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
@@ -3380,7 +3380,7 @@ struct MyLibraryContentView: View {
                 }
 
             HStack(spacing: 12) {
-                Button("取消") {
+                Button(t("cancel")) {
                     showSyncProfileSheet = false
                 }
                 .buttonStyle(.plain)
@@ -3397,7 +3397,7 @@ struct MyLibraryContentView: View {
                         .stroke(Color.white.opacity(0.12), lineWidth: 1)
                 )
 
-                Button("保存并继续") {
+                Button(t("保存并继续")) {
                     let trimmed = syncProfileInput.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmed.isEmpty else { return }
                     workshopSourceManager.steamProfileID = trimmed
@@ -3432,15 +3432,15 @@ struct MyLibraryContentView: View {
             // 标题区
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("选择要同步的订阅")
+                    Text(t("选择要同步的订阅"))
                         .font(.system(size: 18, weight: .bold))
                         .foregroundStyle(.white)
-                    Text("已过滤掉已下载的项目，共 \(syncSubscribedItems.count) 个待同步")
+                    Text(String(format: t("subscriptions.pending"), syncSubscribedItems.count))
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.5))
                 }
                 Spacer()
-                Button("全选") {
+                Button(t("select.all")) {
                     let allIDs = Set(syncSubscribedItems.map(\.id))
                     if syncSelectedIDs == allIDs {
                         syncSelectedIDs = []
@@ -3465,7 +3465,7 @@ struct MyLibraryContentView: View {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在获取订阅列表...")
+                    Text(t("正在获取订阅列表..."))
                         .font(.system(size: 13))
                         .foregroundStyle(.white.opacity(0.6))
                 }
@@ -3476,7 +3476,7 @@ struct MyLibraryContentView: View {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 32))
                         .foregroundStyle(.green.opacity(0.7))
-                    Text("所有订阅已同步完成")
+                    Text(t("所有订阅已同步完成"))
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.7))
                 }
@@ -3500,13 +3500,13 @@ struct MyLibraryContentView: View {
 
             // 底部确认区
             HStack {
-                Text("已选择 \(syncSelectedIDs.count) 项")
+                Text(String(format: t("selected.count"), syncSelectedIDs.count))
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.5))
 
                 Spacer()
 
-                Button("取消") {
+                Button(t("cancel")) {
                     showSyncSelectionSheet = false
                     syncSubscribedItems = []
                     syncSelectedIDs = []
@@ -3538,7 +3538,7 @@ struct MyLibraryContentView: View {
                                 .controlSize(.small)
                                 .scaleEffect(0.7)
                         }
-                        Text("确认下载 (\(syncSelectedIDs.count))")
+                        Text(String(format: t("downloads.confirmCount"), syncSelectedIDs.count))
                             .font(.system(size: 13, weight: .semibold))
                     }
                     .foregroundStyle(.white)
@@ -3614,7 +3614,7 @@ struct MyLibraryContentView: View {
                             .background(Color.accentColor.opacity(0.15))
                             .cornerRadius(3)
                         if let subs = item.subscriptions {
-                            Text("\(formatStat(subs)) 订阅")
+                            Text(String(format: t("subscriptions.formatted"), formatStat(subs)))
                                 .font(.system(size: 10))
                                 .foregroundStyle(.white.opacity(0.4))
                         }
@@ -4188,7 +4188,7 @@ struct MyLibraryContentView: View {
             let lockService = FolderLockService.shared
             if !lockService.isFolderUnlocked(folder.id) {
                 Task { @MainActor in
-                    let reason = "解锁「\(folder.name)」文件夹"
+                    let reason = String(format: t("folder.unlockReason"), folder.name)
                     let success = await lockService.unlockFolder(folderID: folder.id, reason: reason)
                     if success {
                         navigateToFolder(folder)
@@ -4473,7 +4473,7 @@ struct MyLibraryContentView: View {
             records.map(\.item),
             folderID: folderID
         ) else {
-            mediaViewModel.errorMessage = "无法保存下载队列，已取消删除旧文件"
+            mediaViewModel.errorMessage = t("无法保存下载队列，已取消删除旧文件")
             return
         }
 
@@ -4820,8 +4820,8 @@ struct MyLibraryContentView: View {
         mediaViewModel.objectWillChange.send()
 
         syncResultMessage = failCount > 0
-            ? "下载完成！\n成功：\(successCount) 个\n失败：\(failCount) 个"
-            : "所有勾选的订阅已开始下载！\n共 \(successCount) 个"
+            ? String(format: t("downloads.batchResult"), successCount, failCount)
+            : String(format: t("downloads.batchStarted"), successCount)
         syncResultIsWarning = failCount > 0
         showSyncResultAlert = true
     }
@@ -5250,12 +5250,12 @@ struct AnimeLibraryCard: View {
             if summary.watchedEpisodes > 0 {
                 progressText = summary.continueWatchingText
             } else {
-                progressText = "开始观看"
+                progressText = t("animeDetail.startWatching")
             }
             if summary.totalEpisodes > 0 {
                 progressValue = summary.overallProgress
             } else if let lastEp = summary.lastEpisodeNumber {
-                progressText = "看到第 \(lastEp) 集"
+                progressText = String(format: t("episode.watchedThrough"), lastEp)
             }
         }
     }

@@ -30,7 +30,7 @@ final class SceneConfigOverridePanelController {
             backing: .buffered,
             defer: false
         )
-        window.title = "场景高级设置"
+        window.title = t("statusbar.sceneAdvancedSettings")
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
@@ -246,7 +246,7 @@ struct SceneConfigOverridePanel: View {
                 .background(accentTint.opacity(0.15), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("场景高级设置")
+                Text(t("statusbar.sceneAdvancedSettings"))
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(LiquidGlassColors.textPrimary)
 
@@ -287,7 +287,7 @@ struct SceneConfigOverridePanel: View {
     @ViewBuilder
     private var cameraSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("📷 相机")
+            sectionHeader(t("📷 相机"))
             glassCard {
                 VStack(spacing: 10) {
                     sliderRow(for: .cameraZoom)
@@ -302,7 +302,7 @@ struct SceneConfigOverridePanel: View {
     @ViewBuilder
     private var parallaxSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("🎯 视差")
+            sectionHeader(t("🎯 视差"))
             glassCard {
                 VStack(spacing: 10) {
                     toggleRow(for: .parallaxEnabled)
@@ -317,7 +317,7 @@ struct SceneConfigOverridePanel: View {
     @ViewBuilder
     private var displaySection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("🖥 显示")
+            sectionHeader(t("🖥 显示"))
             glassCard {
                 VStack(spacing: 10) {
                     sliderRow(for: .orthoWidth)
@@ -331,12 +331,12 @@ struct SceneConfigOverridePanel: View {
     @ViewBuilder
     private var colorSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("🎨 颜色")
+            sectionHeader(t("🎨 颜色"))
             glassCard {
                 VStack(spacing: 10) {
-                    colorRow(for: .clearColor, label: "背景")
-                    colorRow(for: .ambientColor, label: "环境光")
-                    colorRow(for: .skylightColor, label: "天光")
+                    colorRow(for: .clearColor, label: t("背景"))
+                    colorRow(for: .ambientColor, label: t("环境光"))
+                    colorRow(for: .skylightColor, label: t("天光"))
                 }
             }
         }
@@ -345,7 +345,7 @@ struct SceneConfigOverridePanel: View {
     @ViewBuilder
     private var miscSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("⚙️ 其他")
+            sectionHeader(t("⚙️ 其他"))
             glassCard {
                 VStack(spacing: 10) {
                     toggleRow(for: .clearEnabled)
@@ -362,7 +362,7 @@ struct SceneConfigOverridePanel: View {
             Image(systemName: "gearshape.2")
                 .font(.system(size: 32))
                 .foregroundStyle(LiquidGlassColors.textTertiary)
-            Text("未检测到场景配置")
+            Text(t("未检测到场景配置"))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(LiquidGlassColors.textTertiary)
         }
@@ -377,7 +377,7 @@ struct SceneConfigOverridePanel: View {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.counterclockwise")
                     .font(.system(size: 11))
-                Text("重置全部")
+                Text(t("reset.all"))
                     .font(.system(size: 11.5, weight: .medium))
             }
             .foregroundStyle(accentTint)
@@ -392,7 +392,7 @@ struct SceneConfigOverridePanel: View {
         Button {
             viewModel.close()
         } label: {
-            Text("关闭")
+            Text(t("captcha.close"))
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(LiquidGlassColors.textSecondary)
                 .padding(.horizontal, 12)
