@@ -240,9 +240,9 @@ struct MediaExploreContentView: View {
                         isLoading: isResolvingWorkshopURL,
                         onSubmit: { handleWorkshopURLSubmit() },
                         onDismiss: { showWorkshopURLSheet = false },
-                        title: "通过链接打开壁纸",
-                        placeholder: "粘贴壁纸链接...",
-                        supportedFormatsHint: "支持格式：steamcommunity.com/sharedfiles/filedetails/?id=1234567890、motionbgs.com/xxx、wallsflow.com/…/数字-slug.html，或动态桌面 OSS 视频直链"
+                        title: t("通过链接打开壁纸"),
+                        placeholder: t("粘贴壁纸链接..."),
+                        supportedFormatsHint: t("支持格式：steamcommunity.com/sharedfiles/filedetails/?id=1234567890、motionbgs.com/xxx、wallsflow.com/…/数字-slug.html，或动态桌面 OSS 视频直链")
                     )
                 }
             }
@@ -1503,7 +1503,7 @@ struct MediaExploreContentView: View {
 
     private var loadingState: some View {
         ExploreLoadingStateView(
-            message: "加载中...",
+            message: t("ruleMarket.loading"),
             tint: arcSettings.primaryText
         )
         .exploreFrostedPanel(cornerRadius: 28, tint: exploreAtmosphere.tint.primary)
@@ -1783,7 +1783,7 @@ struct MediaExploreContentView: View {
     private func handleWorkshopURLSubmit() {
         let url = workshopURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else {
-            workshopURLError = "请输入链接"
+            workshopURLError = t("common.enterURL")
             return
         }
         isResolvingWorkshopURL = true
@@ -1807,7 +1807,7 @@ struct MediaExploreContentView: View {
                     throw NSError(
                         domain: "WaifuX",
                         code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "无法解析此链接，仅支持 Steam Workshop / MotionBG / Wallsflow / 动态桌面 OSS 链接"]
+                        userInfo: [NSLocalizedDescriptionKey: t("无法解析此链接，仅支持 Steam Workshop / MotionBG / Wallsflow / 动态桌面 OSS 链接")]
                     )
                 }
                 await MainActor.run {
@@ -2277,7 +2277,7 @@ struct WorkshopURLInputButton: View {
         .scaleEffect(isHovered ? 1.05 : 1.0)
         .animation(AppFluidMotion.hoverEase, value: isHovered)
         .onHover { isHovered = $0 }
-        .help("通过链接打开壁纸")
+        .help(t("通过链接打开壁纸"))
     }
 }
 
@@ -2290,11 +2290,11 @@ struct WorkshopURLInputSheet: View {
     let onSubmit: () -> Void
     let onDismiss: () -> Void
     /// 弹窗标题（壁纸探索 / 媒体探索各自传入）
-    var title: String = "通过链接打开壁纸"
+    var title: String = t("通过链接打开壁纸")
     /// 输入框占位符
-    var placeholder: String = "粘贴壁纸链接..."
+    var placeholder: String = t("粘贴壁纸链接...")
     /// 支持格式说明（与当前页可解析的源对齐）
-    var supportedFormatsHint: String = "支持格式：steamcommunity.com/sharedfiles/filedetails/?id=1234567890 或 motionbgs.com/xxx"
+    var supportedFormatsHint: String = t("支持格式：steamcommunity.com/sharedfiles/filedetails/?id=1234567890 或 motionbgs.com/xxx")
 
     @FocusState private var isInputFocused: Bool
 
@@ -2353,7 +2353,7 @@ struct WorkshopURLInputSheet: View {
                 // Buttons
                 HStack(spacing: 12) {
                     Button(action: onDismiss) {
-                        Text("取消")
+                        Text(t("cancel"))
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.white.opacity(0.6))
                             .frame(maxWidth: .infinity)
@@ -2370,7 +2370,7 @@ struct WorkshopURLInputSheet: View {
                                     .controlSize(.small)
                                     .scaleEffect(0.8)
                             }
-                            Text("确认")
+                            Text(t("confirm"))
                                 .font(.system(size: 13, weight: .semibold))
                         }
                         .foregroundStyle(.white)

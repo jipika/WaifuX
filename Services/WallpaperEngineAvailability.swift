@@ -32,6 +32,6 @@ enum WallpaperEngineAvailability {
 
     /// scene 渲染不可用时的用户可读原因（正常分发下不会触发，保留给缺组件的异常安装）。
     static var sceneUnsupportedReason: String {
-        "当前安装包缺少场景壁纸渲染器组件，请重新下载对应架构的安装包。"
+        LocalizationService.shared.t("当前安装包缺少场景壁纸渲染器组件，请重新下载对应架构的安装包。")
     }
 }

@@ -188,7 +188,7 @@ struct MangaDetailSheet: View {
                     .detailGlassCircleChrome()
             }
             .buttonStyle(.plain)
-            .help("切换阅读模式：\(viewModel.readerMode.displayName)")
+            .help(String(format: t("manga.switchReaderMode"), viewModel.readerMode.displayName))
         }
         .padding(.horizontal, 24)
         .padding(.top, topInset + 8)
@@ -201,7 +201,7 @@ struct MangaDetailSheet: View {
                 .progressViewStyle(.circular)
                 .tint(.white)
                 .scaleEffect(1.2)
-            Text(viewModel.loadingProgress ?? "加载中…")
+            Text(viewModel.loadingProgress ?? t("加载中…"))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.7))
         }
@@ -217,7 +217,7 @@ struct MangaDetailSheet: View {
                 .foregroundStyle(.white.opacity(0.8))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
-            Button("重试") {
+            Button(t("ruleMarket.retry")) {
                 Task { await viewModel.load() }
             }
             .buttonStyle(.plain)
@@ -269,7 +269,7 @@ struct MangaDetailSheet: View {
             AuthorWallpaperSheet(
                 uploader: uploader,
                 sourceName: "Pixiv",
-                contentTitle: "作者漫画",
+                contentTitle: t("作者漫画"),
                 wallpapers: authorMangaItems,
                 isLoading: isLoadingAuthorManga,
                 hasMore: hasMoreAuthorManga,
@@ -539,7 +539,7 @@ private struct MangaReaderView: View {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 42))
                 .foregroundStyle(.white.opacity(0.3))
-            Text("暂无可阅读页面")
+            Text(t("暂无可阅读页面"))
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.6))
         }
@@ -718,7 +718,7 @@ private struct MangaSidePanel: View {
             if viewModel.authorID != nil {
                 Button(action: onShowAuthorManga) {
                     HStack(spacing: 5) {
-                        Text("by \(viewModel.authorName)")
+                        Text(String(format: t("author.by"), viewModel.authorName))
                         Image(systemName: "chevron.right")
                             .font(.system(size: 9, weight: .bold))
                     }
@@ -727,12 +727,12 @@ private struct MangaSidePanel: View {
                     .lineLimit(1)
                 }
                 .buttonStyle(.plain)
-                .help("查看该作者的漫画")
+                .help(t("查看该作者的漫画"))
                 .onHover { hovering in
                     if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
             } else {
-                Text("by \(viewModel.authorName)")
+                Text(String(format: t("author.by"), viewModel.authorName))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.65))
                     .lineLimit(1)
@@ -758,7 +758,7 @@ private struct MangaSidePanel: View {
     private var chapterList: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("章节")
+                Text(t("章节"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                 Spacer()
@@ -789,7 +789,7 @@ private struct MangaSidePanel: View {
                                         .foregroundStyle(.white)
                                         .lineLimit(1)
                                         .truncationMode(.tail)
-                                    Text("\(ch.pageCount > 0 ? "\(ch.pageCount) 页" : "页数未知")")
+                                    Text("\(ch.pageCount > 0 ? String(format: t("manga.pages"), ch.pageCount) : t("manga.unknownPages"))")
                                         .font(.system(size: 10))
                                         .foregroundStyle(.white.opacity(0.5))
                                 }

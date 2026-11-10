@@ -13,14 +13,14 @@ enum CloudSyncSettingsCategory: String, Codable, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .general: return "通用"
-        case .playback: return "播放"
-        case .wallpaperEngine: return "壁纸引擎"
-        case .appearance: return "外观"
-        case .clock: return "时钟"
-        case .sources: return "数据源"
-        case .player: return "播放器"
-        case .localization: return "语言"
+        case .general: return t("general")
+        case .playback: return t("player.play")
+        case .wallpaperEngine: return t("tutorial.we.title")
+        case .appearance: return t("player.appearance")
+        case .clock: return t("时钟")
+        case .sources: return t("数据源")
+        case .player: return t("播放器")
+        case .localization: return t("design.language")
         }
     }
 }

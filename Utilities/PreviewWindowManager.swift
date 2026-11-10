@@ -72,7 +72,7 @@ final class PreviewWindowManager: ObservableObject {
             backing: .buffered,
             defer: false
         )
-        window.title = "预览"
+        window.title = t("预览")
         window.titlebarAppearsTransparent = true
         window.backgroundColor = .black
         window.isReleasedWhenClosed = false

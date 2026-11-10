@@ -174,7 +174,7 @@ actor AnimeParser {
         let document = try SwiftSoup.parse(html)
         
         guard let episodeListSelector = rule.episodeList, !episodeListSelector.isEmpty else {
-            throw AnimeParserError.parseError("缺少 episodeList 选择器")
+            throw AnimeParserError.parseError(LocalizationService.shared.t("缺少 episodeList 选择器"))
         }
         
         // 第一步：获取所有匹配 episodeList 的元素
@@ -196,7 +196,7 @@ actor AnimeParser {
             let episodes: [AnimeDetail.AnimeEpisodeItem] = elements.array().enumerated().compactMap { (index, element) in
                 guard let href = try? element.attr("href"), !href.isEmpty else { return nil }
                 let name = (try? element.text().trimmingCharacters(in: .whitespacesAndNewlines)) 
-                    ?? "第\(index + 1)集"
+                    ?? String(format: LocalizationService.shared.t("第%@集"), String(describing: index + 1))
                 
                 var finalURL = href
                 if !finalURL.hasPrefix("http") {
@@ -215,7 +215,7 @@ actor AnimeParser {
             if !episodes.isEmpty {
                 details.append(AnimeDetail(
                     id: url,
-                    title: "播放列表",
+                    title: LocalizationService.shared.t("播放列表"),
                     coverURL: nil,
                     description: nil,
                     status: nil,
@@ -231,7 +231,7 @@ actor AnimeParser {
             var roadCount = 1
             for element in elements {
                 let roadName = (try? element.select(".title, h3, h4, .playlist-title").first()?.text().trimmingCharacters(in: .whitespacesAndNewlines)) 
-                    ?? "播放列表\(roadCount)"
+                    ?? String(format: LocalizationService.shared.t("播放列表%@"), String(describing: roadCount))
                 
                 // 在容器内查找剧集链接
                 // 优先使用 episodeLink 选择器，否则查找所有 <a> 标签
@@ -754,7 +754,7 @@ actor AnimeParser {
 
         // 检查 HTTP 状态码
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的响应"]))
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: -1, userInfo: [NSLocalizedDescriptionKey: t("无效的响应")]))
         }
 
         print("[AnimeParser] HTTP 状态码: \(httpResponse.statusCode)")
@@ -773,13 +773,13 @@ actor AnimeParser {
                     throw AnimeParserError.captchaRequired
                 }
             }
-            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: 403, userInfo: [NSLocalizedDescriptionKey: "访问被拒绝 (403)"]))
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: 403, userInfo: [NSLocalizedDescriptionKey: t("访问被拒绝 (403)")]))
         case 404:
-            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: 404, userInfo: [NSLocalizedDescriptionKey: "页面不存在 (404)"]))
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: 404, userInfo: [NSLocalizedDescriptionKey: t("页面不存在 (404)")]))
         case 500...599:
-            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "服务器错误 (\(httpResponse.statusCode))"]))
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: String(format: t("服务器错误 (%@)"), String(describing: httpResponse.statusCode))]))
         default:
-            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP 错误 (\(httpResponse.statusCode))"]))
+            throw AnimeParserError.networkError(NSError(domain: "AnimeParser", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: String(format: t("HTTP 错误 (%@)"), String(describing: httpResponse.statusCode))]))
         }
 
         let html = String(data: data, encoding: .utf8) ?? ""

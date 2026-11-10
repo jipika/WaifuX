@@ -1974,16 +1974,16 @@ enum BakeError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .alreadyBaking: return "已有烘焙任务在进行中"
-        case .cliNotFound: return "未找到 wallpaper-wgpu 二进制文件"
-        case .windowNotFound: return "未找到渲染窗口"
+        case .alreadyBaking: return t("已有烘焙任务在进行中")
+        case .cliNotFound: return t("未找到 wallpaper-wgpu 二进制文件")
+        case .windowNotFound: return t("未找到渲染窗口")
         case .windowPlacementFailed(let msg): return msg
-        case .captureFailed(let msg): return "帧捕获失败: \(msg)"
-        case .writerFailed(let msg): return "视频编码失败: \(msg)"
+        case .captureFailed(let msg): return String(format: t("帧捕获失败: %@"), String(describing: msg))
+        case .writerFailed(let msg): return String(format: t("视频编码失败: %@"), String(describing: msg))
         case .executionFailed(let msg): return msg
-        case .cancelled: return "烘焙已取消"
-        case .noScreenCapturePermission: return "需要屏幕录制权限才能烘焙视频"
-        case .screenCaptureDenied: return "屏幕录制权限被拒绝，请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许本应用"
+        case .cancelled: return t("烘焙已取消")
+        case .noScreenCapturePermission: return t("需要屏幕录制权限才能烘焙视频")
+        case .screenCaptureDenied: return t("屏幕录制权限被拒绝，请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许本应用")
         }
     }
 }

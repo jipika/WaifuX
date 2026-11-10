@@ -2224,11 +2224,11 @@ final class VideoWallpaperManager: ObservableObject {
             "crossfade": animatedTransition ? "1" : "0"
         ])
         guard localFileURL.isFileURL else {
-            throw NSError(domain: "VideoWallpaper", code: 1001, userInfo: [NSLocalizedDescriptionKey: "动态壁纸必须使用本地视频文件。"])
+            throw NSError(domain: "VideoWallpaper", code: 1001, userInfo: [NSLocalizedDescriptionKey: t("动态壁纸必须使用本地视频文件。")])
         }
 
         guard FileManager.default.fileExists(atPath: localFileURL.path) else {
-            throw NSError(domain: "VideoWallpaper", code: 1002, userInfo: [NSLocalizedDescriptionKey: "视频文件不存在。"])
+            throw NSError(domain: "VideoWallpaper", code: 1002, userInfo: [NSLocalizedDescriptionKey: t("视频文件不存在。")])
         }
 
         let samplingScreens = targetScreen.map { [$0] } ?? NSScreen.screens
@@ -2793,7 +2793,7 @@ final class VideoWallpaperManager: ObservableObject {
             throw NSError(
                 domain: "VideoWallpaper",
                 code: 2002,
-                userInfo: [NSLocalizedDescriptionKey: "没有可用的显示器来承载视频壁纸"]
+                userInfo: [NSLocalizedDescriptionKey: t("没有可用的显示器来承载视频壁纸")]
             )
         }
 
@@ -2877,7 +2877,7 @@ final class VideoWallpaperManager: ObservableObject {
                     reason: "externalRendererLaunchFailed"
                 )
                 throw NSError(domain: "VideoWallpaper", code: 2001,
-                              userInfo: [NSLocalizedDescriptionKey: "视频渲染子进程启动失败"])
+                              userInfo: [NSLocalizedDescriptionKey: t("视频渲染子进程启动失败")])
             }
         } else {
             // Setting a new video normally reuses the healthy daemon, so the
@@ -3098,7 +3098,7 @@ final class VideoWallpaperManager: ObservableObject {
                 code: 2003,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "视频渲染子进程无法为所有目标显示器建立播放管线"
+                        LocalizationService.shared.t("视频渲染子进程无法为所有目标显示器建立播放管线")
                 ]
             )
         }
@@ -3233,7 +3233,7 @@ final class VideoWallpaperManager: ObservableObject {
                         throw NSError(
                             domain: "VideoWallpaper",
                             code: 2007,
-                            userInfo: [NSLocalizedDescriptionKey: "视频交叉淡入提交失败"]
+                            userInfo: [NSLocalizedDescriptionKey: t("视频交叉淡入提交失败")]
                         )
                     }
                 }
@@ -3548,7 +3548,7 @@ final class VideoWallpaperManager: ObservableObject {
                     code: 2004,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "视频首帧交接已被新的壁纸请求取代"
+                            LocalizationService.shared.t("视频首帧交接已被新的壁纸请求取代")
                     ]
                 )
             }
@@ -3558,7 +3558,7 @@ final class VideoWallpaperManager: ObservableObject {
                     code: 2005,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "视频渲染子进程在首帧前退出"
+                            LocalizationService.shared.t("视频渲染子进程在首帧前退出")
                     ]
                 )
             }
@@ -3570,7 +3570,7 @@ final class VideoWallpaperManager: ObservableObject {
         throw NSError(
             domain: "VideoWallpaper",
             code: 2006,
-            userInfo: [NSLocalizedDescriptionKey: "视频渲染子进程首帧等待超时"]
+            userInfo: [NSLocalizedDescriptionKey: t("视频渲染子进程首帧等待超时")]
         )
     }
 

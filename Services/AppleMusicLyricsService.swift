@@ -631,7 +631,7 @@ private enum LyricsError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .musicAuthorizationDenied: return "MusicAuthorization denied"
-        case .emptyUserToken: return "empty userToken — 需登录 Apple Music 并订阅"
+        case .emptyUserToken: return t("empty userToken — 需登录 Apple Music 并订阅")
         case .developerTokenUnavailable: return "developerToken unavailable (set WAIFUX_APPLE_MUSIC_DEVELOPER_TOKEN)"
         case .badURL: return "bad URL"
         case .noSearchHit: return "no search hit"

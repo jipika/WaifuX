@@ -280,15 +280,15 @@ enum DanmakuError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL:
-            return "无效的 URL"
+            return t("无效的 URL")
         case .serverError:
-            return "服务器错误"
+            return t("error.server.title")
         case .noData:
-            return "没有数据"
+            return t("没有数据")
         case .decodingError:
-            return "数据解析错误"
+            return t("数据解析错误")
         case .networkError(let error):
-            return "网络错误: \(error.localizedDescription)"
+            return String(format: t("网络错误: %@"), String(describing: error.localizedDescription))
         }
     }
 }

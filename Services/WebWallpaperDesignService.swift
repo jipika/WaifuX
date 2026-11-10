@@ -10,13 +10,13 @@ enum WebWallpaperDesignError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .projectNotFound:
-            return "未找到当前 Web 壁纸的 project.json"
+            return t("未找到当前 Web 壁纸的 project.json")
         case .unsupportedWallpaperType:
-            return "当前壁纸不是可调参的 Web 壁纸"
+            return t("当前壁纸不是可调参的 Web 壁纸")
         case .missingProperties:
-            return "当前壁纸没有可编辑的属性"
+            return t("当前壁纸没有可编辑的属性")
         case .invalidPropertyData:
-            return "属性数据解析失败"
+            return t("属性数据解析失败")
         }
     }
 }
@@ -448,7 +448,7 @@ final class WebWallpaperDesignService {
     private nonisolated static func preferredLocalizationTable(in general: [String: Any]) -> [String: String] {
         guard let raw = general["localization"] as? [String: Any] else { return [:] }
         var order: [String] = []
-        for tag in Locale.preferredLanguages {
+        for tag in [LocalizationService.shared.currentLanguage.rawValue] + Locale.preferredLanguages {
             let lower = tag.lowercased()
             if lower.hasPrefix("zh-hant") || lower.hasPrefix("zh-tw") || lower.hasPrefix("zh-hk") {
                 order.append("zh-cht")
@@ -458,6 +458,8 @@ final class WebWallpaperDesignService {
                 order.append("ja-jp")
             } else if lower.hasPrefix("ko") {
                 order.append("ko-kr")
+            } else if lower.hasPrefix("es") {
+                order.append("es-es")
             } else if lower.hasPrefix("en") {
                 order.append("en-us")
             }

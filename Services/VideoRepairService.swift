@@ -27,13 +27,13 @@ enum VideoRepairService {
         var errorDescription: String? {
             switch self {
             case .sourceMissing:
-                return "壁纸视频文件不存在，请重新下载后再试。"
+                return t("壁纸视频文件不存在，请重新下载后再试。")
             case .ffmpegNotFound:
-                return "内置 ffmpeg 缺失，无法自动修复无法播放的壁纸视频。"
+                return t("内置 ffmpeg 缺失，无法自动修复无法播放的壁纸视频。")
             case .ffmpegFailed(let exit, _):
-                return "壁纸视频自动修复失败（编码工具退出码 \(exit)），无法设置该壁纸。"
+                return String(format: t("壁纸视频自动修复失败（编码工具退出码 %@），无法设置该壁纸。"), String(describing: exit))
             case .stillUnplayable:
-                return "该壁纸视频无法被播放器解码且自动修复无效，请卸载此壁纸并反馈。"
+                return t("该壁纸视频无法被播放器解码且自动修复无效，请卸载此壁纸并反馈。")
             }
         }
     }

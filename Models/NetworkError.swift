@@ -11,7 +11,7 @@ enum NetworkError: Error, LocalizedError {
     case loginRequired(message: String)
 
     /// Cloudflare 反爬拦截提示（NetworkService / 各 HTML 解析器共用同一文案）
-    static let cloudflareBlockedMessage = "请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。"
+    static var cloudflareBlockedMessage: String { t("请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。") }
 
     var errorDescription: String? {
         switch self {

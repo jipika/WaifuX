@@ -183,7 +183,7 @@ class WallpaperSourceManager: ObservableObject {
         // 持久化
         WaifuXPreferences.shared.set(source.rawValue, forKey: selectedSourceKey)
 
-        lastSwitchMessage = "已切换到 \(source.displayName)"
+        lastSwitchMessage = String(format: LocalizationService.shared.t("已切换到 %@"), String(describing: source.displayName))
 
         NotificationCenter.default.post(name: .wallpaperDataSourceChanged, object: nil)
 

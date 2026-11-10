@@ -10,7 +10,7 @@ struct PixivSettingsTab: View {
 
     var body: some View {
         MacSettingsForm {
-            MacSettingsSection(header: "账号") {
+            MacSettingsSection(header: t("账号")) {
                 if authService.isLoggedIn {
                     loggedInRow
                 } else {
@@ -18,7 +18,7 @@ struct PixivSettingsTab: View {
                 }
             }
 
-            Text("Cookie 仅存储在本地，不会上传。")
+            Text(t("Cookie 仅存储在本地，不会上传。"))
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .padding(.top, -12)
@@ -37,11 +37,11 @@ struct PixivSettingsTab: View {
 
     private var loggedInRow: some View {
         MacSettingsRow(
-            title: authService.pixivUserName ?? "Pixiv 用户",
+            title: authService.pixivUserName ?? t("Pixiv 用户"),
             subtitle: authService.pixivUserID.map { "uid: \($0)" },
             showDivider: false
         ) {
-            Button("退出登录") {
+            Button(t("退出登录")) {
                 Task {
                     await authService.logout()
                 }
@@ -54,11 +54,11 @@ struct PixivSettingsTab: View {
 
     private var loggedOutRow: some View {
         MacSettingsRow(
-            title: "登录 Pixiv 账号以浏览更多内容",
+            title: t("登录 Pixiv 账号以浏览更多内容"),
             subtitle: "",
             showDivider: false
         ) {
-            Button("登录 Pixiv") {
+            Button(t("登录 Pixiv")) {
                 showLoginSheet = true
             }
             .controlSize(.small)

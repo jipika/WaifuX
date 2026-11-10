@@ -94,7 +94,7 @@ struct PixivLoginSheet: View {
         VStack(spacing: 0) {
             // 标题栏
             HStack {
-                Text("Pixiv 登录")
+                Text(t("Pixiv 登录"))
                     .font(.headline)
                 Spacer()
                 Button(action: { dismiss() }) {
@@ -118,7 +118,7 @@ struct PixivLoginSheet: View {
             HStack {
                 Image(systemName: "info.circle")
                     .foregroundColor(.blue)
-                Text("登录后可访问更多内容。Cookie 仅存储在本地。")
+                Text(t("登录后可访问更多内容。Cookie 仅存储在本地。"))
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()

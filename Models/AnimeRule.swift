@@ -308,19 +308,19 @@ struct AnimeSearchResult: Identifiable, Codable, Hashable {
     var airWeekdayDisplay: String? {
         guard let weekday = airWeekday else { return nil }
         switch weekday {
-        case 1: return "星期日"
-        case 2: return "星期一"
-        case 3: return "星期二"
-        case 4: return "星期三"
-        case 5: return "星期四"
-        case 6: return "星期五"
-        case 7: return "星期六"
+        case 1: return t("星期日")
+        case 2: return t("星期一")
+        case 3: return t("星期二")
+        case 4: return t("星期三")
+        case 5: return t("星期四")
+        case 6: return t("星期五")
+        case 7: return t("星期六")
         default: return nil
         }
     }
     
     // 类型显示名称
-    var typeDisplayName: String { "动画" }
+    var typeDisplayName: String { t("bangumi.animation") }
 }
 
 struct AnimeTag: Codable, Identifiable {

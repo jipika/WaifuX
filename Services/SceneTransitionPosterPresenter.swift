@@ -26,10 +26,10 @@ final class SceneTransitionPosterPresenter {
 
         var errorDescription: String? {
             switch self {
-            case .imageDecodeFailed(let id): return "过渡静态图解码失败（\(id)）"
-            case .displayGone(let id): return "过渡静态图目标显示器已失效（\(id)）"
-            case .refreshBarrierTimedOut(let id): return "过渡静态图展示屏障超时（\(id)）"
-            case .superseded(let id): return "过渡静态图已被新请求接管（\(id)）"
+            case .imageDecodeFailed(let id): return String(format: t("过渡静态图解码失败（%@）"), String(describing: id))
+            case .displayGone(let id): return String(format: t("过渡静态图目标显示器已失效（%@）"), String(describing: id))
+            case .refreshBarrierTimedOut(let id): return String(format: t("过渡静态图展示屏障超时（%@）"), String(describing: id))
+            case .superseded(let id): return String(format: t("过渡静态图已被新请求接管（%@）"), String(describing: id))
             }
         }
     }

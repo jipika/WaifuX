@@ -65,7 +65,7 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         self.currentRule = rule
         
         isLoading = true
-        progressMessage = "正在初始化解析器..."
+        progressMessage = LocalizationService.shared.t("正在初始化解析器...")
         logMessages.removeAll()
         detectedSources.removeAll()
         isVideoFound = false
@@ -83,7 +83,7 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
             self.setupWebView(resolveId: currentResolveId)
             
             guard let url = URL(string: episodeURL) else {
-                self.finish(with: .error("无效的视频链接"), resolveId: currentResolveId)
+                self.finish(with: .error(LocalizationService.shared.t("无效的视频链接")), resolveId: currentResolveId)
                 return
             }
             
@@ -159,7 +159,7 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         // 如果有挂起的 continuation，恢复它
         if let cont = continuation {
             continuation = nil
-            cont.resume(returning: .error("已取消"))
+            cont.resume(returning: .error(LocalizationService.shared.t("已取消")))
         }
         
         isLoading = false
@@ -839,7 +839,7 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
         
         // 标记视频已找到
         isVideoFound = true
-        progressMessage = "找到视频源: \(quality)"
+        progressMessage = String(format: LocalizationService.shared.t("找到视频源: %@"), String(describing: quality))
         
         // 短暂延迟以可能找到更高质量的视频源
         let currentResolveId = self.resolveId
@@ -865,7 +865,7 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         Task { @MainActor in
-            self.progressMessage = "正在加载页面..."
+            self.progressMessage = LocalizationService.shared.t("正在加载页面...")
             self.addLog("页面开始加载")
         }
     }
@@ -875,7 +875,7 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
         didFinish navigation: WKNavigation!
     ) {
         Task { @MainActor in
-            self.progressMessage = "页面加载完成，扫描视频..."
+            self.progressMessage = LocalizationService.shared.t("页面加载完成，扫描视频...")
             self.addLog("✅ 页面加载完成")
             
             // 页面加载完成后注入额外脚本
@@ -900,7 +900,7 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
             self.addLog("❌ 页面加载失败: \(error.localizedDescription)")
             if !self.isVideoFound {
                 self.finish(
-                    with: .error("页面加载失败: \(error.localizedDescription)"),
+                    with: .error(String(format: LocalizationService.shared.t("页面加载失败: %@"), String(describing: error.localizedDescription))),
                     resolveId: self.resolveId
                 )
             }
@@ -926,7 +926,7 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
             self.addLog("❌ 页面加载失败: \(error.localizedDescription)")
             if !self.isVideoFound {
                 self.finish(
-                    with: .error("页面加载失败: \(error.localizedDescription)"),
+                    with: .error(String(format: LocalizationService.shared.t("页面加载失败: %@"), String(describing: error.localizedDescription))),
                     resolveId: self.resolveId
                 )
             }
@@ -1095,16 +1095,16 @@ private extension AnimeVideoExtractor {
         
         switch result {
         case .success(let sources):
-            progressMessage = "找到 \(sources.count) 个视频源"
+            progressMessage = String(format: LocalizationService.shared.t("找到 %@ 个视频源"), String(describing: sources.count))
             addLog("✅ 解析完成，找到 \(sources.count) 个视频源")
         case .error(let error):
             progressMessage = error
             addLog("❌ \(error)")
         case .captcha:
-            progressMessage = "需要验证码验证"
+            progressMessage = LocalizationService.shared.t("需要验证码验证")
             addLog("⛔ 需要验证码")
         case .timeout:
-            progressMessage = "视频解析超时"
+            progressMessage = LocalizationService.shared.t("视频解析超时")
             addLog("⏱️ 解析超时")
         }
         

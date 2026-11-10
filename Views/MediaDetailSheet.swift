@@ -91,7 +91,7 @@ struct MediaDetailSheet: View {
     @State private var applyingWallpaperStatusKey = "applyingWallpaper"
     @State private var sharePickerAnchorView: NSView?
     @State private var showCopyLinkToast = false
-    @State private var copyToastMessage = "链接已复制"
+    @State private var copyToastMessage = t("wallpaperDetail.linkCopied")
     @State private var showMoreOptionsPopover = false
     @State private var showDeleteBakeConfirm = false
     /// 「推送到手机」弹窗（详情页更多菜单入口）
@@ -392,10 +392,10 @@ struct MediaDetailSheet: View {
             } catch {
                 MobilePushService.shared.stopPush()
                 showMobilePushSheet = false
-                sceneBakeStatusFlash = "推送失败：\(error.localizedDescription)"
+                sceneBakeStatusFlash = String(format: t("mobile.pushFailed"), error.localizedDescription)
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    if sceneBakeStatusFlash?.hasPrefix("推送失败") == true {
+                    if sceneBakeStatusFlash?.hasPrefix(t("推送失败")) == true {
                         sceneBakeStatusFlash = nil
                     }
                 }
@@ -621,10 +621,10 @@ struct MediaDetailSheet: View {
                         },
                         GlassAlertAction(t("cancel"), role: .cancel)
                     ])
-        .glassAlert("删除烘焙产物?", isPresented: $showDeleteBakeConfirm,
-                    message: "将删除该壁纸的离线烘焙视频，静态预览图保留。删除后会立即用静态图替换正在显示的锁屏/桌面壁纸。",
+        .glassAlert(t("删除烘焙产物?"), isPresented: $showDeleteBakeConfirm,
+                    message: t("将删除该壁纸的离线烘焙视频，静态预览图保留。删除后会立即用静态图替换正在显示的锁屏/桌面壁纸。"),
                     actions: [
-                        GlassAlertAction("删除", role: .destructive) {
+                        GlassAlertAction(t("delete"), role: .destructive) {
                             Task { await performDeleteSceneBakeKeepingPoster() }
                         },
                         GlassAlertAction(t("cancel"), role: .cancel)
@@ -664,11 +664,11 @@ struct MediaDetailSheet: View {
                 dismissSceneBakeRendererDialog()
             }
         }
-        .glassAlert("需要重新登录 Steam", isPresented: $showSteamLoginRequiredAlert,
+        .glassAlert(t("需要重新登录 Steam"), isPresented: $showSteamLoginRequiredAlert,
                     message: steamLoginRequiredMessage,
                     actions: [
-                        GlassAlertAction("稍后", role: .cancel),
-                        GlassAlertAction("打开设置") {
+                        GlassAlertAction(t("settings.modules.closePending.later"), role: .cancel),
+                        GlassAlertAction(t("打开设置")) {
                             openSteamLoginSettings()
                         }
                     ])
@@ -1949,10 +1949,10 @@ struct MediaDetailSheet: View {
                 mediaBackgroundEpoch &+= 1
                 isRegeneratingCover = false
                 if success {
-                    sceneBakeStatusFlash = "已重新抽帧"
+                    sceneBakeStatusFlash = t("已重新抽帧")
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        if sceneBakeStatusFlash == "已重新抽帧" {
+                        if sceneBakeStatusFlash == t("已重新抽帧") {
                             sceneBakeStatusFlash = nil
                         }
                     }
@@ -1962,7 +1962,7 @@ struct MediaDetailSheet: View {
                     errorMessage = Self.truncateErrorMessage(fallbackError.localizedDescription)
                     showError = true
                 } else {
-                    errorMessage = "抽帧失败：没有可用的视频源，现场渲染也未产出封面"
+                    errorMessage = t("抽帧失败：没有可用的视频源，现场渲染也未产出封面")
                     showError = true
                 }
             }
@@ -2200,7 +2200,7 @@ struct MediaDetailSheet: View {
                         options: options
                     )
                     guard applied else {
-                        throw LocalWallpaperApplyService.ApplyError.failed("壁纸应用未完成")
+                        throw LocalWallpaperApplyService.ApplyError.failed(t("壁纸应用未完成"))
                     }
                     WallpaperSchedulerService.shared.notifyManualWallpaperChange(
                         screenID: isGlobalDisplaySyncEnabled ? nil : selectedScreen?.wallpaperScreenIdentifier
@@ -2353,7 +2353,7 @@ struct MediaDetailSheet: View {
                         .detailGlassCircleChrome()
                 }
                 .buttonStyle(.plain)
-                .help("更多选项")
+                .help(t("wallpaperDetail.moreOptions"))
                 .background(
                     SharePickerAnchorReader { anchor in
                         sharePickerAnchorView = anchor
@@ -2457,7 +2457,7 @@ struct MediaDetailSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: isPreparingMobilePush ? "hourglass" : "iphone.gen3.radiowaves.left.and.right")
-                        Text(isPreparingMobilePush ? "正在准备…" : "推送到手机（安卓）")
+                        Text(isPreparingMobilePush ? t("正在准备…") : t("推送到手机（安卓）"))
                         Spacer()
                     }
                     .padding(.horizontal, 12)
@@ -2475,7 +2475,7 @@ struct MediaDetailSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: "arrow.triangle.2.circlepath")
-                        Text("重新烘焙")
+                        Text(t("重新烘焙"))
                         Spacer()
                     }
                     .padding(.horizontal, 12)
@@ -2493,7 +2493,7 @@ struct MediaDetailSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: "trash")
-                        Text("删除烘焙产物")
+                        Text(t("删除烘焙产物"))
                         Spacer()
                     }
                     .padding(.horizontal, 12)
@@ -2511,7 +2511,7 @@ struct MediaDetailSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: isRegeneratingCover ? "arrow.triangle.2.circlepath" : "photo.badge.checkmark")
-                        Text(isRegeneratingCover ? "正在抽帧…" : "重新抽帧")
+                        Text(isRegeneratingCover ? t("正在抽帧…") : t("重新抽帧"))
                         Spacer()
                     }
                     .padding(.horizontal, 12)
@@ -2537,7 +2537,7 @@ struct MediaDetailSheet: View {
                             }
                         }
                         isTranscodingVideo = false
-                        sceneBakeStatusFlash = "完成了"
+                        sceneBakeStatusFlash = t("完成了")
                         Task { @MainActor in
                             try? await Task.sleep(nanoseconds: 2_000_000_000)
                             sceneBakeStatusFlash = nil
@@ -2590,7 +2590,7 @@ struct MediaDetailSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: "photo.on.rectangle")
-                        Text("复制静态图片")
+                        Text(t("复制静态图片"))
                         Spacer()
                     }
                     .padding(.horizontal, 12)
@@ -2607,7 +2607,7 @@ struct MediaDetailSheet: View {
                 } label: {
                     HStack {
                         Image(systemName: "doc.on.doc")
-                        Text("复制烘焙资源")
+                        Text(t("复制烘焙资源"))
                         Spacer()
                     }
                     .padding(.horizontal, 12)
@@ -2898,7 +2898,7 @@ struct MediaDetailSheet: View {
             [downloadingItem],
             folderID: preservedFolderID
         ) else {
-            errorMessage = "无法保存下载队列，已取消删除旧文件"
+            errorMessage = t("无法保存下载队列，已取消删除旧文件")
             showError = true
             return
         }
@@ -2942,10 +2942,10 @@ struct MediaDetailSheet: View {
                     VideoWallpaperManager.shared.reloadPlaybackAfterInPlaceOptimization(videoURL: videoURL)
                 }
                 if refreshedCurrentDetail {
-                    sceneBakeStatusFlash = "已重新下载原文件"
+                    sceneBakeStatusFlash = t("已重新下载原文件")
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     if resolvedItem.id == itemID,
-                       sceneBakeStatusFlash == "已重新下载原文件" {
+                       sceneBakeStatusFlash == t("已重新下载原文件") {
                         sceneBakeStatusFlash = nil
                     }
                 }
@@ -3221,7 +3221,7 @@ struct MediaDetailSheet: View {
             return t("sceneBake.progressTitle")
         }
         if isRegeneratingCover {
-            return "正在抽帧…"
+            return t("正在抽帧…")
         }
         if let flash = sceneBakeStatusFlash {
             return flash
@@ -3725,7 +3725,7 @@ struct MediaDetailSheet: View {
     private static func truncateErrorMessage(_ message: String, maxLength: Int = 2_000) -> String {
         if message.count <= maxLength { return message }
         let endIndex = message.index(message.startIndex, offsetBy: maxLength)
-        return String(message[..<endIndex]) + "\n\n[日志已截断，完整错误请查看控制台]"
+        return String(message[..<endIndex]) + t("\n\n[日志已截断，完整错误请查看控制台]")
     }
 
     /// 「媒体错误」弹窗按钮：屏幕录制权限类错误追加「打开系统设置」。
@@ -3766,7 +3766,7 @@ struct MediaDetailSheet: View {
     }
 
     private func presentSteamLoginRequired(_ message: String?) {
-        let fallback = "Steam 会话需要重新登录。下载任务已保留；请在设置中登录，成功后将自动继续。密码和 Guard 验证码不会保存。"
+        let fallback = t("Steam 会话需要重新登录。下载任务已保留；请在设置中登录，成功后将自动继续。密码和 Guard 验证码不会保存。")
         let normalizedMessage = message?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let displayMessage: String
@@ -3787,8 +3787,8 @@ struct MediaDetailSheet: View {
     private static func workshopDownloadUserFacingMessage(_ message: String) -> String {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         // WorkshopService 已给出结构化诊断时，直接展示，不再叠加泛化提示
-        if trimmed.contains("建议按顺序排查")
-            || trimmed.contains("可依次排查") {
+        if (trimmed.contains("建议按顺序排查") || trimmed.contains(t("建议按顺序排查")))
+            || (trimmed.contains("可依次排查") || trimmed.contains(t("可依次排查"))) {
             return trimmed
         }
 
@@ -3797,17 +3797,17 @@ struct MediaDetailSheet: View {
             return "\(t("workshopError.accessDenied"))\n\n\(trimmed)"
         }
         if trimmed.localizedCaseInsensitiveContains("No subscriptions")
-            || trimmed.contains("没有可用的 Workshop 订阅权限") {
+            || (trimmed.contains("没有可用的 Workshop 订阅权限") || trimmed.contains(t("没有可用的 Workshop 订阅权限"))) {
             return "\(t("workshopError.noSubscription"))\n\n\(trimmed)"
         }
         if trimmed.localizedCaseInsensitiveContains("RateLimitExceeded")
-            || trimmed.contains("请求过于频繁")
+            || (trimmed.contains("请求过于频繁") || trimmed.contains(t("请求过于频繁")))
             || trimmed.localizedCaseInsensitiveContains("rate limit") {
             return "\(t("workshopError.rateLimited"))\n\n\(trimmed)"
         }
-        if trimmed.contains("需要登录")
-            || trimmed.contains("登录已过期")
-            || trimmed.contains("账号或密码错误")
+        if (trimmed.contains("需要登录") || trimmed.contains(t("需要登录")))
+            || (trimmed.contains("登录已过期") || trimmed.contains(t("登录已过期")))
+            || (trimmed.contains("账号或密码错误") || trimmed.contains(t("账号或密码错误")))
             || trimmed.localizedCaseInsensitiveContains("credentials")
             || trimmed.localizedCaseInsensitiveContains("session") {
             return "\(t("workshopError.login"))\n\n\(trimmed)"
@@ -3899,14 +3899,14 @@ struct MediaDetailSheet: View {
                                 self.presentSteamLoginRequired(error.localizedDescription)
                             } else {
                                 self.presentWorkshopDownloadError(
-                                    "依赖项下载失败: \(error.localizedDescription)"
+                                    String(format: t("dependency.downloadFailed"), error.localizedDescription)
                                 )
                             }
                             self.isSettingWallpaper = false
                         }
                     } catch {
                         await MainActor.run {
-                            self.presentWorkshopDownloadError("依赖项下载失败: \(error.localizedDescription)")
+                            self.presentWorkshopDownloadError(String(format: t("dependency.downloadFailed"), error.localizedDescription))
                             self.isSettingWallpaper = false
                         }
                     }
@@ -3941,7 +3941,7 @@ struct MediaDetailSheet: View {
                         applyWorkshopWallpaperFromLocalURL(localURL)
                     } else {
                         isSettingWallpaper = false
-                        errorMessage = "下载完成但未找到本地文件"
+                        errorMessage = t("下载完成但未找到本地文件")
                         showError = true
                     }
                 } catch is CancellationError {
@@ -4154,7 +4154,7 @@ struct MediaDetailSheet: View {
                         options: options
                     )
                     guard applied else {
-                        throw LocalWallpaperApplyService.ApplyError.failed("壁纸应用未完成")
+                        throw LocalWallpaperApplyService.ApplyError.failed(t("壁纸应用未完成"))
                     }
                     WallpaperSchedulerService.shared.notifyManualWallpaperChange(
                         screenID: isGlobalDisplaySyncEnabled ? nil : selectedScreen?.wallpaperScreenIdentifier
@@ -4358,7 +4358,7 @@ struct MediaDetailSheet: View {
             return
         }
 
-        copyToastMessage = "烘焙视频已复制"
+        copyToastMessage = t("烘焙视频已复制")
         showCopyLinkToast = true
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -4377,7 +4377,7 @@ struct MediaDetailSheet: View {
                 let image = NSImage(cgImage: frame, size: NSSize(width: frame.width, height: frame.height))
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.writeObjects([image])
-                copyToastMessage = "已复制背景当前帧"
+                copyToastMessage = t("已复制背景当前帧")
                 showCopyLinkToast = true
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -5817,7 +5817,7 @@ struct WallpaperPreviewSheet: View {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
                         .scaleEffect(1.3)
-                    Text(isWeb ? "加载中..." : "视频加载中...")
+                    Text(isWeb ? t("ruleMarket.loading") : t("player.loadingVideo"))
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.8))
                 }
@@ -6048,7 +6048,7 @@ struct PreviewPlayerControls: View {
                     .foregroundStyle(.white)
             }
             .buttonStyle(.plain)
-            .help(isMuted ? "取消静音" : "静音")
+            .help(isMuted ? t("statusbar.unmuteWallpaper") : t("静音"))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

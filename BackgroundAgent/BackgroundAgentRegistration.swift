@@ -33,19 +33,19 @@ enum BackgroundAgentRegistrationError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .approvalRequired:
-            return "请在系统设置 → 通用 → 登录项中允许 WaifuX 后台服务"
+            return t("请在系统设置 → 通用 → 登录项中允许 WaifuX 后台服务")
         case .missingComponent(let path):
-            return "WaifuX 后台服务组件缺失或无效，请重新安装应用：\(path)"
+            return String(format: t("WaifuX 后台服务组件缺失或无效，请重新安装应用：%@"), String(describing: path))
         case .unavailable(let status):
-            return "WaifuX 后台服务注册失败（状态 \(status)），请重试或重新安装应用"
+            return String(format: t("WaifuX 后台服务注册失败（状态 %@），请重试或重新安装应用"), String(describing: status))
         case .launchdJobNotReady(let detail):
-            return "WaifuX 后台服务已注册但未能启动（\(detail)）。请在系统设置 → 通用 → 登录项中允许 WaifuX 后台服务；仍失败请重装应用"
+            return String(format: t("WaifuX 后台服务已注册但未能启动（%@）。请在系统设置 → 通用 → 登录项中允许 WaifuX 后台服务；仍失败请重装应用"), String(describing: detail))
         case .helperOutdated(let detail):
-            return "WaifuX 后台服务仍是旧版本（\(detail)），正在重新注册后台服务；若反复出现请重新安装应用"
+            return String(format: t("WaifuX 后台服务仍是旧版本（%@），正在重新注册后台服务；若反复出现请重新安装应用"), String(describing: detail))
         case .launchdSpawnRejected:
-            return "WaifuX 后台服务的系统登录项记录已损坏，系统无法启动它。请点「修复后台服务」，只重建 WaifuX 自己的记录，不影响其他应用"
+            return t("WaifuX 后台服务的系统登录项记录已损坏，系统无法启动它。请点「修复后台服务」，只重建 WaifuX 自己的记录，不影响其他应用")
         case .registrationRepairFailed:
-            return "WaifuX 已重建后台服务记录，系统仍无法启动它。请在设置 → 日志诊断里导出全部日志发给我们"
+            return t("WaifuX 已重建后台服务记录，系统仍无法启动它。请在设置 → 日志诊断里导出全部日志发给我们")
         }
     }
 }
@@ -170,7 +170,7 @@ enum BackgroundAgentRegistration {
             if service.status == .enabled { throw error }
         }
         try await waitForStatus(service, leaving: .enabled, attempts: 10,
-                                failure: { "注销后仍为已启用（状态 \($0)）" })
+                                failure: { String(format: LocalizationService.shared.t("注销后仍为已启用（状态 %@）"), String(describing: $0)) })
 
         // 2. 丢掉 launchd 侧残留的 job。BTM 记录已在第 1 步删除，smd 不会再把
         //    它下发回来，所以这里只清 launchd 缓存；第 3 步的 register 会重新导入
@@ -181,7 +181,7 @@ enum BackgroundAgentRegistration {
         // 3. 重新注册，并等到 BTM 真的记回 .enabled。
         try ensureEnabled(service)
         try await waitForStatus(service, equals: .enabled, attempts: 10,
-                                failure: { "注册后状态为 \($0)" })
+                                failure: { String(format: LocalizationService.shared.t("注册后状态为 %@"), String(describing: $0)) })
 
         // 3. BTM 说 enabled 不等于 launchd 里端口可连 —— 旧实现缺的就是这一步。
         guard let probe else { return }
@@ -192,7 +192,7 @@ enum BackgroundAgentRegistration {
         }
         try Task.checkCancellation()
         if await probe() { return }
-        throw BackgroundAgentRegistrationError.launchdJobNotReady("mach service 不可达")
+        throw BackgroundAgentRegistrationError.launchdJobNotReady(LocalizationService.shared.t("mach service 不可达"))
     }
 
     // MARK: - 旧「开机自启」退役
@@ -259,11 +259,11 @@ enum BackgroundAgentRegistration {
             if error is CancellationError || current.status == .enabled { throw error }
         }
         try await waitForStatus(current, leaving: .enabled, attempts: 10,
-                                failure: { "旧注册注销后仍为已启用（状态 \($0)）" })
+                                failure: { String(format: LocalizationService.shared.t("旧注册注销后仍为已启用（状态 %@）"), String(describing: $0)) })
         if let bootout { await bootout() }
         try ensureEnabled(replacement)
         try await waitForStatus(replacement, equals: .enabled, attempts: 10,
-                                failure: { "备用注册后状态为 \($0)" })
+                                failure: { String(format: LocalizationService.shared.t("备用注册后状态为 %@"), String(describing: $0)) })
     }
 
     // MARK: - launchd 侧证据

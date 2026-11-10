@@ -190,7 +190,7 @@ struct FixedProgressView: View {
 }
 
 struct ExploreLoadingStateView: View {
-    var message: String = "加载中..."
+    var message: String = t("ruleMarket.loading")
     var tint: Color = .white
 
     @State private var isAnimating = false

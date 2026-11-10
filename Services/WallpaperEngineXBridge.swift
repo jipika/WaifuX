@@ -7146,7 +7146,7 @@ enum WallpaperEngineError: LocalizedError {
     /// CPU 架构不匹配时的用户可见文案。wallpaper-wgpu 只发布 arm64 版本，Intel
     /// Mac 上必然启动失败，而系统原文案是「未能完成该操作。可执行文件中CPU类型不正确」，
     /// 用户看到后只能来问「CPU类型不正确是什么意思」，所以换成能自解释的说法。
-    static let unsupportedIntelCPUDescription = "不支持英特尔处理器：Scene 渲染器 wallpaper-wgpu 只提供 Apple 芯片（arm64）版本"
+    static var unsupportedIntelCPUDescription: String { LocalizationService.shared.t("不支持英特尔处理器：Scene 渲染器 wallpaper-wgpu 只提供 Apple 芯片（arm64）版本") }
 
     /// `posix_spawn` 在 CPU 架构不匹配时返回 EBADARCH；LaunchServices 路径则给出
     /// 本地化文案，所以 errno 与文案双保险。
@@ -7166,10 +7166,10 @@ enum WallpaperEngineError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notInstalled: return "Wallpaper Engine 未安装"
-        case .cliNotFound: return "未找到 wallpaper-wgpu 二进制文件"
-        case .legacyCliNotFound: return "未找到 wallpaperengine-cli 二进制文件"
-        case .screenCaptureDenied: return "屏幕录制权限被拒绝，请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许本应用后重试"
+        case .notInstalled: return t("Wallpaper Engine 未安装")
+        case .cliNotFound: return t("未找到 wallpaper-wgpu 二进制文件")
+        case .legacyCliNotFound: return t("未找到 wallpaperengine-cli 二进制文件")
+        case .screenCaptureDenied: return t("屏幕录制权限被拒绝，请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许本应用后重试")
         case .executionFailed(let msg): return msg
         case .sceneRendererUnavailable: return WallpaperEngineAvailability.sceneUnsupportedReason
         }
@@ -7279,7 +7279,7 @@ extension WallpaperEngineXBridge {
         guard let cliURL = Self.resolvedCLIExecutableURL() else { throw WallpaperEngineError.cliNotFound }
         guard SceneHandoffProtocol.binarySupportsHandoff(at: cliURL) else {
             throw WallpaperEngineError.executionFailed(
-                "当前 wallpaper-wgpu 不支持安全交接协议（缺少 \(SceneHandoffProtocol.capabilityMarker)），已保留原壁纸"
+                String(format: LocalizationService.shared.t("当前 wallpaper-wgpu 不支持安全交接协议（缺少 %@），已保留原壁纸"), String(describing: SceneHandoffProtocol.capabilityMarker))
             )
         }
         let effective = Self.mergeSceneConfigOverrides(userProperties, wallpaperPath: resolvedPath)
@@ -7342,7 +7342,7 @@ extension WallpaperEngineXBridge {
             let why = outcomes[id].map { "\($0)" } ?? "missing"
             if screenHasOldContentToProtect(screen) {
                 endSceneHandoff(tx)
-                throw WallpaperEngineError.executionFailed("Scene 过渡静态图准备失败（\(id): \(why)），已保留原壁纸")
+                throw WallpaperEngineError.executionFailed(String(format: LocalizationService.shared.t("Scene 过渡静态图准备失败（%@: %@），已保留原壁纸"), String(describing: id), String(describing: why)))
             }
             AppLogger.error(.wallpaper, "[SceneHandoff] 过渡图准备失败但无旧内容需保护，直接加载", metadata: [
                 "screenID": id, "outcome": why
@@ -7372,7 +7372,7 @@ extension WallpaperEngineXBridge {
                 guard isCurrent() else { endSceneHandoff(tx); return nil }
                 guard let results, !results.values.contains(.failed) else {
                     endSceneHandoff(tx)
-                    throw WallpaperEngineError.executionFailed("Scene 锁屏视频源发布或应用失败")
+                    throw WallpaperEngineError.executionFailed(LocalizationService.shared.t("Scene 锁屏视频源发布或应用失败"))
                 }
                 sourceResults = results
             }
@@ -7398,7 +7398,7 @@ extension WallpaperEngineXBridge {
                     }
                     guard let result = sourceResults[displayID], result != .failed else {
                         endSceneHandoff(tx)
-                        throw WallpaperEngineError.executionFailed("Scene 锁屏静态源发布或应用失败")
+                        throw WallpaperEngineError.executionFailed(LocalizationService.shared.t("Scene 锁屏静态源发布或应用失败"))
                     }
                     tx.publishedSourceScreenIDs.insert(id)
                     if result == .ready {
@@ -7446,7 +7446,7 @@ extension WallpaperEngineXBridge {
                         }
                         endSceneHandoff(tx)
                         throw WallpaperEngineError.executionFailed(
-                            "Scene 过渡静态图展示屏障未通过（\(error.localizedDescription)），已保留原壁纸"
+                            String(format: LocalizationService.shared.t("Scene 过渡静态图展示屏障未通过（%@），已保留原壁纸"), String(describing: error.localizedDescription))
                         )
                     }
                     AppLogger.error(.wallpaper, "[SceneHandoff] 展示屏障未通过但无旧内容需保护，继续", metadata: [
@@ -7487,18 +7487,18 @@ extension WallpaperEngineXBridge {
                 processPendingTermination()
                 guard let session = sceneHandoffSessions[screenID],
                       let info = screenProcesses[screenID], info.pid == session.pid else {
-                    results[screenID] = .failed("渲染进程所有权已变化"); continue
+                    results[screenID] = .failed(LocalizationService.shared.t("渲染进程所有权已变化")); continue
                 }
                 if let termination = info.handoffTermination {
-                    results[screenID] = .failed("渲染进程在场景加载前退出：\(termination.reason)"); continue
+                    results[screenID] = .failed(String(format: LocalizationService.shared.t("渲染进程在场景加载前退出：%@"), String(describing: termination.reason))); continue
                 }
                 guard info.process.isRunning, kill(info.pid, 0) == 0 else {
-                    results[screenID] = .failed("渲染进程已退出，但未收到退出状态"); continue
+                    results[screenID] = .failed(LocalizationService.shared.t("渲染进程已退出，但未收到退出状态")); continue
                 }
                 guard let screen = SceneTransitionPosterPresenter.liveScreen(id: screenID),
                       Int(screen.frame.width.rounded()) == info.launchedScreenWidth,
                       Int(screen.frame.height.rounded()) == info.launchedScreenHeight else {
-                    results[screenID] = .failed("目标显示器已失效或几何已变化"); continue
+                    results[screenID] = .failed(LocalizationService.shared.t("目标显示器已失效或几何已变化")); continue
                 }
                 let elapsed = Date().timeIntervalSince(budgetStarts[screenID] ?? tx.startedAt)
                 let status = SceneHandoffStatus.read(from: session.statusURL)
@@ -7532,20 +7532,20 @@ extension WallpaperEngineXBridge {
                         "desktopExposedMS": exposedMS
                     ])
                 case .failed(let code, let message):
-                    results[screenID] = .failed("渲染器报告失败 \(code): \(message)")
+                    results[screenID] = .failed(String(format: LocalizationService.shared.t("渲染器报告失败 %@: %@"), String(describing: code), String(describing: message)))
                 case .unsupported(let why):
-                    results[screenID] = .failed("渲染器不支持安全交接协议：\(why)")
+                    results[screenID] = .failed(String(format: LocalizationService.shared.t("渲染器不支持安全交接协议：%@"), String(describing: why)))
                 case .pending(let phase):
                     if phase == "missing", elapsed > startupBudget {
-                        results[screenID] = .failed("渲染器入口未产生状态（\(Int(startupBudget))s），请查看渲染器日志")
+                        results[screenID] = .failed(String(format: LocalizationService.shared.t("渲染器入口未产生状态（%@s），请查看渲染器日志"), String(describing: Int(startupBudget))))
                     } else if phase == "awaitingAccept", elapsed > ackBudget {
-                        results[screenID] = .failed("控制命令未被渲染器确认（\(Int(ackBudget))s）")
+                        results[screenID] = .failed(String(format: LocalizationService.shared.t("控制命令未被渲染器确认（%@s）"), String(describing: Int(ackBudget))))
                     } else if elapsed > loadBudget {
-                        results[screenID] = .failed("场景加载超时（\(Int(loadBudget))s，阶段 \(phase)）")
+                        results[screenID] = .failed(String(format: LocalizationService.shared.t("场景加载超时（%@s，阶段 %@）"), String(describing: Int(loadBudget)), String(describing: phase)))
                     }
                 case .stale:
                     if elapsed > ackBudget {
-                        results[screenID] = .failed("渲染器状态仍属于旧请求（\(Int(ackBudget))s）")
+                        results[screenID] = .failed(String(format: LocalizationService.shared.t("渲染器状态仍属于旧请求（%@s）"), String(describing: Int(ackBudget))))
                     }
                 }
             }

@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A50E5BA10000000000000003 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = A5E74240BB76AE98DEF8570D /* InfoPlist.strings */; };
+		FF6861901B97BB65F1E80DB0 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = A5E74240BB76AE98DEF8570D /* InfoPlist.strings */; };
 		0003D56AFD21A81189C19D8B /* WallpaperExtensionContextRecoveryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19F8E9C6A0824A860D97C1C1 /* WallpaperExtensionContextRecoveryPolicy.swift */; };
 		004FF2C864E3876EBE274AB0 /* KonachanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1823EAC90BA4264646D4E1D3 /* KonachanService.swift */; };
 		005E654F7F92E4F2E8274624 /* PreviewWindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E9B5C035A06A1E8C23DC0D1 /* PreviewWindowManager.swift */; };
@@ -653,6 +655,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A5E74240BB76AE98DEF8570D /* InfoPlist.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = InfoPlist.strings; path = es.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A50E5BA10000000000000001 /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = es.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		0078B0712CFEED924093FFC6 /* BackgroundAgentWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundAgentWire.swift; sourceTree = "<group>"; };
 		010D6A8FBC9EE62D453F4B30 /* StaticWallpaperApplyService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StaticWallpaperApplyService.swift; sourceTree = "<group>"; };
 		01DA9F0890FE82E2FC622F16 /* WallpaperSnapshotPixelBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperSnapshotPixelBudget.swift; sourceTree = "<group>"; };
@@ -1478,6 +1482,7 @@
 			isa = PBXGroup;
 			children = (
 				916B2F6262D12AA99FF3B356 /* Info.plist */,
+				A5E74240BB76AE98DEF8570D /* InfoPlist.strings */,
 				8CAD6E3F8ECF4F3C50EA34BC /* WaifuXApp.swift */,
 			);
 			path = App;
@@ -1743,6 +1748,7 @@
 			knownRegions = (
 				Base,
 				en,
+				es,
 				ja,
 				zh,
 			);
@@ -1782,6 +1788,7 @@
 			files = (
 				D1CB4193D7B4328A3DF46D49 /* Assets.xcassets in Resources */,
 				3752217096239CACF01196D3 /* WallpaperPropertyEditor.html in Resources */,
+				A50E5BA10000000000000003 /* InfoPlist.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1791,6 +1798,7 @@
 			files = (
 				ED8CC76A6300E215C960C06E /* AnimeRules in Resources */,
 				C7D1207E42F6526D28004C0A /* Assets.xcassets in Resources */,
+				FF6861901B97BB65F1E80DB0 /* InfoPlist.strings in Resources */,
 				C2D92D7D81345EBF5BD435E2 /* LockScreenWallpaperService.swift.bak in Resources */,
 				0FBA60AD0ADF8273C401F189 /* Resources in Resources */,
 				B59ED61D680C08B5CB14455A /* we-mpkg-tool in Resources */,
@@ -2482,6 +2490,7 @@
 			isa = PBXVariantGroup;
 			children = (
 				ED7B7A03C80F5320D5E6BFA1 /* en */,
+				A50E5BA10000000000000001 /* es */,
 				34A3185FA7706A415FA560B3 /* ja */,
 				E80B1DCF7503974CD3608ADD /* zh */,
 			);

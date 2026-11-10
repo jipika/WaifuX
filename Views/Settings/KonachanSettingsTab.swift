@@ -8,13 +8,13 @@ struct KonachanSettingsTab: View {
 
     var body: some View {
         MacSettingsForm {
-            MacSettingsSection(header: "账号与访问验证") {
+            MacSettingsSection(header: t("账号与访问验证")) {
                 MacSettingsRow(
                     title: authService.statusTitle,
                     subtitle: authService.statusSubtitle,
                     showDivider: authService.hasUsableSession
                 ) {
-                    Button(authService.hasUsableSession ? "重新登录 / 验证" : "登录 / 验证") {
+                    Button(authService.hasUsableSession ? t("重新登录 / 验证") : t("登录 / 验证")) {
                         showLoginSheet = true
                     }
                     .controlSize(.small)
@@ -22,11 +22,11 @@ struct KonachanSettingsTab: View {
 
                 if authService.hasUsableSession {
                     MacSettingsRow(
-                        title: "清除 Konachan 会话",
-                        subtitle: "移除本机保存的登录和 Cloudflare Cookie。",
+                        title: t("清除 Konachan 会话"),
+                        subtitle: t("移除本机保存的登录和 Cloudflare Cookie。"),
                         showDivider: false
                     ) {
-                        Button("清除") {
+                        Button(t("design.clear")) {
                             Task {
                                 await authService.logout()
                             }
@@ -36,7 +36,7 @@ struct KonachanSettingsTab: View {
                 }
             }
 
-            Text("登录页使用与应用请求相同的浏览器标识。完成 Cloudflare 检查或账号登录后，Cookie 仅保存在本机并自动供 Konachan API、缩略图和原图下载使用。")
+            Text(t("登录页使用与应用请求相同的浏览器标识。完成 Cloudflare 检查或账号登录后，Cookie 仅保存在本机并自动供 Konachan API、缩略图和原图下载使用。"))
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .padding(.top, -12)
@@ -64,9 +64,9 @@ private struct KonachanLoginSheet: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Konachan 登录与验证")
+                    Text(t("Konachan 登录与验证"))
                         .font(.headline)
-                    Text("可登录账号，也可只完成 Cloudflare 人机验证。")
+                    Text(t("可登录账号，也可只完成 Cloudflare 人机验证。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -94,13 +94,13 @@ private struct KonachanLoginSheet: View {
             HStack(spacing: 12) {
                 Image(systemName: "lock.fill")
                     .foregroundStyle(.green)
-                Text("完成页面上的登录或验证后，点击“完成并保存”。")
+                Text(t("完成页面上的登录或验证后，点击“完成并保存”。"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 Spacer()
 
-                Button("完成并保存") {
+                Button(t("完成并保存")) {
                     Task {
                         isSaving = true
                         await authService.saveWebSession()

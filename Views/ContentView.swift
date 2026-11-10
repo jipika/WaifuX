@@ -617,6 +617,7 @@ struct ContentView: View {
                 navigationState.selectedTab = .myMedia
             }
             .id(localization.currentLanguage)
+            .environment(\.locale, Locale(identifier: localization.currentLanguage.rawValue))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationBarBackButtonHidden(true)
@@ -1681,7 +1682,7 @@ private struct DownloadProgressToast: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .help(snapshot.isRunning ? "取消下载" : "关闭")
+                .help(snapshot.isRunning ? t("取消下载") : t("captcha.close"))
             }
 
             // 进度区域
@@ -1723,7 +1724,7 @@ private struct DownloadProgressToast: View {
             if showsCancel || showsRetry {
                 HStack(spacing: 10) {
                     toastActionButton(
-                        title: showsCancel ? "后台继续" : "关闭",
+                        title: showsCancel ? t("后台继续") : t("captcha.close"),
                         icon: showsCancel ? "arrow.down.circle" : "xmark",
                         role: .secondary,
                         action: onDismiss
@@ -1731,7 +1732,7 @@ private struct DownloadProgressToast: View {
 
                     if showsCancel {
                         toastActionButton(
-                            title: "取消下载",
+                            title: t("取消下载"),
                             icon: "xmark.circle.fill",
                             role: .destructive,
                             action: onCancel
@@ -1740,14 +1741,14 @@ private struct DownloadProgressToast: View {
                         // 失败/已取消/暂停态：除了重试，还要能直接取消并移除任务，
                         // 否则永远下载不了的资源只能反复「重新下载」或干等弹窗超时。
                         toastActionButton(
-                            title: "取消任务",
+                            title: t("取消任务"),
                             icon: "xmark.circle.fill",
                             role: .destructive,
                             action: onRemove
                         )
 
                         toastActionButton(
-                            title: "重新下载",
+                            title: t("library.redownload.item"),
                             icon: "arrow.clockwise",
                             role: .retry,
                             action: onRetry

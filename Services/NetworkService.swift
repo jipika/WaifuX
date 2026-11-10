@@ -252,7 +252,7 @@ actor NetworkService {
                     let server = httpResponse.value(forHTTPHeaderField: "server")?.lowercased() ?? ""
                     if server.contains("cloudflare") || cfMitigated == "challenge" {
                         throw NetworkError.loginRequired(
-                            message: "请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。"
+                            message: LocalizationService.shared.t("请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。")
                         )
                     }
                 }
@@ -285,7 +285,7 @@ actor NetworkService {
                 }()
                 if isCloudflare || bodyHintsCF {
                     throw NetworkError.loginRequired(
-                        message: "请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。"
+                        message: LocalizationService.shared.t("请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。")
                     )
                 }
             }

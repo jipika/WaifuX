@@ -26,7 +26,7 @@ final class WebWallpaperDesignPanelController {
             backing: .buffered,
             defer: false
         )
-        window.title = "设计壁纸"
+        window.title = t("design.designWallpaper")
         window.appearance = NSAppearance(named: .darkAqua)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -365,7 +365,7 @@ struct WebWallpaperDesignPanel: View {
             ProgressView()
                 .scaleEffect(1.2)
                 .controlSize(.small)
-            Text("加载中...")
+            Text(t("ruleMarket.loading"))
                 .font(.system(size: 12))
                 .foregroundStyle(LiquidGlassColors.textSecondary)
         }

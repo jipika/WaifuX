@@ -228,8 +228,8 @@ final class DownloadPathManager {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "选择目录"
-        panel.message = "选择 WaifuX 下载文件的存储位置"
+        panel.prompt = LocalizationService.shared.t("选择目录")
+        panel.message = t("选择 WaifuX 下载文件的存储位置")
 
         guard panel.runModal() == .OK, let selectedURL = panel.url else {
             return nil

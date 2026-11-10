@@ -203,6 +203,8 @@ enum SaverLocalization {
             table = simplified
         } else if preferred.hasPrefix("ja") {
             table = japanese
+        } else if preferred.hasPrefix("es") {
+            table = spanish
         } else {
             table = english
         }
@@ -219,6 +221,12 @@ enum SaverLocalization {
         "noConfiguration": "請在 WaifuX 設定 → 螢幕保護程式選擇螢幕保護壁紙",
         "missingMedia": "螢幕保護壁紙檔案已遺失，請在 WaifuX 設定 → 螢幕保護程式中重新選擇",
         "unplayableVideo": "此螢幕保護影片無法播放，請重新烘焙後再試"
+    ]
+
+    private static let spanish: [String: String] = [
+        "noConfiguration": "Elige un fondo en Ajustes de WaifuX → Salvapantallas",
+        "missingMedia": "Falta el archivo del salvapantallas. Elige otro en Ajustes de WaifuX → Salvapantallas",
+        "unplayableVideo": "No se puede reproducir este vídeo de salvapantallas. Vuelve a renderizarlo e inténtalo de nuevo"
     ]
 
     private static let english: [String: String] = [

@@ -15,7 +15,7 @@ class HTMLXPathParser {
         searchQuery: String? = nil
     ) throws -> [(name: String, src: String)] {
         guard let doc = try? HTML(html: html, encoding: .utf8) else {
-            throw AnimeParserError.parseError("无法解析 HTML")
+            throw AnimeParserError.parseError(LocalizationService.shared.t("无法解析 HTML"))
         }
 
         var results: [(name: String, src: String)] = []
@@ -82,7 +82,7 @@ class HTMLXPathParser {
         chapterResult: String
     ) throws -> [(roadName: String, episodes: [(name: String, url: String)])] {
         guard let doc = try? HTML(html: html, encoding: .utf8) else {
-            throw AnimeParserError.parseError("无法解析 HTML")
+            throw AnimeParserError.parseError(LocalizationService.shared.t("无法解析 HTML"))
         }
 
         var roads: [(roadName: String, episodes: [(name: String, url: String)])] = []
@@ -115,7 +115,7 @@ class HTMLXPathParser {
             }
 
             if !chapterUrlList.isEmpty && !chapterNameList.isEmpty {
-                let roadName = "播放列表\(count)"
+                let roadName = String(format: LocalizationService.shared.t("播放列表%@"), String(describing: count))
                 let episodes = zip(chapterNameList, chapterUrlList).map { (name, url) in
                     (name: name, url: url)
                 }

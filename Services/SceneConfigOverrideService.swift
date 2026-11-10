@@ -31,22 +31,22 @@ public enum SceneConfigOverrideKey: String, CaseIterable, Sendable {
 
     public var displayName: String {
         switch self {
-        case .cameraZoom: return "缩放"
-        case .cameraFov: return "视场角 (FOV)"
-        case .cameraNearz: return "近裁剪面"
-        case .cameraFarz: return "远裁剪面"
-        case .parallaxEnabled: return "视差效果"
-        case .parallaxAmount: return "视差强度"
-        case .parallaxDelay: return "视差延迟"
-        case .parallaxMouseInfluence: return "鼠标影响"
-        case .orthoWidth: return "画布宽度"
-        case .orthoHeight: return "画布高度"
-        case .textureReduction: return "纹理质量缩减"
-        case .clearEnabled: return "背景清除"
-        case .clearColor: return "背景颜色"
-        case .cameraFade: return "淡入效果"
-        case .ambientColor: return "环境光颜色"
-        case .skylightColor: return "天光颜色"
+        case .cameraZoom: return t("design.scale")
+        case .cameraFov: return t("视场角 (FOV)")
+        case .cameraNearz: return t("近裁剪面")
+        case .cameraFarz: return t("远裁剪面")
+        case .parallaxEnabled: return t("视差效果")
+        case .parallaxAmount: return t("视差强度")
+        case .parallaxDelay: return t("视差延迟")
+        case .parallaxMouseInfluence: return t("鼠标影响")
+        case .orthoWidth: return t("画布宽度")
+        case .orthoHeight: return t("画布高度")
+        case .textureReduction: return t("纹理质量缩减")
+        case .clearEnabled: return t("背景清除")
+        case .clearColor: return t("背景颜色")
+        case .cameraFade: return t("淡入效果")
+        case .ambientColor: return t("环境光颜色")
+        case .skylightColor: return t("天光颜色")
         }
     }
 

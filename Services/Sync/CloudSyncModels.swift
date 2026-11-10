@@ -15,8 +15,8 @@ enum CloudSyncConflictStrategy: String, Codable, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .localPreferred: return "本地方优先"
-        case .cloudPreferred: return "云端优先"
+        case .localPreferred: return t("本地方优先")
+        case .cloudPreferred: return t("云端优先")
         }
     }
 }

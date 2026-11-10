@@ -240,11 +240,11 @@ struct AnimeDetailView: View {
         var items: [(String, String)] = []
 
         if let score = viewModel.bangumiDetail?.rating?.score {
-            items.append(("评分", String(format: "%.1f", score)))
+            items.append((t("favorite.score"), String(format: "%.1f", score)))
         }
 
         if let episodes = viewModel.bangumiDetail?.totalEpisodes, episodes > 0 {
-            items.append((t("animeDetail.episodes"), "\(episodes) 集"))
+            items.append((t("animeDetail.episodes"), String(format: t("episodes.count"), episodes)))
         }
 
         // 使用来源数量作为额外信息
@@ -254,7 +254,7 @@ struct AnimeDetailView: View {
         }
 
         if let sourceCount = viewModel.sourceResults.filter({ $0.status == .success }).count as Int?, sourceCount > 0 {
-            items.append(("来源", "\(sourceCount) 个源"))
+            items.append((t("source"), String(format: t("sources.count"), sourceCount)))
         }
 
         return items

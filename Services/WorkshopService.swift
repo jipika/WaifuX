@@ -145,7 +145,7 @@ class WorkshopService: ObservableObject {
         if details.isEmpty {
             // 有 ID 却一条详情都没有，多半是 Web API 临时故障；抛错让调用方回退网页，
             // 别把空页当成列表结束。
-            throw WorkshopError.apiError("作者作品详情为空")
+            throw WorkshopError.apiError(LocalizationService.shared.t("作者作品详情为空"))
         }
         let detailMap = Dictionary(details.map { ($0.publishedfileid, $0) }, uniquingKeysWith: { first, _ in first })
         let profile = try? await fetchSteamProfile(profileID: steamID)
@@ -212,7 +212,7 @@ class WorkshopService: ObservableObject {
 
         let data = try await NetworkService.shared.fetchData(request: request)
         guard let html = String(data: data, encoding: .utf8) else {
-            throw WorkshopError.apiError("无法解析 HTML 响应")
+            throw WorkshopError.apiError(LocalizationService.shared.t("无法解析 HTML 响应"))
         }
 
         // 先尝试从 SSR JSON 提取
@@ -483,7 +483,7 @@ class WorkshopService: ObservableObject {
 
         let data = try await NetworkService.shared.fetchData(request: request)
         guard let html = String(data: data, encoding: .utf8) else {
-            throw WorkshopError.apiError("无法解析 HTML 响应")
+            throw WorkshopError.apiError(LocalizationService.shared.t("无法解析 HTML 响应"))
         }
 
         // 优先从 SSR JSON 或内嵌 JSON 提取（已含完整元数据）
@@ -1307,7 +1307,7 @@ class WorkshopService: ObservableObject {
             if let json = String(data: data, encoding: .utf8) {
                 AppLogger.info(.media, "Raw API response (first 500 chars)", metadata: ["response": json.prefix(500)])
             }
-            throw WorkshopError.apiError("解析 Steam API 响应失败")
+            throw WorkshopError.apiError(LocalizationService.shared.t("解析 Steam API 响应失败"))
         }
     }
 
@@ -1446,7 +1446,7 @@ class WorkshopService: ObservableObject {
 
         let details = try await fetchPublishedFileDetails(ids: [workshopID])
         guard let detail = details.first else {
-            throw WorkshopError.apiError("未找到该 Workshop 项目")
+            throw WorkshopError.apiError(LocalizationService.shared.t("未找到该 Workshop 项目"))
         }
 
         guard detail.creator_app_id == 431960 || detail.consumer_app_id == 431960 else {
@@ -1913,23 +1913,23 @@ enum WorkshopError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL: return "无效的链接"
+        case .invalidURL: return t("无效的链接")
         case .apiError(let msg): return msg
         case .credentialsRequired:
-            return "需要登录 Steam 账号。下载任务已保留，请在设置中登录；成功后将自动继续。"
+            return t("需要登录 Steam 账号。下载任务已保留，请在设置中登录；成功后将自动继续。")
         case .invalidCredentials:
-            return "Steam 会话需要重新验证。下载任务已保留，请在设置中重新登录；密码和验证码不会保存。"
+            return t("Steam 会话需要重新验证。下载任务已保留，请在设置中重新登录；密码和验证码不会保存。")
         case .steamLoginFailed(let msg): return msg
         case .sessionExpired:
-            return "Steam 会话需要重新登录。下载任务已保留，登录成功后将自动继续；账号名不会被清除。"
-        case .loginTimeout: return "Steam 登录超时，可能是网络不稳定或 Steam 服务器繁忙，请检查网络后重试"
+            return t("Steam 会话需要重新登录。下载任务已保留，登录成功后将自动继续；账号名不会被清除。")
+        case .loginTimeout: return t("Steam 登录超时，可能是网络不稳定或 Steam 服务器繁忙，请检查网络后重试")
         case .guardCodeRequired(let msg): return msg
         case .confirmationRequired(let msg): return msg
-        case .timeout: return "下载超时（已等待 10 分钟），可能是网络波动或文件过大，请检查网络后重试"
-        case .downloadIncomplete(let msg): return msg.isEmpty ? "下载未完成，请重试" : msg
-        case .downloadFailed(let msg): return "下载失败：\(msg)"
-        case .executionFailed(let msg): return "执行失败：\(msg)"
-        case .workshopNotSupported: return "非 Workshop 项目"
+        case .timeout: return t("下载超时（已等待 10 分钟），可能是网络波动或文件过大，请检查网络后重试")
+        case .downloadIncomplete(let msg): return msg.isEmpty ? LocalizationService.shared.t("下载未完成，请重试") : msg
+        case .downloadFailed(let msg): return String(format: t("下载失败：%@"), String(describing: msg))
+        case .executionFailed(let msg): return String(format: t("执行失败：%@"), String(describing: msg))
+        case .workshopNotSupported: return t("非 Workshop 项目")
         }
     }
 }

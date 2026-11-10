@@ -263,7 +263,7 @@ final class MobilePushService: ObservableObject {
                 pendingPIN = String(pin)
             }
             if line.contains("配对成功") || line.contains("自动连接成功") {
-                phase = .pushing(name: "传输中", progress: 0)
+                phase = .pushing(name: LocalizationService.shared.t("传输中"), progress: 0)
             }
             if line.contains("等待手机重连"), case .waitingPairing(let pin) = phase {
                 phase = .waitingPairing(pin: pin)
@@ -287,7 +287,7 @@ final class MobilePushService: ObservableObject {
             }
             if line.contains("PIN 不对") {
                 if case .waitingPairing(let pin) = phase {
-                    phase = .failed("PIN 不对，请在手机上重新输入 \(pin)")
+                    phase = .failed(String(format: LocalizationService.shared.t("PIN 不对，请在手机上重新输入 %@"), String(describing: pin)))
                 }
             }
         }
@@ -326,11 +326,11 @@ final class MobilePushService: ObservableObject {
         var errorDescription: String? {
             switch self {
             case .toolMissing(let name):
-                return "缺少内嵌工具 \(name)"
+                return String(format: t("缺少内嵌工具 %@"), String(describing: name))
             case .convertFailed(let log):
-                return "转码失败：\(log)"
+                return String(format: t("转码失败：%@"), String(describing: log))
             case .pinTimeout:
-                return "服务端未在 20 秒内报告配对码"
+                return t("服务端未在 20 秒内报告配对码")
             }
         }
     }

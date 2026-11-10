@@ -29,10 +29,10 @@ class WorkshopSourceManager: ObservableObject {
 
         var subtitle: String {
             switch self {
-            case .motionBG: return "在线视频壁纸"
+            case .motionBG: return t("在线视频壁纸")
             case .wallpaperEngine: return "Steam Workshop"
-            case .dongtai: return "动态桌面视频壁纸"
-            case .wallsflow: return "Live Wallpaper 动态壁纸"
+            case .dongtai: return t("动态桌面视频壁纸")
+            case .wallsflow: return t("Live Wallpaper 动态壁纸")
             }
         }
 
@@ -178,7 +178,7 @@ class WorkshopSourceManager: ObservableObject {
     func setSteamIdentity(username: String) {
         let normalized = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
-            steamCredentialState = .failure("Steam 用户名不能为空。")
+            steamCredentialState = .failure(LocalizationService.shared.t("Steam 用户名不能为空。"))
             return
         }
         persistIdentityLocally(SteamIdentity(username: normalized))
@@ -240,7 +240,7 @@ class WorkshopSourceManager: ObservableObject {
         let defaults = WaifuXPreferences.shared
         if let data = defaults.data(forKey: localIdentityKey) {
             guard let identity = try? JSONDecoder().decode(SteamIdentity.self, from: data) else {
-                return .failure("本地 Steam 账号信息已损坏，请重新登录。")
+                return .failure(LocalizationService.shared.t("本地 Steam 账号信息已损坏，请重新登录。"))
             }
             return .success(identity)
         }
@@ -250,7 +250,7 @@ class WorkshopSourceManager: ObservableObject {
         }
         guard let legacy = try? JSONDecoder().decode(LegacySteamCredentials.self, from: legacyData) else {
             defaults.removeObject(forKey: legacyCredentialsKey)
-            return .failure("旧版 Steam 账号数据已损坏，请重新登录。")
+            return .failure(LocalizationService.shared.t("旧版 Steam 账号数据已损坏，请重新登录。"))
         }
 
         let identity = SteamIdentity(username: legacy.username)
@@ -262,7 +262,7 @@ class WorkshopSourceManager: ObservableObject {
 
     private func persistIdentityLocally(_ identity: SteamIdentity) {
         guard let data = try? JSONEncoder().encode(identity) else {
-            steamCredentialState = .failure("账号数据编码失败，请重试。")
+            steamCredentialState = .failure(LocalizationService.shared.t("账号数据编码失败，请重试。"))
             return
         }
         WaifuXPreferences.shared.set(data, forKey: localIdentityKey)
@@ -367,22 +367,24 @@ class WorkshopSourceManager: ObservableObject {
         /// Steam Workshop 标签值，如 "1920 x 1080"
         let tagValue: String
 
-        static let all: [WorkshopResolution] = [
-            WorkshopResolution(id: "7680x4320", display: "7680 × 4320 (8K UHD)",  tagValue: "7680 x 4320"),
-            WorkshopResolution(id: "5120x2880", display: "5120 × 2880 (5K)",      tagValue: "5120 x 2880"),
-            WorkshopResolution(id: "3840x2160", display: "3840 × 2160 (4K UHD)",  tagValue: "3840 x 2160"),
-            WorkshopResolution(id: "2560x1440", display: "2560 × 1440 (2K QHD)",  tagValue: "2560 x 1440"),
-            WorkshopResolution(id: "3440x1440", display: "3440 × 1440 (UW-QHD)",  tagValue: "3440 x 1440"),
-            WorkshopResolution(id: "1920x1080", display: "1920 × 1080 (FHD)",     tagValue: "1920 x 1080"),
-            WorkshopResolution(id: "2560x1080", display: "2560 × 1080 (UW-FHD)",  tagValue: "2560 x 1080"),
-            WorkshopResolution(id: "1280x720",  display: "1280 × 720 (HD)",       tagValue: "1280 x 720"),
-            WorkshopResolution(id: "5120x1440", display: "5120 × 1440 (超宽)",    tagValue: "5120 x 1440"),
-            // ── 竖屏 Portrait ──
-            WorkshopResolution(id: "2160x3840", display: "2160 × 3840 (竖屏 4K)", tagValue: "Portrait 2160 x 3840"),
-            WorkshopResolution(id: "1440x2560", display: "1440 × 2560 (竖屏 2K)", tagValue: "Portrait 1440 x 2560"),
-            WorkshopResolution(id: "1080x1920", display: "1080 × 1920 (竖屏)",    tagValue: "Portrait 1080 x 1920"),
-            WorkshopResolution(id: "720x1280",  display: "720 × 1280 (竖屏)",     tagValue: "Portrait 720 x 1280"),
-        ]
+        static var all: [WorkshopResolution] {
+            [
+                WorkshopResolution(id: "7680x4320", display: "7680 × 4320 (8K UHD)",  tagValue: "7680 x 4320"),
+                WorkshopResolution(id: "5120x2880", display: "5120 × 2880 (5K)",      tagValue: "5120 x 2880"),
+                WorkshopResolution(id: "3840x2160", display: "3840 × 2160 (4K UHD)",  tagValue: "3840 x 2160"),
+                WorkshopResolution(id: "2560x1440", display: "2560 × 1440 (2K QHD)",  tagValue: "2560 x 1440"),
+                WorkshopResolution(id: "3440x1440", display: "3440 × 1440 (UW-QHD)",  tagValue: "3440 x 1440"),
+                WorkshopResolution(id: "1920x1080", display: "1920 × 1080 (FHD)",     tagValue: "1920 x 1080"),
+                WorkshopResolution(id: "2560x1080", display: "2560 × 1080 (UW-FHD)",  tagValue: "2560 x 1080"),
+                WorkshopResolution(id: "1280x720",  display: "1280 × 720 (HD)",       tagValue: "1280 x 720"),
+                WorkshopResolution(id: "5120x1440", display: LocalizationService.shared.t("5120 × 1440 (超宽)"),    tagValue: "5120 x 1440"),
+                // ── 竖屏 Portrait ──
+                WorkshopResolution(id: "2160x3840", display: LocalizationService.shared.t("2160 × 3840 (竖屏 4K)"), tagValue: "Portrait 2160 x 3840"),
+                WorkshopResolution(id: "1440x2560", display: LocalizationService.shared.t("1440 × 2560 (竖屏 2K)"), tagValue: "Portrait 1440 x 2560"),
+                WorkshopResolution(id: "1080x1920", display: LocalizationService.shared.t("1080 × 1920 (竖屏)"),    tagValue: "Portrait 1080 x 1920"),
+                WorkshopResolution(id: "720x1280",  display: LocalizationService.shared.t("720 × 1280 (竖屏)"),     tagValue: "Portrait 720 x 1280"),
+            ]
+        }
     }
 
     /// 获取所有可用分辨率
@@ -444,7 +446,7 @@ class WorkshopSourceManager: ObservableObject {
 
         WaifuXPreferences.shared.set(source.rawValue, forKey: selectedSourceKey)
 
-        lastSwitchMessage = "已切换到 \(source.displayName) - \(source.subtitle)"
+        lastSwitchMessage = String(format: LocalizationService.shared.t("已切换到 %@ - %@"), String(describing: source.displayName), String(describing: source.subtitle))
 
         NotificationCenter.default.post(name: .workshopSourceChanged, object: nil)
 

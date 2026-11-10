@@ -174,7 +174,7 @@ struct MediaItem: Identifiable, Codable, Hashable {
         if let durationLabel {
             return durationLabel
         }
-        return downloadOptions.isEmpty ? sourceName : "\(downloadOptions.count) 个下载"
+        return downloadOptions.isEmpty ? sourceName : String(format: LocalizationService.shared.t("%@ 个下载"), String(describing: downloadOptions.count))
     }
 
     var subtitle: String {

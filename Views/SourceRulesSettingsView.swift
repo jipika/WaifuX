@@ -336,7 +336,7 @@ struct AddRuleSheet: View {
                     .foregroundStyle(.white.opacity(0.7))
 
                 LiquidGlassTextField(
-                    "https://example.com/rule.json",
+                    t("rule.url.placeholder"),
                     text: $urlString,
                     icon: "link"
                 )

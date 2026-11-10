@@ -433,7 +433,7 @@ struct SteamLoginSheet: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.green.opacity(0.7))
 
-                TextField("输入网址...", text: $urlBarText)
+                TextField(t("输入网址..."), text: $urlBarText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.85))

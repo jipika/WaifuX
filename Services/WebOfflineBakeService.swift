@@ -206,7 +206,7 @@ enum WebOfflineBakeService {
                 expectedHeight: targetSize.height
             ) else {
                 try? FileManager.default.removeItem(at: temporaryURL)
-                throw SceneOfflineBakeError.bakeProcessFailed("Web 烘焙完成后未找到有效 MP4")
+                throw SceneOfflineBakeError.bakeProcessFailed(LocalizationService.shared.t("Web 烘焙完成后未找到有效 MP4"))
             }
 
             guard stableAnalysisId(for: contentRoot) == analysisId else {
@@ -574,8 +574,8 @@ enum WebOfflineBakeService {
             let tail = String(data: capture.tail, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let message = tail.isEmpty
-                ? "wallpaperengine-cli bake 执行失败 (exit=\(process.terminationStatus))"
-                : "wallpaperengine-cli bake 执行失败 (exit=\(process.terminationStatus))\n\(tail)"
+                ? String(format: LocalizationService.shared.t("wallpaperengine-cli bake 执行失败 (exit=%@)"), String(describing: process.terminationStatus))
+                : String(format: LocalizationService.shared.t("wallpaperengine-cli bake 执行失败 (exit=%@)\n%@"), String(describing: process.terminationStatus), String(describing: tail))
             throw SceneOfflineBakeError.bakeProcessFailed(message)
         }
     }

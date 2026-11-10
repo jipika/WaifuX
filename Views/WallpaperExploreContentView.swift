@@ -542,9 +542,9 @@ struct WallpaperExploreContentView: View {
             isLoading: isResolvingWallpaperURL,
             onSubmit: { handleWallpaperURLSubmit() },
             onDismiss: { showWallpaperURLSheet = false },
-            title: "通过链接打开壁纸",
-            placeholder: "粘贴壁纸链接...",
-            supportedFormatsHint: "支持格式：whvn.cc/{id}、wallhaven.cc/w/{id}、4kwallpapers.com/…/{name}-{id}.html、konachan.net/post/show/{id}、pixiv.net/artworks/{id}"
+            title: t("通过链接打开壁纸"),
+            placeholder: t("粘贴壁纸链接..."),
+            supportedFormatsHint: t("支持格式：whvn.cc/{id}、wallhaven.cc/w/{id}、4kwallpapers.com/…/{name}-{id}.html、konachan.net/post/show/{id}、pixiv.net/artworks/{id}")
         )
     }
 
@@ -1056,7 +1056,7 @@ struct WallpaperExploreContentView: View {
     private var pixivRelatedTagsRow: some View {
         if WallpaperSourceManager.shared.activeSource == .pixiv && !viewModel.pixivRelatedTags.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Text("相关标签")
+                Text(t("相关标签"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(arcSettings.secondaryText.opacity(0.46))
                 FlowLayout(spacing: 10) {

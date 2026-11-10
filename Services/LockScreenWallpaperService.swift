@@ -1667,10 +1667,10 @@ enum LockScreenError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .fileNotFound: return "视频文件不存在"
-        case .appGroupNotAvailable: return "App Group 共享容器不可用"
-        case .sourceReadyTimeout: return "壁纸扩展未回报换图完成"
-        case .copyFailed(let msg): return "复制失败: \(msg)"
+        case .fileNotFound: return t("视频文件不存在")
+        case .appGroupNotAvailable: return t("App Group 共享容器不可用")
+        case .sourceReadyTimeout: return t("壁纸扩展未回报换图完成")
+        case .copyFailed(let msg): return String(format: t("复制失败: %@"), String(describing: msg))
         }
     }
 }

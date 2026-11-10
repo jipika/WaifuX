@@ -51,12 +51,12 @@ enum SteamServiceError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unavailable(let message): return message
-        case .busy: return "Steam 登录正在进行中。"
-        case .notAuthenticated: return "Steam 服务尚未登录，请到「设置 → Steam 服务」中登录。"
+        case .busy: return t("Steam 登录正在进行中。")
+        case .notAuthenticated: return t("Steam 服务尚未登录，请到「设置 → Steam 服务」中登录。")
         case .authenticationFailed(let message, _): return message
         case .downloadFailed(let message, _): return message
         case .requestFailed(let message, _): return message
-        case .cancelled: return "Steam 下载已取消。"
+        case .cancelled: return t("Steam 下载已取消。")
         }
     }
 
@@ -216,13 +216,13 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
 
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !password.isEmpty else {
-            throw SteamServiceError.authenticationFailed("Steam 用户名和密码不能为空。", "MISSING_CREDENTIALS")
+            throw SteamServiceError.authenticationFailed(LocalizationService.shared.t("Steam 用户名和密码不能为空。"), "MISSING_CREDENTIALS")
         }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             ioQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    continuation.resume(throwing: SteamServiceError.unavailable(LocalizationService.shared.t("Steam 服务已释放。")))
                     return
                 }
                 guard self.loginContinuation == nil else {
@@ -231,7 +231,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 }
                 guard self.ensureStartedOnQueue() else {
                     continuation.resume(throwing: SteamServiceError.unavailable(
-                        "WaifuX Steam 服务不可用，请重新构建应用。"
+                        LocalizationService.shared.t("WaifuX Steam 服务不可用，请重新构建应用。")
                     ))
                     return
                 }
@@ -260,7 +260,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                     guard let self, !success else { return }
                     self.finishLoginOnQueue(.failure(
                         SteamServiceError.authenticationFailed(
-                            message ?? "Steam 登录失败。",
+                            message ?? LocalizationService.shared.t("Steam 登录失败。"),
                             errorCode
                         )
                     ))
@@ -280,7 +280,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             guard loginContinuation == nil else { return }
             guard ensureStartedOnQueue() else {
                 updateOnMain {
-                    self.loginState = .failed("WaifuX Steam 服务不可用，请重新构建应用。")
+                    self.loginState = .failed(LocalizationService.shared.t("WaifuX Steam 服务不可用，请重新构建应用。"))
                 }
                 return
             }
@@ -301,7 +301,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             guard let self, !success else { return }
             self.qrLoginActive = false
             self.updateOnMain {
-                self.loginState = .failed(message ?? "Steam 二维码登录失败。")
+                self.loginState = .failed(message ?? LocalizationService.shared.t("Steam 二维码登录失败。"))
             }
             self.resolveRestoreWaitersOnQueue(isLoggedIn: self.sessionIsLoggedIn)
         }
@@ -397,7 +397,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         }
 
         guard !workshopID.isEmpty else {
-            throw SteamServiceError.downloadFailed("Workshop ID 不能为空。", "INVALID_WORKSHOP_ID")
+            throw SteamServiceError.downloadFailed(LocalizationService.shared.t("Workshop ID 不能为空。"), "INVALID_WORKSHOP_ID")
         }
         guard await waitForRestoredSessionIfNeeded() else {
             throw sessionRestoreError()
@@ -410,12 +410,12 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
                 ioQueue.async { [weak self] in
                     guard let self else {
-                        continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                        continuation.resume(throwing: SteamServiceError.unavailable(LocalizationService.shared.t("Steam 服务已释放。")))
                         return
                     }
                     guard self.ensureStartedOnQueue() else {
                         continuation.resume(throwing: SteamServiceError.unavailable(
-                            "WaifuX Steam 服务不可用，请重新构建应用。"
+                            LocalizationService.shared.t("WaifuX Steam 服务不可用，请重新构建应用。")
                         ))
                         return
                     }
@@ -435,7 +435,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                         case "completed":
                             guard let path = payload?["outputPath"] as? String else {
                                 continuation.resume(throwing: SteamServiceError.downloadFailed(
-                                    "Steam 服务未返回下载路径。",
+                                    LocalizationService.shared.t("Steam 服务未返回下载路径。"),
                                     "MISSING_OUTPUT_PATH"
                                 ))
                                 return
@@ -445,7 +445,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                             continuation.resume(throwing: SteamServiceError.cancelled)
                         case "failed":
                             continuation.resume(throwing: SteamServiceError.downloadFailed(
-                                message ?? "Workshop 下载失败。",
+                                message ?? LocalizationService.shared.t("Workshop 下载失败。"),
                                 errorCode
                             ))
                         default:
@@ -499,7 +499,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SteamSubscriptionPage, Error>) in
             ioQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    continuation.resume(throwing: SteamServiceError.unavailable(LocalizationService.shared.t("Steam 服务已释放。")))
                     return
                 }
                 guard self.sessionIsLoggedIn else {
@@ -509,7 +509,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 self.sendCommandOnQueue("listSubscriptions", fields: ["startIndex": max(0, startIndex)]) { _, message, errorCode, data in
                     guard let data else {
                         continuation.resume(throwing: SteamServiceError.downloadFailed(
-                            message ?? "获取订阅列表失败。",
+                            message ?? LocalizationService.shared.t("获取订阅列表失败。"),
                             errorCode
                         ))
                         return
@@ -518,7 +518,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                           let returnedStart = data["startIndex"] as? Int,
                           let rawItems = data["items"] as? [[String: Any]] else {
                         continuation.resume(throwing: SteamServiceError.downloadFailed(
-                            "Steam 服务返回的订阅数据格式异常。",
+                            LocalizationService.shared.t("Steam 服务返回的订阅数据格式异常。"),
                             "MALFORMED_SUBSCRIPTIONS"
                         ))
                         return
@@ -568,7 +568,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<SteamUserFilesPage, Error>) in
             ioQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    continuation.resume(throwing: SteamServiceError.unavailable(LocalizationService.shared.t("Steam 服务已释放。")))
                     return
                 }
                 guard self.sessionIsLoggedIn else {
@@ -586,7 +586,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                     }
                     guard let data else {
                         continuation.resume(throwing: SteamServiceError.requestFailed(
-                            message ?? "获取作者作品列表失败。",
+                            message ?? LocalizationService.shared.t("获取作者作品列表失败。"),
                             errorCode
                         ))
                         return
@@ -596,7 +596,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                           let nextStart = data["nextStartIndex"] as? Int,
                           let ids = data["workshopIds"] as? [String] else {
                         continuation.resume(throwing: SteamServiceError.requestFailed(
-                            "Steam 服务返回的作者作品数据格式异常。",
+                            LocalizationService.shared.t("Steam 服务返回的作者作品数据格式异常。"),
                             "MALFORMED_USER_FILES"
                         ))
                         return
@@ -615,7 +615,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
     /// 修改当前账号对单个 Workshop 项目的订阅状态。
     func setSubscribed(_ subscribed: Bool, workshopID: String) async throws {
         guard !workshopID.isEmpty else {
-            throw SteamServiceError.downloadFailed("Workshop ID 不能为空。", "INVALID_WORKSHOP_ID")
+            throw SteamServiceError.downloadFailed(LocalizationService.shared.t("Workshop ID 不能为空。"), "INVALID_WORKSHOP_ID")
         }
         if BackgroundRuntimeRole.isRemoteUI {
             try await BackgroundRuntimeBridge.requestVoid(
@@ -630,7 +630,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             ioQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    continuation.resume(throwing: SteamServiceError.unavailable(LocalizationService.shared.t("Steam 服务已释放。")))
                     return
                 }
                 guard self.sessionIsLoggedIn else {
@@ -647,7 +647,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                         continuation.resume(throwing: SteamServiceError.notAuthenticated)
                     } else {
                         continuation.resume(throwing: SteamServiceError.requestFailed(
-                            message ?? (subscribed ? "订阅 Workshop 项目失败。" : "取消订阅 Workshop 项目失败。"),
+                            message ?? (subscribed ? LocalizationService.shared.t("订阅 Workshop 项目失败。") : LocalizationService.shared.t("取消订阅 Workshop 项目失败。")),
                             errorCode
                         ))
                     }
@@ -673,7 +673,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         return try await withCheckedThrowingContinuation { continuation in
             ioQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(throwing: SteamServiceError.unavailable("Steam 服务已释放。"))
+                    continuation.resume(throwing: SteamServiceError.unavailable(LocalizationService.shared.t("Steam 服务已释放。")))
                     return
                 }
                 guard self.sessionIsLoggedIn else {
@@ -686,7 +686,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                             continuation.resume(throwing: SteamServiceError.notAuthenticated)
                         } else {
                             continuation.resume(throwing: SteamServiceError.requestFailed(
-                                message ?? "获取 Workshop 订阅状态失败。", errorCode
+                                message ?? LocalizationService.shared.t("获取 Workshop 订阅状态失败。"), errorCode
                             ))
                         }
                         return
@@ -699,7 +699,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                               let subscribed = item["subscribed"] as? Bool,
                               states[id] == nil else {
                             continuation.resume(throwing: SteamServiceError.requestFailed(
-                                "Steam 服务返回的订阅状态数据格式异常，请重试。",
+                                LocalizationService.shared.t("Steam 服务返回的订阅状态数据格式异常，请重试。"),
                                 "MALFORMED_SUBSCRIPTION_STATES"
                             ))
                             return
@@ -709,7 +709,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                     // Missing is unknown, not false: never subscribe based on a partial response.
                     guard Set(states.keys) == requestedIDs else {
                         continuation.resume(throwing: SteamServiceError.requestFailed(
-                            "Steam 服务返回的订阅状态不完整，请重试。",
+                            LocalizationService.shared.t("Steam 服务返回的订阅状态不完整，请重试。"),
                             "MALFORMED_SUBSCRIPTION_STATES"
                         ))
                         return
@@ -736,7 +736,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         guard let launch = serviceLaunchConfiguration() else {
             updateOnMain {
                 self.isAvailable = false
-                self.loginState = .failed("WaifuX Steam 服务组件不可用。")
+                self.loginState = .failed(LocalizationService.shared.t("WaifuX Steam 服务组件不可用。"))
             }
             return
         }
@@ -783,7 +783,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             sendCommandOnQueue("hello")
             restoreSessionOnQueue()
         } catch {
-            handleServiceFailureOnQueue("Steam 服务启动失败：\(error.localizedDescription)")
+            handleServiceFailureOnQueue(String(format: LocalizationService.shared.t("Steam 服务启动失败：%@"), String(describing: error.localizedDescription)))
         }
     }
 
@@ -820,13 +820,13 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             return true
         case .notFound:
             markRestorationFailureOnQueue(
-                "已保存 Steam 账号，但钥匙串中没有会话令牌。请到「设置 → Steam 服务」重新登录。",
+                LocalizationService.shared.t("已保存 Steam 账号，但钥匙串中没有会话令牌。请到「设置 → Steam 服务」重新登录。"),
                 reason: "refreshTokenMissing",
                 status: errSecItemNotFound
             )
         case .failure(let status):
             markRestorationFailureOnQueue(
-                "无法读取钥匙串中的 Steam 会话（错误 \(status)）。请到「设置 → Steam 服务」重新登录。",
+                String(format: LocalizationService.shared.t("无法读取钥匙串中的 Steam 会话（错误 %@）。请到「设置 → Steam 服务」重新登录。"), String(describing: status)),
                 reason: "refreshTokenReadFailed",
                 status: status
             )
@@ -1001,7 +1001,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
                 }
             }
             let persistenceMessage = persistenceFailure.map { status in
-                "Steam 已连接，但会话未能保存到 macOS 钥匙串（错误 \(status)）。重启或更新后将需要重新登录，请检查钥匙串访问权限后重试登录。"
+                String(format: LocalizationService.shared.t("Steam 已连接，但会话未能保存到 macOS 钥匙串（错误 %@）。重启或更新后将需要重新登录，请检查钥匙串访问权限后重试登录。"), String(describing: status))
             }
             if let status = persistenceFailure {
                 AppLogger.error(.download, "Steam 会话令牌保存失败", metadata: ["keychainStatus": String(status)])
@@ -1034,7 +1034,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         case "loggedOut":
             let wasRestoring = restoringSession
             let message = event["message"] as? String
-                ?? "Steam 会话已断开，请重试；如仍失败，请到「设置 → Steam 服务」重新登录。"
+                ?? LocalizationService.shared.t("Steam 会话已断开，请重试；如仍失败，请到「设置 → Steam 服务」重新登录。")
             if wasRestoring { lastRestoreFailureMessage = message }
             stopQRLoginOnQueue()
             restoringSession = false
@@ -1048,7 +1048,7 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
             // Cancellation, reconnects and auth replacement also emit loggedOut.
             // Only explicit logout() removes persisted tokens and guard data.
         case "failed":
-            let message = event["message"] as? String ?? "Steam 登录失败。"
+            let message = event["message"] as? String ?? t("Steam 登录失败。")
             let errorCode = event["errorCode"] as? String
             let wasRestoring = restoringSession
             lastRestoreFailureMessage = wasRestoring ? message : nil
@@ -1096,14 +1096,14 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         completion: ((Bool, String?, String?, [String: Any]?) -> Void)? = nil
     ) {
         guard let input, process?.isRunning == true else {
-            completion?(false, "Steam 服务未运行。", "SERVICE_UNAVAILABLE", nil)
+            completion?(false, LocalizationService.shared.t("Steam 服务未运行。"), "SERVICE_UNAVAILABLE", nil)
             return
         }
         let requestID = UUID().uuidString
         var payload: [String: Any] = ["command": command, "requestId": requestID]
         fields.forEach { payload[$0.key] = $0.value }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
-            completion?(false, "Steam 服务命令编码失败。", "ENCODE_FAILED", nil)
+            completion?(false, LocalizationService.shared.t("Steam 服务命令编码失败。"), "ENCODE_FAILED", nil)
             return
         }
         if let completion {
@@ -1136,12 +1136,12 @@ final class SteamServiceManager: NSObject, ObservableObject, @unchecked Sendable
         }
         if loginContinuation != nil {
             finishLoginOnQueue(.failure(SteamServiceError.unavailable(
-                "Steam 服务已退出（\(status)，\(reason.rawValue)）。"
+                String(format: LocalizationService.shared.t("Steam 服务已退出（%@，%@）。"), String(describing: status), String(describing: reason.rawValue))
             )))
         }
         let pendingDownloads = downloadHandlers
         downloadHandlers.removeAll()
-        pendingDownloads.values.forEach { $0("failed", "Steam 服务已退出。", "SERVICE_TERMINATED", nil) }
+        pendingDownloads.values.forEach { $0("failed", LocalizationService.shared.t("Steam 服务已退出。"), "SERVICE_TERMINATED", nil) }
         if restartingForProxyChange {
             // 代理变化触发的计划内重启不消耗崩溃重试预算。
             restartingForProxyChange = false

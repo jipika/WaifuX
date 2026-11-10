@@ -747,7 +747,7 @@ class WallpaperViewModel: ObservableObject {
         throw NSError(
             domain: "WaifuX",
             code: -1,
-            userInfo: [NSLocalizedDescriptionKey: "无法解析此链接，仅支持 Wallhaven / 4KWallpapers / Konachan / Pixiv 详情页链接"]
+            userInfo: [NSLocalizedDescriptionKey: t("无法解析此链接，仅支持 Wallhaven / 4KWallpapers / Konachan / Pixiv 详情页链接")]
         )
     }
 
@@ -848,7 +848,7 @@ class WallpaperViewModel: ObservableObject {
         throw NSError(
             domain: "WaifuX",
             code: -1,
-            userInfo: [NSLocalizedDescriptionKey: "未找到 Konachan 壁纸（id=\(id)）"]
+            userInfo: [NSLocalizedDescriptionKey: String(format: t("未找到 Konachan 壁纸（id=%@）"), String(describing: id))]
         )
     }
 

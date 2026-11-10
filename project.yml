@@ -366,6 +366,7 @@ targets:
     type: application
     platform: macOS
     sources:
+      - path: App/es.lproj/InfoPlist.strings
       - path: Assets.xcassets
       # 设计壁纸/场景设计面板的编辑器 HTML：面板在 Helper 进程里弹（Bundle.main =
       # WaifuXHelper.app），不显式编进 Helper 资源就会落到 fallback 提示页。

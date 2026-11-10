@@ -306,7 +306,7 @@ actor WallsflowService {
 
         let html = try await fetchHTML(from: detailURL)
         guard let item = try? parseDetailPage(html: html, pageURL: detailURL) else {
-            throw WallsflowError.parseFailed("详情页解析失败")
+            throw WallsflowError.parseFailed(LocalizationService.shared.t("详情页解析失败"))
         }
         detailCache[cacheKey] = item
         return item
@@ -383,7 +383,7 @@ actor WallsflowService {
                 throw WallsflowDownloadError.cooldown
             }
             print("[WallsflowService] 下载页缺少 data-wf-dl | page=\(downloadPage.absoluteString) len=\(html.count)")
-            throw WallsflowError.parseFailed("高清下载链接解析失败")
+            throw WallsflowError.parseFailed(LocalizationService.shared.t("高清下载链接解析失败"))
         }
         let token: String
         if let direct = attribute("data-wf-t"), attribute("data-wf-v") == nil {
@@ -393,7 +393,7 @@ actor WallsflowService {
             token = try await exchangeDownloadToken(downloadPage: downloadPage, seed: seed, referer: referer)
         } else {
             print("[WallsflowService] 下载页既无 data-wf-t 也无 data-wf-v | page=\(downloadPage.absoluteString)")
-            throw WallsflowError.parseFailed("高清下载链接解析失败")
+            throw WallsflowError.parseFailed(LocalizationService.shared.t("高清下载链接解析失败"))
         }
         // ab=2：站点脚本对「未请求 AdSense」的环境传 2，服务端按非广告拦截放行。
         components.queryItems = (components.queryItems ?? []) + [
@@ -434,11 +434,11 @@ actor WallsflowService {
         try Task.checkCancellation()
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             print("[WallsflowService] 下载握手 HTTP 异常 | status=\((response as? HTTPURLResponse)?.statusCode ?? -1)")
-            throw WallsflowError.parseFailed("高清下载握手失败")
+            throw WallsflowError.parseFailed(LocalizationService.shared.t("高清下载握手失败"))
         }
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             print("[WallsflowService] 下载握手返回非 JSON | body=\(String(decoding: data.prefix(160), as: UTF8.self))")
-            throw WallsflowError.parseFailed("高清下载握手失败")
+            throw WallsflowError.parseFailed(LocalizationService.shared.t("高清下载握手失败"))
         }
         if let token = object["t"] as? String, !token.isEmpty {
             return token
@@ -452,7 +452,7 @@ actor WallsflowService {
             )
         }
         print("[WallsflowService] 下载握手未返回签名 | body=\(String(decoding: data.prefix(160), as: UTF8.self))")
-        throw WallsflowError.parseFailed("高清下载握手失败")
+        throw WallsflowError.parseFailed(LocalizationService.shared.t("高清下载握手失败"))
     }
 
     // MARK: - 出口敏感的请求（直连优先）
@@ -838,7 +838,7 @@ private extension WallsflowService {
             title: title,
             pageURL: fullURL,
             thumbnailURL: posterURL ?? fullURL,
-            resolutionLabel: "动态壁纸",
+            resolutionLabel: LocalizationService.shared.t("动态壁纸"),
             collectionTitle: categoryName,
             summary: nil,
             previewVideoURL: videoURL,
@@ -1035,7 +1035,7 @@ private extension WallsflowService {
             title: headline,
             pageURL: pageURL,
             thumbnailURL: imageURL ?? pageURL,
-            resolutionLabel: resolution ?? "动态壁纸",
+            resolutionLabel: resolution ?? LocalizationService.shared.t("动态壁纸"),
             collectionTitle: categoryName,
             summary: description,
             previewVideoURL: videoURL,
@@ -1110,7 +1110,7 @@ private extension WallsflowService {
             title: title,
             pageURL: pageURL,
             thumbnailURL: imageURL ?? pageURL,
-            resolutionLabel: resolution ?? "动态壁纸",
+            resolutionLabel: resolution ?? LocalizationService.shared.t("动态壁纸"),
             collectionTitle: nil,
             summary: description,
             previewVideoURL: videoURL,
@@ -1472,9 +1472,9 @@ enum WallsflowError: LocalizedError, ParseFailureError {
 
     var errorDescription: String? {
         switch self {
-        case .parseFailed(let detail): return "Wallsflow 解析失败: \(detail)"
-        case .invalidURL: return "无效的 Wallsflow URL"
-        case .notFound: return "Wallsflow 内容未找到"
+        case .parseFailed(let detail): return String(format: t("Wallsflow 解析失败: %@"), String(describing: detail))
+        case .invalidURL: return t("无效的 Wallsflow URL")
+        case .notFound: return t("Wallsflow 内容未找到")
         }
     }
 }
@@ -1486,7 +1486,7 @@ struct DecoyPageError: LocalizedError, ParseFailureError {
     let via: String
 
     var errorDescription: String? {
-        "Wallsflow 返回了站点的占位内容（非真实数据），请稍后重试"
+        LocalizationService.shared.t("Wallsflow 返回了站点的占位内容（非真实数据），请稍后重试")
     }
 }
 
@@ -1496,7 +1496,7 @@ enum WallsflowDownloadError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .cooldown: return "Wallsflow 限制同一壁纸短时间内重复下载，请约 1 分钟后再试"
+        case .cooldown: return t("Wallsflow 限制同一壁纸短时间内重复下载，请约 1 分钟后再试")
         }
     }
 }

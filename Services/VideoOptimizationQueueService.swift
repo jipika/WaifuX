@@ -128,11 +128,11 @@ private final class FrameInterpolationAudioPassthrough: @unchecked Sendable {
     private func drain() {
         while input.isReadyForMoreMediaData {
             if reader.status == .failed || reader.status == .cancelled {
-                finish(reader.error?.localizedDescription ?? "音频读取被取消")
+                finish(reader.error?.localizedDescription ?? LocalizationService.shared.t("音频读取被取消"))
                 return
             }
             if writer.status == .failed || writer.status == .cancelled {
-                finish(writer.error?.localizedDescription ?? "音频写入被取消")
+                finish(writer.error?.localizedDescription ?? LocalizationService.shared.t("音频写入被取消"))
                 return
             }
             guard let sampleBuffer = output.copyNextSampleBuffer() else {
@@ -140,7 +140,7 @@ private final class FrameInterpolationAudioPassthrough: @unchecked Sendable {
                 return
             }
             guard input.append(sampleBuffer) else {
-                finish(writer.error?.localizedDescription ?? "音频 passthrough 写入失败")
+                finish(writer.error?.localizedDescription ?? LocalizationService.shared.t("音频 passthrough 写入失败"))
                 return
             }
         }
@@ -1420,7 +1420,7 @@ final class VideoOptimizationQueueService: ObservableObject {
         for waitingID in lowerWaitingIDs {
             guard let index = items.firstIndex(where: { $0.id == waitingID }) else { continue }
             let removedItem = items.remove(at: index)
-            archive(removedItem, outcome: .cancelled, message: "被更高目标帧率任务替代")
+            archive(removedItem, outcome: .cancelled, message: LocalizationService.shared.t("被更高目标帧率任务替代"))
             frameInterpolationDebugPrint("补帧队列：目标 FPS 已提高，移除低目标等待任务。旧 FPS=\(removedItem.targetFPS)，新 FPS=\(targetFPS)，视频=\(videoURL.lastPathComponent)")
         }
 
@@ -1582,40 +1582,40 @@ final class VideoOptimizationQueueService: ObservableObject {
                             )
                             self.finishLoopAnalysis(
                                 id: id,
-                                message: "循环分析完成"
+                                message: LocalizationService.shared.t("循环分析完成")
                             )
                         case .notNeeded:
                             guard !wasCancelledBeforeTerminalOutcome else {
-                                self.finishCancelled(id: id, reason: "任务已取消")
+                                self.finishCancelled(id: id, reason: LocalizationService.shared.t("任务已取消"))
                                 return
                             }
                             _ = VideoOptimizationRecordStore.shared.append(
                                 .loopNotNeeded,
                                 for: videoURL,
-                                detail: "已验证为无缝循环"
+                                detail: LocalizationService.shared.t("已验证为无缝循环")
                             )
                             self.finishLoopAnalysis(
                                 id: id,
-                                message: "视频已是无缝循环"
+                                message: LocalizationService.shared.t("视频已是无缝循环")
                             )
                         case .noReliablePoint:
                             guard !wasCancelledBeforeTerminalOutcome else {
-                                self.finishCancelled(id: id, reason: "任务已取消")
+                                self.finishCancelled(id: id, reason: LocalizationService.shared.t("任务已取消"))
                                 return
                             }
                             _ = VideoOptimizationRecordStore.shared.append(
                                 .loopNoReliablePoint,
                                 for: videoURL,
-                                detail: "未找到可靠循环点"
+                                detail: LocalizationService.shared.t("未找到可靠循环点")
                             )
                             self.finishLoopAnalysis(
                                 id: id,
-                                message: "未找到可靠循环点，保留原视频"
+                                message: LocalizationService.shared.t("未找到可靠循环点，保留原视频")
                             )
                         }
                     }
                 } catch is CancellationError {
-                    await MainActor.run { self?.finishCancelled(id: id, reason: "任务已取消") }
+                    await MainActor.run { self?.finishCancelled(id: id, reason: LocalizationService.shared.t("任务已取消")) }
                 } catch {
                     await MainActor.run {
                         self?.finishFailed(id: id, message: error.localizedDescription)
@@ -1636,7 +1636,7 @@ final class VideoOptimizationQueueService: ObservableObject {
 
                 guard !Task.isCancelled else {
                     await MainActor.run {
-                        self?.finishCancelled(id: id, reason: "任务已取消")
+                        self?.finishCancelled(id: id, reason: LocalizationService.shared.t("任务已取消"))
                     }
                     return
                 }
@@ -1776,7 +1776,7 @@ final class VideoOptimizationQueueService: ObservableObject {
             task.cancel()
             return
         }
-        finishCancelled(id: id, reason: "任务已取消")
+        finishCancelled(id: id, reason: LocalizationService.shared.t("任务已取消"))
     }
 
     /// 仅重试失败任务；成功和主动取消不会被隐式重新执行。
@@ -1912,7 +1912,7 @@ final class VideoOptimizationQueueService: ObservableObject {
         case .replaced(let outputURL):
             finishExport(id: id, outputURL: outputURL)
         case .cancelled:
-            finishCancelled(id: id, reason: "任务已取消")
+            finishCancelled(id: id, reason: LocalizationService.shared.t("任务已取消"))
         case .failed(let message):
             finishFailed(id: id, message: message)
         }
@@ -2355,7 +2355,7 @@ enum VideoFrameInterpolationExporter {
         progress: (@Sendable (FrameInterpolationExportProgress) -> Void)? = nil
     ) async -> FrameInterpolationExportResult {
         guard let outputContainer = VideoOptimizationOutputContainer(sourceURL: sourceURL) else {
-            return .failed("原地补帧仅支持 MP4、MOV 和 M4V；MKV 请先转码为受支持的容器")
+            return .failed(LocalizationService.shared.t("原地补帧仅支持 MP4、MOV 和 M4V；MKV 请先转码为受支持的容器"))
         }
 
         let outputURL = temporaryOutputURL(for: sourceURL, outputContainer: outputContainer)
@@ -2389,14 +2389,14 @@ enum VideoFrameInterpolationExporter {
         }
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             frameInterpolationDebugPrint("导出任务：源视频不存在。视频=\(sourceURL.lastPathComponent)")
-            return .failed("源视频已不存在")
+            return .failed(LocalizationService.shared.t("源视频已不存在"))
         }
 
         let asset = AVURLAsset(url: sourceURL)
         frameInterpolationDebugPrint("导出任务：离线补帧开始。当前只使用算法=optical-flow，不执行降级逻辑，目标 FPS=\(targetFPS)，视频=\(sourceURL.lastPathComponent)。")
         guard let exportInfo = await makeFrameInterpolationExportInfo(asset: asset, targetFPS: targetFPS) else {
             frameInterpolationDebugPrint("导出任务：读取视频轨道、尺寸、方向、码率或时长失败。")
-            return .failed("无法读取视频轨道或媒体参数")
+            return .failed(LocalizationService.shared.t("无法读取视频轨道或媒体参数"))
         }
         guard !Task.isCancelled else {
             frameInterpolationDebugPrint("导出任务：读取参数后已取消。视频=\(sourceURL.lastPathComponent)")
@@ -2404,7 +2404,7 @@ enum VideoFrameInterpolationExporter {
         }
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             frameInterpolationDebugPrint("导出任务：读取参数后源视频已不存在。视频=\(sourceURL.lastPathComponent)")
-            return .failed("源视频已不存在")
+            return .failed(LocalizationService.shared.t("源视频已不存在"))
         }
         guard SystemMemoryPressure.hasRoomForFrameInterpolationExport(width: exportInfo.width, height: exportInfo.height) else {
             let requiredBytes = SystemMemoryPressure.estimatedFrameInterpolationWorkingSetBytes(
@@ -2415,7 +2415,7 @@ enum VideoFrameInterpolationExporter {
             frameInterpolationDebugPrint(
                 "导出任务：跳过补帧，当前可回收内存不足。需要≈\(formatBytes(requiredBytes))，可用≈\(formatBytes(availableBytes))，视频=\(sourceURL.lastPathComponent)。"
             )
-            return .failed("可用内存不足，未开始补帧")
+            return .failed(LocalizationService.shared.t("可用内存不足，未开始补帧"))
         }
 
         try? FileManager.default.removeItem(at: outputURL)
@@ -2444,7 +2444,7 @@ enum VideoFrameInterpolationExporter {
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             frameInterpolationDebugPrint("导出任务：写入完成后源视频已不存在。视频=\(sourceURL.lastPathComponent)")
             try? FileManager.default.removeItem(at: outputURL)
-            return .failed("源视频已不存在")
+            return .failed(LocalizationService.shared.t("源视频已不存在"))
         }
 
         do {
@@ -2457,7 +2457,7 @@ enum VideoFrameInterpolationExporter {
         } catch {
             frameInterpolationDebugPrint("导出任务：替换源视频失败。\(error.localizedDescription)")
             try? FileManager.default.removeItem(at: outputURL)
-            return .failed("替换源视频失败：\(error.localizedDescription)")
+            return .failed(String(format: LocalizationService.shared.t("替换源视频失败：%@"), String(describing: error.localizedDescription)))
         }
     }
 
@@ -2712,7 +2712,7 @@ enum VideoFrameInterpolationExporter {
                 let progressLogInterval = Int64(max(1, targetFPS))
                 if writtenFrameCount - lastProgressLogFrame >= progressLogInterval || writtenFrameCount == totalTargetFrames {
                     lastProgressLogFrame = writtenFrameCount
-                    emitProgress(stage: "已写入第 \(writtenFrameCount) 帧", presentationTime: presentationTime)
+                    emitProgress(stage: String(format: LocalizationService.shared.t("已写入第 %@ 帧"), String(describing: writtenFrameCount)), presentationTime: presentationTime)
                 }
                 return true
             }
@@ -2756,7 +2756,7 @@ enum VideoFrameInterpolationExporter {
                         opticalFlowFrameCount += 1
                         if opticalFlowBufferForPair == nil {
                             emitProgress(
-                                stage: "正在计算源帧对 \(sourcePairCount) 的 optical-flow 场",
+                                stage: String(format: LocalizationService.shared.t("正在计算源帧对 %@ 的 optical-flow 场"), String(describing: sourcePairCount)),
                                 presentationTime: presentationTime
                             )
                             let flowStart = Date()
@@ -2773,7 +2773,7 @@ enum VideoFrameInterpolationExporter {
                             frameInterpolationDebugPrint("导出任务：源帧对 \(sourcePairCount) 的 optical-flow 场计算完成，用时=\(formatSeconds(flowElapsed))，将复用生成本组中间帧。")
                         }
                         emitProgress(
-                            stage: "正在 warp 第 \(opticalFlowFrameCount) 个 optical-flow 中间帧（源帧对 \(sourcePairCount)，alpha=\(String(format: "%.2f", alpha))）",
+                            stage: String(format: LocalizationService.shared.t("正在 warp 第 %@ 个 optical-flow 中间帧（源帧对 %@，alpha=%@）"), String(describing: opticalFlowFrameCount), String(describing: sourcePairCount), String(describing: String(format: "%.2f", alpha))),
                             presentationTime: presentationTime
                         )
                         pixelBuffer = autoreleasepool {

@@ -13,12 +13,12 @@ enum WallpaperCategory: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .favorites: return "收藏"
-        case .general: return "通用"
-        case .anime: return "动漫"
-        case .people: return "人物"
-        case .nature: return "自然"
-        case .technology: return "科技"
+        case .favorites: return t("favorites")
+        case .general: return t("general")
+        case .anime: return t("ruleMarket.anime")
+        case .people: return t("4k.category.people")
+        case .nature: return t("4k.category.nature")
+        case .technology: return t("4k.category.technology")
         }
     }
 

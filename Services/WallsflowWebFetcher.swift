@@ -49,7 +49,7 @@ enum WallsflowMediaPolicy {
 
     static var verificationRequired: URLError {
         URLError(.userAuthenticationRequired, userInfo: [NSLocalizedDescriptionKey:
-            "Wallsflow 媒体访问需要网站验证，暂时无法加载。请在网站确认可正常访问后重试。"])
+            LocalizationService.shared.t("Wallsflow 媒体访问需要网站验证，暂时无法加载。请在网站确认可正常访问后重试。")])
     }
 }
 
@@ -121,7 +121,7 @@ final class WallsflowWebFetcher: NSObject, WKNavigationDelegate, WKDownloadDeleg
             throw WallsflowError.parseFailed("隔离测试不启用 WebView 页面回退")
         }
         guard queuedRequests < 8 else {
-            throw WallsflowError.parseFailed("页面加载请求过多，请稍后重试")
+            throw WallsflowError.parseFailed(LocalizationService.shared.t("页面加载请求过多，请稍后重试"))
         }
         let previous = requestTail
         let id = UUID()
@@ -280,7 +280,7 @@ final class WallsflowWebFetcher: NSObject, WKNavigationDelegate, WKDownloadDeleg
                 )) ?? 0
                 if !challenged, bodyLength >= 400 {
                     let html = try await evaluateString("document.documentElement.outerHTML", in: view, id: id)
-                    guard !html.isEmpty else { throw WallsflowError.parseFailed("WebView 返回了空 HTML") }
+                    guard !html.isEmpty else { throw WallsflowError.parseFailed(LocalizationService.shared.t("WebView 返回了空 HTML")) }
                     currentUserAgent = try await evaluateString("navigator.userAgent", in: view, id: id)
                     try await syncCookies(in: view, id: id)
                     try checkRequest()

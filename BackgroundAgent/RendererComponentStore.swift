@@ -9,9 +9,9 @@ enum RendererComponent: String, Codable, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .wgpu: return "Scene 渲染器"
-        case .web: return "Web 渲染器"
-        case .video: return "视频渲染器"
+        case .wgpu: return t("Scene 渲染器")
+        case .web: return t("Web 渲染器")
+        case .video: return t("视频渲染器")
         }
     }
     var executable: String {
@@ -108,11 +108,11 @@ enum RendererComponentError: LocalizedError {
     case invalidManifest, invalidFile(String), signature(String), architecture(String), unavailable
     var errorDescription: String? {
         switch self {
-        case .invalidManifest: return "组件更新清单无效，请稍后重试。"
-        case .invalidFile(let name): return "\(name) 下载不完整或校验失败，原组件仍然可用。"
-        case .signature(let name): return "\(name) 的开发者签名不符合要求，已取消安装。"
-        case .architecture(let name): return "\(name) 不支持当前处理器，已取消安装。"
-        case .unavailable: return "暂时无法获取组件更新，请检查网络后重试。"
+        case .invalidManifest: return t("组件更新清单无效，请稍后重试。")
+        case .invalidFile(let name): return String(format: t("%@ 下载不完整或校验失败，原组件仍然可用。"), String(describing: name))
+        case .signature(let name): return String(format: t("%@ 的开发者签名不符合要求，已取消安装。"), String(describing: name))
+        case .architecture(let name): return String(format: t("%@ 不支持当前处理器，已取消安装。"), String(describing: name))
+        case .unavailable: return t("暂时无法获取组件更新，请检查网络后重试。")
         }
     }
 }
@@ -169,7 +169,7 @@ enum RendererComponentStore {
                let versions = try? JSONDecoder().decode([String: BundledVersion].self, from: data),
                let version = versions[component.rawValue] { return version }
         }
-        return BundledVersion(version: "随 App 内置", revision: 0)
+        return BundledVersion(version: LocalizationService.shared.t("随 App 内置"), revision: 0)
     }
     static func activeReceiptURL(_ component: RendererComponent) -> URL {
         root.appendingPathComponent("\(component.rawValue)/active.json")

@@ -102,7 +102,7 @@ final class GlobalWallpaperSyncCoordinator {
         let screenIDs: Set<String>
         let requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
 
-        var errorDescription: String? { "壁纸设置已被更新请求取代" }
+        var errorDescription: String? { t("壁纸设置已被更新请求取代") }
     }
 
     private enum TransactionError: LocalizedError {
@@ -113,11 +113,11 @@ final class GlobalWallpaperSyncCoordinator {
         var errorDescription: String? {
             switch self {
             case .applicationReturnedFalse:
-                return "全局壁纸应用未完成"
+                return t("全局壁纸应用未完成")
             case .noConnectedDisplays:
-                return "当前没有可用的显示器"
+                return t("当前没有可用的显示器")
             case .rollbackFailed(let original, let rollback):
-                return "全局壁纸应用失败：\(original.localizedDescription)；回滚也失败：\(rollback.localizedDescription)"
+                return String(format: t("全局壁纸应用失败：%@；回滚也失败：%@"), String(describing: original.localizedDescription), String(describing: rollback.localizedDescription))
             }
         }
     }

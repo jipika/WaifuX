@@ -25,12 +25,12 @@ enum AnimeDownloadError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .cancelled: return "下载已取消"
-        case .badResponse(let code): return "下载失败（HTTP \(code)）"
-        case .hlsUnsupported(let reason): return "该视频流暂不支持下载（\(reason)），可在线观看"
-        case .ffmpegNotFound: return "未找到内置 ffmpeg，无法合成视频"
-        case .ffmpegFailed(let code): return "视频合成失败（ffmpeg \(code)）"
-        case .missingOutput: return "下载产物缺失"
+        case .cancelled: return t("下载已取消")
+        case .badResponse(let code): return String(format: t("下载失败（HTTP %@）"), String(describing: code))
+        case .hlsUnsupported(let reason): return String(format: t("该视频流暂不支持下载（%@），可在线观看"), String(describing: reason))
+        case .ffmpegNotFound: return t("未找到内置 ffmpeg，无法合成视频")
+        case .ffmpegFailed(let code): return String(format: t("视频合成失败（ffmpeg %@）"), String(describing: code))
+        case .missingOutput: return t("下载产物缺失")
         }
     }
 }

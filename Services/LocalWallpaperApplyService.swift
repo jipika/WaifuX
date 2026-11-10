@@ -12,8 +12,8 @@ enum LocalWallpaperApplyService {
 
         var errorDescription: String? {
             switch self {
-            case .missingFile(let path): return "壁纸文件不存在：\(path)"
-            case .unsupported(let type): return "暂不支持该类型壁纸：\(type)"
+            case .missingFile(let path): return String(format: t("壁纸文件不存在：%@"), String(describing: path))
+            case .unsupported(let type): return String(format: t("暂不支持该类型壁纸：%@"), String(describing: type))
             case .failed(let msg): return msg
             }
         }
@@ -439,7 +439,7 @@ enum LocalWallpaperApplyService {
             throw ApplyError.missingFile(path)
         }
         if WallpaperEngineXBridge.resolvedCLIExecutableURL() == nil {
-            throw ApplyError.failed("wallpaper-wgpu 渲染器未找到")
+            throw ApplyError.failed(LocalizationService.shared.t("wallpaper-wgpu 渲染器未找到"))
         }
         let isRealtime = WaifuXPreferences.shared.bool(forKey: "scene_realtime_rendering_enabled")
         // user properties 仅 scene 实时有意义；web 传 nil

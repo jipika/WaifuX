@@ -28,7 +28,7 @@ private struct AgentArguments {
             ) { return screens[index] }
         } else if let id = values[key] as? String,
                   let screen = screens.first(where: { $0.wallpaperScreenIdentifier == id }) { return screen }
-        throw NSError(domain: "WaifuXHelper", code: 5, userInfo: [NSLocalizedDescriptionKey: "目标显示器已变化或无法唯一识别，请重新选择"])
+        throw NSError(domain: "WaifuXHelper", code: 5, userInfo: [NSLocalizedDescriptionKey: t("目标显示器已变化或无法唯一识别，请重新选择")])
     }
     func optionalScreen(_ key: String) throws -> NSScreen? { values[key] == nil ? nil : try screen(key) }
     func screens(_ key: String) throws -> [NSScreen]? {
@@ -350,7 +350,7 @@ final class BackgroundAgentRuntime {
         }
         if let pending = inFlightReplies[command.requestID] { return await pending.value }
         guard !upgrading else {
-            return encodeReply(BackgroundAgentReply(requestID: command.requestID, result: nil, error: "后台服务正在更新，请稍后重试"))
+            return encodeReply(BackgroundAgentReply(requestID: command.requestID, result: nil, error: LocalizationService.shared.t("后台服务正在更新，请稍后重试")))
         }
         // 库快照是纯读：允许越过队首那条 `bootstrap`（它会等整个 startRuntime，
         // 实测几十秒）。越过的前提是恢复已完成（见 execute 的闸门）且本进程内
@@ -446,7 +446,7 @@ final class BackgroundAgentRuntime {
             return [:]
         case "directory.repair.wait":
             guard !DirectoryMigrationService.shared.isMigrating else {
-                throw NSError(domain: "WaifuXHelper", code: 8, userInfo: [NSLocalizedDescriptionKey: "请等待目录迁移完成后再修复数据"])
+                throw NSError(domain: "WaifuXHelper", code: 8, userInfo: [NSLocalizedDescriptionKey: t("请等待目录迁移完成后再修复数据")])
             }
             return ["result": try JSONEncoder().encode(await DirectoryMigrationService.shared.repairBrokenRecords())]
         case "library.rescan.wait":
@@ -1265,7 +1265,7 @@ final class BackgroundAgentRuntime {
                 // 恢复未完成就应答会返回空/半量快照，UI 侧据此判「已到达」
                 // 反而把假空态换个理由复现。让这次读明确失败，由调用方按拍重试。
                 throw CocoaError(.featureUnsupported, userInfo: [
-                    NSLocalizedDescriptionKey: "库记录尚未恢复完成"
+                    NSLocalizedDescriptionKey: t("库记录尚未恢复完成")
                 ])
             }
             return ["media": MediaLibraryService.shared.backgroundLibrarySnapshot(), "wallpaper": WallpaperLibraryService.shared.backgroundLibrarySnapshot(), "mediaFolders": try JSONEncoder().encode(LibraryFolderStore.shared.mediaFolders), "wallpaperFolders": try JSONEncoder().encode(LibraryFolderStore.shared.wallpaperFolders)]

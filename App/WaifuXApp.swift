@@ -864,13 +864,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
                 try? await Task.sleep(for: .seconds(12))
                 guard generation == helperExitGeneration, !helperExitApproved else { return }
                 failApplicationQuit(NSError(domain: "WaifuXHelper", code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "后台服务停止超时，请重试退出 WaifuX"]), generation: generation)
+                    userInfo: [NSLocalizedDescriptionKey: t("后台服务停止超时，请重试退出 WaifuX")]), generation: generation)
                 return
             }
             failApplicationQuit(NSError(domain: "WaifuXHelper", code: 3,
                 userInfo: [NSLocalizedDescriptionKey: exitsInterfaceOnly
-                    ? "后台保存设置超时，界面尚未退出"
-                    : "后台服务停止超时"]), generation: generation)
+                    ? t("后台保存设置超时，界面尚未退出")
+                    : t("后台服务停止超时")]), generation: generation)
         }
         return .terminateCancel
     }
