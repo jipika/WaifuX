@@ -179,7 +179,6 @@ class AnimePlayerWindowController: NSWindowController {
 
         viewModel.releaseForegroundMemory()
         player.releaseResources()
-        AnimeVideoExtractor.shared.cancel()
         removeEventMonitors()
 
         window?.contentView = nil

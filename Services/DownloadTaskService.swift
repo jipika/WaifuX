@@ -55,6 +55,8 @@ class DownloadTaskService: ObservableObject {
     private var lastProgressUpdateTimes: [String: Date] = [:]
     private let progressUpdateMinInterval: TimeInterval = 0.15
     private var suppressedToastTaskIDs = Set<String>()
+    /// UI 根据快照中的等待状态派生登录提示；重复快照不能反复弹窗。
+    private var waitingForSteamLoginTaskIDs = Set<String>()
 
     // MARK: - Active Download Tasks Management
     /// 使用 actor 隔离存储确保线程安全
@@ -64,11 +66,22 @@ class DownloadTaskService: ObservableObject {
         if BackgroundRuntimeRole.isRemoteUI {
             BackgroundRuntimeBridge.observe { [weak self] snapshot in
                 guard let bytes = snapshot["downloads"] as? Data, let tasks = try? JSONDecoder().decode([DownloadTask].self, from: bytes) else { return }
-                self?.tasks = tasks
+                self?.applyBackgroundTasks(tasks)
             }
         }
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
         // 任务列表通过 restoreSavedTasks() 延迟恢复
+    }
+
+    /// 状态快照可在重连后补回，因此不依赖一次性的 Helper 进程内通知。
+    private func applyBackgroundTasks(_ incoming: [DownloadTask]) {
+        let waitingTasks = incoming.filter { $0.kind == .workshop && $0.status == .waitingForSteamLogin }
+        let newlyWaiting = waitingTasks.filter { !waitingForSteamLoginTaskIDs.contains($0.id) }
+        waitingForSteamLoginTaskIDs = Set(waitingTasks.map(\.id))
+        tasks = incoming
+        for task in newlyWaiting {
+            NotificationCenter.default.post(name: .steamWorkshopLoginRequired, object: task.itemID)
+        }
     }
 
     /// 延迟恢复保存的下载任务（必须在 applicationDidFinishLaunching 中调用）

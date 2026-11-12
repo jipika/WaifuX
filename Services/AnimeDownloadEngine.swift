@@ -1,5 +1,7 @@
 import Foundation
+import Combine
 import CommonCrypto
+import CryptoKit
 
 // MARK: - 动漫下载引擎
 //
@@ -58,6 +60,7 @@ final class AnimeDownloadEngine: ObservableObject {
     private var activeTaskId: String?
     private var cancellationFlags = Set<String>()
     private var activeProcess: Process?
+    private var activeDownloadTask: Task<Void, Never>?
 
     // 上下文快照：enqueue 时存，runTask 时取
     private struct Context {
@@ -66,6 +69,7 @@ final class AnimeDownloadEngine: ObservableObject {
         let episode: AnimeDetail.AnimeEpisodeItem
         let videoURL: URL
         let isHLS: Bool
+        let httpHeaders: [String: String]
     }
     private var contexts: [String: Context] = [:]
 
@@ -78,7 +82,8 @@ final class AnimeDownloadEngine: ObservableObject {
     }
 
     func isDownloading(episodeId: String, sourceId: String) -> Bool {
-        task(for: episodeId, sourceId: sourceId) != nil
+        guard let state = task(for: episodeId, sourceId: sourceId) else { return false }
+        return !state.isCompleted && state.errorMessage == nil
     }
 
     /// 只读取消查询（HLS 分片下载循环用；不消费 flag）
@@ -95,13 +100,15 @@ final class AnimeDownloadEngine: ObservableObject {
         source: AnimeRule,
         episode: AnimeDetail.AnimeEpisodeItem,
         videoURL: URL,
-        isHLS: Bool
+        isHLS: Bool,
+        httpHeaders: [String: String] = [:]
     ) {
         let recordID = AnimeDownloadRecord.recordID(ruleId: source.id, episodeId: episode.id)
+        if tasks[recordID]?.errorMessage != nil { tasks.removeValue(forKey: recordID) }
         guard tasks[recordID] == nil else { return }
         guard !AnimeDownloadStore.shared.isDownloaded(episodeId: episode.id, sourceId: source.id) else { return }
 
-        contexts[recordID] = Context(anime: anime, source: source, episode: episode, videoURL: videoURL, isHLS: isHLS)
+        contexts[recordID] = Context(anime: anime, source: source, episode: episode, videoURL: videoURL, isHLS: isHLS, httpHeaders: httpHeaders)
         tasks[recordID] = TaskState(
             id: recordID,
             animeId: anime.id,
@@ -127,6 +134,7 @@ final class AnimeDownloadEngine: ObservableObject {
         queue.removeAll { $0 == recordID }
         if activeTaskId == recordID {
             cancellationFlags.insert(recordID)
+            activeDownloadTask?.cancel()
             activeProcess?.terminate()
         } else {
             tasks.removeValue(forKey: recordID)
@@ -151,7 +159,7 @@ final class AnimeDownloadEngine: ObservableObject {
         }
         activeTaskId = next
 
-        Task { @MainActor [weak self] in
+        activeDownloadTask = Task { @MainActor [weak self] in
             await self?.runTask(context, recordID: next)
         }
     }
@@ -161,17 +169,16 @@ final class AnimeDownloadEngine: ObservableObject {
     private func runTask(_ context: Context, recordID: String) async {
         defer {
             activeTaskId = nil
+            activeDownloadTask = nil
             activeProcess = nil
             contexts.removeValue(forKey: recordID)
+            if cancellationFlags.remove(recordID) != nil { tasks.removeValue(forKey: recordID) }
             pumpQueue()
         }
 
-        // 消费式取消检查：命中即清 flag 并摘掉任务态
+        // 整个任务期间保留取消标记，避免合流阶段消费后被误判为成功。
         let isCancelled: @MainActor () -> Bool = { [weak self] in
-            guard let self, self.cancellationFlags.contains(recordID) else { return false }
-            self.cancellationFlags.remove(recordID)
-            self.tasks.removeValue(forKey: recordID)
-            return true
+            self?.cancellationFlags.contains(recordID) ?? true
         }
 
         do {
@@ -183,6 +190,7 @@ final class AnimeDownloadEngine: ObservableObject {
 
             let attrs = try FileManager.default.attributesOfItem(atPath: destinationURL.path)
             let fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+            guard fileSize > 0 else { throw AnimeDownloadError.missingOutput }
 
             let record = AnimeDownloadRecord(
                 anime: context.anime,
@@ -247,7 +255,7 @@ final class AnimeDownloadEngine: ObservableObject {
         )
 
         let session = URLSession(configuration: .ephemeral, delegate: coordinator, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
+        defer { session.invalidateAndCancel() }
 
         let task: URLSessionDownloadTask
         if usedResumeData, let resumeData = try? Data(contentsOf: resumeDataURL) {
@@ -255,6 +263,7 @@ final class AnimeDownloadEngine: ObservableObject {
         } else {
             var request = URLRequest(url: context.videoURL)
             request.timeoutInterval = 60
+            request.allHTTPHeaderFields = context.httpHeaders
             task = session.downloadTask(with: request)
         }
         coordinator.setTask(task)
@@ -311,6 +320,7 @@ final class AnimeDownloadEngine: ObservableObject {
 
         try await Self.runHLSDownload(
             playlistURL: context.videoURL,
+            httpHeaders: context.httpHeaders,
             outputTS: tsWork,
             onProgress: onProgress,
             isCancelled: cancelCheck
@@ -375,16 +385,20 @@ final class AnimeDownloadEngine: ObservableObject {
         let keyURL: URL?
         let iv: Data?
         let sequence: Int
+        let byteRange: String?
+        let initializationURL: URL?
+        let initializationRange: String?
     }
 
     private nonisolated static func runHLSDownload(
         playlistURL: URL,
+        httpHeaders: [String: String],
         outputTS: URL,
         onProgress: @escaping @Sendable (Double) -> Void,
         isCancelled: @escaping @Sendable () async -> Bool
     ) async throws {
         var baseURL = playlistURL
-        var text = String(decoding: try await fetchSegment(playlistURL), as: UTF8.self)
+        var text = String(decoding: try await fetchSegment(playlistURL, headers: httpHeaders), as: UTF8.self)
 
         // 主播放列表 → 选最高 BANDWIDTH 变体（最多跟两层）
         var depth = 0
@@ -412,18 +426,18 @@ final class AnimeDownloadEngine: ObservableObject {
                 throw AnimeDownloadError.hlsUnsupported("主播放列表无可播放变体")
             }
             baseURL = URL(string: variant.uri, relativeTo: baseURL)?.absoluteURL ?? URL(string: variant.uri)!
-            text = String(decoding: try await fetchSegment(baseURL), as: UTF8.self)
+            text = String(decoding: try await fetchSegment(baseURL, headers: httpHeaders), as: UTF8.self)
             depth += 1
         }
 
-        // fMP4 / BYTERANGE 不支持（TS 分片覆盖绝大多数动漫源）
-        if text.contains("#EXT-X-MAP") {
-            throw AnimeDownloadError.hlsUnsupported("fMP4 分片格式")
+        guard text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("#EXTM3U") else {
+            throw AnimeDownloadError.hlsUnsupported("服务器未返回有效播放列表")
         }
-        if text.contains("#EXT-X-BYTERANGE") {
-            throw AnimeDownloadError.hlsUnsupported("BYTERANGE 分片")
-        }
-
+        var pendingRange: String?
+        var rangeEnd: Int64 = 0
+        var previousRangeURL: URL?
+        var initializationURL: URL?
+        var initializationRange: String?
         var mediaSequence = 0
         var currentKeyURL: URL?
         var currentIV: Data?
@@ -448,13 +462,39 @@ final class AnimeDownloadEngine: ObservableObject {
                 } else {
                     throw AnimeDownloadError.hlsUnsupported("加密方式 \(method)")
                 }
+            } else if line.hasPrefix("#EXT-X-MAP:") {
+                guard let uri = attributeValue("URI", in: line),
+                      let url = URL(string: uri, relativeTo: baseURL)?.absoluteURL else {
+                    throw AnimeDownloadError.hlsUnsupported("初始化分片地址缺失")
+                }
+                guard currentKeyURL == nil else {
+                    throw AnimeDownloadError.hlsUnsupported("加密初始化分片")
+                }
+                initializationURL = url
+                initializationRange = try attributeValue("BYTERANGE", in: line).map { try httpRange($0, previousEnd: 0).header }
+            } else if line.hasPrefix("#EXT-X-BYTERANGE:") {
+                pendingRange = String(line.dropFirst("#EXT-X-BYTERANGE:".count))
             } else if !line.hasPrefix("#") {
                 guard let segURL = URL(string: line, relativeTo: baseURL)?.absoluteURL else { continue }
+                var byteRange: String?
+                if let pendingRange {
+                    guard pendingRange.contains("@") || previousRangeURL == segURL else {
+                        throw AnimeDownloadError.hlsUnsupported("分片范围缺少起点")
+                    }
+                    let parsed = try httpRange(pendingRange, previousEnd: rangeEnd)
+                    byteRange = parsed.header
+                    rangeEnd = parsed.end
+                    previousRangeURL = segURL
+                }
+                pendingRange = nil
                 segments.append(HLSSegment(
                     url: segURL,
                     keyURL: currentKeyURL,
                     iv: currentIV,
-                    sequence: mediaSequence + segments.count
+                    sequence: mediaSequence + segments.count,
+                    byteRange: byteRange,
+                    initializationURL: initializationURL,
+                    initializationRange: initializationRange
                 ))
             }
         }
@@ -465,7 +505,7 @@ final class AnimeDownloadEngine: ObservableObject {
         // 预取全部 AES-128 密钥（后续分批下载时纯内存查表）
         var keyCache: [URL: Data] = [:]
         for keyURL in Set(segments.compactMap(\.keyURL)) {
-            let key = try await fetchSegment(keyURL)
+            let key = try await fetchSegment(keyURL, headers: httpHeaders)
             guard key.count == 16 else {
                 throw AnimeDownloadError.hlsUnsupported("AES-128 密钥长度异常")
             }
@@ -476,6 +516,7 @@ final class AnimeDownloadEngine: ObservableObject {
         let output = try FileHandle(forWritingTo: outputTS)
         defer { try? output.close() }
 
+        var writtenInitialization: String?
         // 分批并发下载（6 路一批），批内按原序拼接，内存峰值 ≈ 6 × 单分片
         let batchSize = 6
         for batchStart in stride(from: 0, to: segments.count, by: batchSize) {
@@ -484,14 +525,14 @@ final class AnimeDownloadEngine: ObservableObject {
             let batch = Array(segments[batchStart..<end])
 
             // 把本批需要的密钥快照成 Sendable 元组，避免 group 闭包捕获整个 keyCache 字典
-            let batchWork: [(offset: Int, url: URL, key: Data?, iv: Data?, sequence: Int)] = batch.enumerated().map { offset, segment in
-                (offset, segment.url, segment.keyURL.flatMap { keyCache[$0] }, segment.iv, segment.sequence)
+            let batchWork: [(offset: Int, url: URL, key: Data?, iv: Data?, sequence: Int, range: String?)] = batch.enumerated().map { offset, segment in
+                (offset, segment.url, segment.keyURL.flatMap { keyCache[$0] }, segment.iv, segment.sequence, segment.byteRange)
             }
 
             let chunk: [Data] = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
                 for work in batchWork {
                     group.addTask {
-                        var data = try await fetchSegment(work.url)
+                        var data = try await fetchSegment(work.url, headers: httpHeaders, range: work.range)
                         if let key = work.key {
                             let iv: Data
                             if let explicit = work.iv {
@@ -516,24 +557,56 @@ final class AnimeDownloadEngine: ObservableObject {
                 return out.compactMap { $0 }
             }
 
-            for data in chunk {
+            for (offset, data) in chunk.enumerated() {
+                let segment = batch[offset]
+                if let url = segment.initializationURL {
+                    let identity = url.absoluteString + (segment.initializationRange ?? "")
+                    if writtenInitialization != identity {
+                        let initialization = try await fetchSegment(url, headers: httpHeaders, range: segment.initializationRange)
+                        try output.write(contentsOf: initialization)
+                        writtenInitialization = identity
+                    }
+                }
                 try output.write(contentsOf: data)
             }
             onProgress(Double(end) / Double(segments.count) * 0.9)
         }
     }
 
-    private nonisolated static func fetchSegment(_ url: URL, attempts: Int = 2) async throws -> Data {
+    private nonisolated static func httpRange(_ value: String, previousEnd: Int64) throws -> (header: String, end: Int64) {
+        let parts = value.split(separator: "@", omittingEmptySubsequences: false)
+        guard let length = Int64(parts[0]), length > 0,
+              parts.count <= 2,
+              let start = parts.count == 2 ? Int64(parts[1]) : previousEnd,
+              start >= 0, length <= Int64.max - start else {
+            throw AnimeDownloadError.hlsUnsupported("分片范围无效")
+        }
+        return ("bytes=\(start)-\(start + length - 1)", start + length)
+    }
+
+    private nonisolated static func fetchSegment(_ url: URL, headers: [String: String], range: String? = nil, attempts: Int = 3) async throws -> Data {
         var lastError: Error = AnimeDownloadError.badResponse(-1)
         for attempt in 0..<max(1, attempts) {
             do {
-                let (data, response) = try await URLSession.shared.data(from: url)
+                try Task.checkCancellation()
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+                request.allHTTPHeaderFields = headers
+                if let range { request.setValue(range, forHTTPHeaderField: "Range") }
+                let (data, response) = try await URLSession.shared.data(for: request)
                 let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
                     throw AnimeDownloadError.badResponse(code)
                 }
+                if let range {
+                    guard code == 206, let contentRange = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Range"),
+                          contentRange.hasPrefix(range.replacingOccurrences(of: "bytes=", with: "bytes ") + "/") else {
+                        throw AnimeDownloadError.hlsUnsupported("服务器未返回请求的分片范围")
+                    }
+                }
+                guard !data.isEmpty else { throw AnimeDownloadError.missingOutput }
                 return data
             } catch {
+                if Task.isCancelled || error is CancellationError || (error as NSError).code == NSURLErrorCancelled { throw CancellationError() }
                 lastError = error
                 if attempt + 1 < attempts {
                     try? await Task.sleep(nanoseconds: 600_000_000)
@@ -635,7 +708,9 @@ final class AnimeDownloadEngine: ObservableObject {
     private static func fileURL(for recordID: String, fileExtension: String) -> URL {
         let folder = animeDownloadsFolderURL
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        return folder.appendingPathComponent("\(recordID).\(fileExtension)")
+        // episodeId 通常就是 https://…；直接拼接会被解释成子目录，造成 Cocoa 4。
+        let fileName = SHA256.hash(data: Data(recordID.utf8)).map { String(format: "%02x", $0) }.joined()
+        return folder.appendingPathComponent("\(fileName).\(fileExtension)")
     }
 
     private static var animeDownloadsFolderURL: URL {
@@ -680,6 +755,16 @@ private final class DirectDownloadCoordinator: NSObject, URLSessionDownloadDeleg
     // MARK: URLSessionDownloadDelegate
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // DownloadDelegate 不会收到 URLSessionDataDelegate 的 didReceive response；
+        // 必须在落盘前检查真实响应，否则 403/HTML 会被当成成功视频。
+        guard let response = downloadTask.response as? HTTPURLResponse,
+              (200..<300).contains(response.statusCode),
+              response.mimeType?.lowercased() != "text/html" else {
+            lock.lock()
+            failure = AnimeDownloadError.badResponse((downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0)
+            lock.unlock()
+            return
+        }
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) {
             try? fm.removeItem(at: destination)
@@ -705,23 +790,20 @@ private final class DirectDownloadCoordinator: NSObject, URLSessionDownloadDeleg
         onProgress(totalBytesWritten, totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil)
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            lock.lock()
-            if failure == nil { failure = AnimeDownloadError.badResponse(http.statusCode) }
-            lock.unlock()
-            completionHandler(.cancel)
-            return
-        }
-        completionHandler(.allow)
-    }
-
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // finished 必须最后发布；主线程轮询看到完成时，failure 和 resume sidecar 已稳定。
+        defer {
+            lock.lock()
+            finished = true
+            lock.unlock()
+        }
         lock.lock()
-        finished = true
         let existingFailure = failure
         lock.unlock()
 
+        if existingFailure != nil || (usedResumeData && error != nil) {
+            try? FileManager.default.removeItem(at: resumeDataURL)
+        }
         if let error {
             lock.lock()
             let hadFailure = existingFailure != nil

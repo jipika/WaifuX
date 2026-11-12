@@ -36,7 +36,7 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
     let currentTimePublisher = PassthroughSubject<TimeInterval, Never>()
     @Published var playbackRate: Double = 1.0 {
         didSet {
-            avPlayer.rate = Float(playbackRate)
+            if wantsToPlay { avPlayer.rate = Float(playbackRate) }
         }
     }
     @Published var playbackVolume: Double = 1.0 {
@@ -64,6 +64,10 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
     private var cancellables = Set<AnyCancellable>()
     private var currentURL: URL?
     private var pendingStartTime: TimeInterval = 0
+    private var loadGeneration = UUID()
+    private(set) var playbackID: UUID?
+    private var wantsToPlay = false
+    private var loadingDeadline: DispatchWorkItem?
 
     // MARK: - 回调（兼容 KSPlayer 风格）
     var onStateChanged: ((PlaybackState) -> Void)?
@@ -82,14 +86,25 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
 
     // MARK: - 播放器控制
     @MainActor
-    func load(url: URL, startTime: TimeInterval = 0) {
+    func load(url: URL, startTime: TimeInterval = 0, httpHeaders: [String: String] = [:], playbackID: UUID? = nil) {
+        self.playbackID = playbackID
+        loadGeneration = UUID()
+        let generation = loadGeneration
+        loadingDeadline?.cancel()
+        avPlayer.currentItem?.cancelPendingSeeks()
+        cancellables.removeAll()
+        currentTime = 0
+        totalDuration = 0
+        bufferedDuration = 0
+        isSeeking = false
+        wantsToPlay = true
         currentURL = url
         pendingStartTime = startTime
         state = .loading
         isLoading = true
         onStateChanged?(.loading)
 
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url, options: httpHeaders.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
         let item = AVPlayerItem(asset: asset)
         // 优化高码率/B帧视频的缓冲性能
         item.preferredForwardBufferDuration = 3.0
@@ -103,6 +118,7 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
         itemObservers.append(item.observe(\.status, options: [.new, .old]) { [weak self] item, _ in
             guard let self else { return }
             DispatchQueue.main.async {
+                guard self.loadGeneration == generation, item === self.avPlayer.currentItem else { return }
                 switch item.status {
                 case .readyToPlay:
                     self.state = .readyToPlay
@@ -114,20 +130,18 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
                     if self.pendingStartTime > 0 {
                         let targetTime = self.pendingStartTime
                         self.pendingStartTime = 0
-                        // 先开始播放让 AVPlayerLayer 初始化渲染，再 seek 避免画面不更新
-                        self.avPlayer.play()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                            self?.avPlayer.seek(to: CMTime(seconds: targetTime, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-                        }
-                    } else {
-                        self.avPlayer.play()
+                        // seek completion 绑定本次加载代次，换集后不再影响新视频。
+                        self.seek(to: targetTime, resumeAfterSeek: self.wantsToPlay)
+                    } else if self.wantsToPlay {
+                        self.avPlayer.playImmediately(atRate: Float(self.playbackRate))
+                    }
+                    if self.wantsToPlay, self.avPlayer.timeControlStatus != .playing {
+                        self.state = .buffering
+                        self.onStateChanged?(.buffering)
                     }
                 case .failed:
                     let errorMsg = item.error?.localizedDescription ?? t("common.unknownError")
-                    self.state = .failed(errorMsg)
-                    self.isLoading = false
-                    self.onStateChanged?(.failed(errorMsg))
-                    self.onFinish?(item.error)
+                    self.failCurrentItem(errorMsg)
                 default:
                     break
                 }
@@ -138,9 +152,12 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
         itemObservers.append(item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] item, _ in
             guard let self else { return }
             DispatchQueue.main.async {
+                guard self.loadGeneration == generation, item === self.avPlayer.currentItem else { return }
                 if item.isPlaybackLikelyToKeepUp && self.state == .buffering {
                     // 根据当前播放速率决定恢复到 playing 还是 paused
-                    if self.avPlayer.rate > 0 {
+                    if self.wantsToPlay {
+                        self.avPlayer.playImmediately(atRate: Float(self.playbackRate))
+                        self.loadingDeadline?.cancel()
                         self.state = .playing
                         self.onStateChanged?(.playing)
                     } else {
@@ -154,9 +171,11 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
         itemObservers.append(item.observe(\.isPlaybackBufferEmpty, options: [.new]) { [weak self] item, _ in
             guard let self else { return }
             DispatchQueue.main.async {
-                if item.isPlaybackBufferEmpty && (self.state == .playing || self.state == .paused || self.state == .readyToPlay) {
+                guard self.loadGeneration == generation, item === self.avPlayer.currentItem else { return }
+                if item.isPlaybackBufferEmpty && self.wantsToPlay && self.state.isReady {
                     self.state = .buffering
                     self.onStateChanged?(.buffering)
+                    self.armLoadingDeadline(generation: generation, seconds: 25)
                 }
             }
         })
@@ -167,6 +186,7 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
                 if let range = item.loadedTimeRanges.first?.timeRangeValue {
                     let buffered = CMTimeGetSeconds(range.start) + CMTimeGetSeconds(range.duration)
                     DispatchQueue.main.async {
+                        guard self.loadGeneration == generation, item === self.avPlayer.currentItem else { return }
                         self.bufferedDuration = buffered
                     }
                 }
@@ -178,6 +198,15 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
         avPlayer.rate = Float(playbackRate)
         avPlayer.volume = Float(playbackVolume)
         avPlayer.isMuted = isMuted
+        armLoadingDeadline(generation: generation, seconds: 30)
+
+        NotificationCenter.default.publisher(for: .AVPlayerItemFailedToPlayToEndTime, object: item)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self, self.loadGeneration == generation else { return }
+                let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                self.failCurrentItem(error?.localizedDescription ?? t("common.unknownError"))
+            }.store(in: &cancellables)
 
         // 设置时间观察
         setupTimeObserver()
@@ -190,6 +219,9 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
             }
             .sink { [weak self] _ in
                 guard let self else { return }
+                guard self.loadGeneration == generation else { return }
+                self.loadingDeadline?.cancel()
+                self.wantsToPlay = false
                 self.state = .finished
                 self.onStateChanged?(.finished)
                 self.onFinish?(nil)
@@ -199,13 +231,15 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
 
     func play() {
         guard state == .readyToPlay || state == .paused || state == .buffering || state == .finished else { return }
-        avPlayer.play()
-        avPlayer.rate = Float(playbackRate)
+        wantsToPlay = true
+        avPlayer.playImmediately(atRate: Float(playbackRate))
         state = .playing
         onStateChanged?(.playing)
     }
 
     func pause() {
+        wantsToPlay = false
+        loadingDeadline?.cancel()
         avPlayer.pause()
         if state == .playing || state == .buffering {
             state = .paused
@@ -215,23 +249,22 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
 
     func seek(to time: TimeInterval, resumeAfterSeek: Bool = false, completion: (@Sendable () -> Void)? = nil) {
         isSeeking = true
-        let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+        if resumeAfterSeek { wantsToPlay = true }
+        let generation = loadGeneration
+        let cmTime = CMTime(seconds: max(0, time), preferredTimescale: 600)
         avPlayer.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
-            guard let self else {
+            DispatchQueue.main.async {
+                guard let self, self.loadGeneration == generation else { return }
+                self.isSeeking = false
+                guard finished else { completion?(); return }
+                let actualTime = self.avPlayer.currentTime().seconds
+                self.currentTime = actualTime.isFinite ? actualTime : time
+                self.currentTimePublisher.send(self.currentTime)
+                if resumeAfterSeek && self.wantsToPlay {
+                    self.avPlayer.playImmediately(atRate: Float(self.playbackRate))
+                }
                 completion?()
-                return
             }
-            let actualTime = self.avPlayer.currentTime().seconds.isFinite ? self.avPlayer.currentTime().seconds : time
-            self.currentTime = actualTime
-            self.currentTimePublisher.send(actualTime)
-            self.isSeeking = false
-            if resumeAfterSeek && self.state != .playing {
-                self.avPlayer.play()
-                self.avPlayer.rate = Float(self.playbackRate)
-                self.state = .playing
-                self.onStateChanged?(.playing)
-            }
-            completion?()
         }
     }
 
@@ -256,6 +289,11 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
     }
 
     private func tearDownPlayerResources(invalidateRateObserver: Bool) {
+        loadGeneration = UUID()
+        wantsToPlay = false
+        loadingDeadline?.cancel()
+        loadingDeadline = nil
+        avPlayer.currentItem?.cancelPendingSeeks()
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
         if let observer = timeObserver {
@@ -288,18 +326,48 @@ final class NativeVideoPlayer: ObservableObject, @unchecked Sendable {
     }
 
     // MARK: - 内部方法
+    private func failCurrentItem(_ message: String) {
+        if case .failed = state { return }
+        loadingDeadline?.cancel()
+        wantsToPlay = false
+        avPlayer.pause()
+        state = .failed(message)
+        isLoading = false
+        onStateChanged?(.failed(message))
+    }
+
+    private func armLoadingDeadline(generation: UUID, seconds: TimeInterval) {
+        guard loadingDeadline == nil || loadingDeadline?.isCancelled == true else { return }
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self, self.loadGeneration == generation, self.wantsToPlay,
+                  self.state == .loading || self.state == .readyToPlay || self.state == .buffering else { return }
+            self.failCurrentItem("视频连接超时，请重试")
+        }
+        loadingDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: deadline)
+    }
+
     private func setupPlayerObservers() {
-        // 观察 rate 变化
-        rateObserver = avPlayer.observe(\.rate, options: [.new]) { [weak self] player, _ in
+        // rate=0 也可能是网络缓冲；使用真实 timeControlStatus 保留用户播放意图。
+        rateObserver = avPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             guard let self else { return }
+            let item = player.currentItem
             DispatchQueue.main.async {
-                if player.rate > 0 && (self.state == .readyToPlay || self.state == .paused || self.state == .buffering) {
+                guard item === self.avPlayer.currentItem, item != nil, self.state.isReady else { return }
+                switch player.timeControlStatus {
+                case .playing:
+                    self.loadingDeadline?.cancel()
                     self.state = .playing
-                    self.onStateChanged?(.playing)
-                } else if player.rate == 0 && self.state == .playing {
+                case .waitingToPlayAtSpecifiedRate:
+                    guard self.wantsToPlay else { return }
+                    self.state = .buffering
+                    self.armLoadingDeadline(generation: self.loadGeneration, seconds: 25)
+                case .paused:
+                    guard !self.wantsToPlay else { return }
                     self.state = .paused
-                    self.onStateChanged?(.paused)
+                @unknown default: return
                 }
+                self.onStateChanged?(self.state)
             }
         }
     }

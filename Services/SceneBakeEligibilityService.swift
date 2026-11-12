@@ -697,7 +697,15 @@ extension SceneBakeEligibilityAnalyzer {
             // 旧随机 UUID 且无可用产物：继续分析以升级到稳定 id。
             return false
         }
-        if shouldSkip { return }
+        if shouldSkip {
+            // 资格命中只跳过分析；重新下载/导入同一内容时仍需补回缺失封面。
+            await MainActor.run {
+                if !WaifuXPreferences.shared.bool(forKey: "auto_bake_scene") {
+                    SceneOfflineBakeService.schedulePosterAfterEligibility(itemID: itemID)
+                }
+            }
+            return
+        }
 
         let snapshot: SceneBakeEligibilitySnapshot?
         do {

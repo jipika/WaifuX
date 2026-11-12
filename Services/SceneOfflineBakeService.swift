@@ -100,7 +100,7 @@ func regenerateSceneBakePosterAndNotify(itemID: String, videoURL: URL) async -> 
 /// 确保已有烘焙 MP4 具备高清 poster；命中缓存时不重复解码视频。
 @discardableResult
 @MainActor
-func ensureSceneBakePosterAndNotify(itemID: String, videoURL: URL) async -> URL? {
+func ensureSceneBakePosterAndNotify(itemID: String, videoURL: URL, notify: Bool = true) async -> URL? {
     guard SceneOfflineBakeService.isUsableBakedVideo(at: videoURL) else { return nil }
     if let hit = VideoThumbnailCache.shared.cachedSceneBakePosterFileURLIfExists(itemID: itemID, forLocalVideo: videoURL) {
         return hit // 真正的幂等命中：不抽帧、不清 Kingfisher、不重复广播封面更新。
@@ -114,11 +114,13 @@ func ensureSceneBakePosterAndNotify(itemID: String, videoURL: URL) async -> URL?
         forKey: posterURL.cacheKey,
         processorIdentifier: processor.identifier
     )
-    NotificationCenter.default.post(
-        name: .sceneOfflineBakeThumbnailDidUpdate,
-        object: itemID,
-        userInfo: ["thumbnailURL": posterURL]
-    )
+    if notify {
+        NotificationCenter.default.post(
+            name: .sceneOfflineBakeThumbnailDidUpdate,
+            object: itemID,
+            userInfo: ["thumbnailURL": posterURL]
+        )
+    }
     return posterURL
 }
 
@@ -3719,6 +3721,53 @@ enum SceneOfflineBakeService {
         )
     }
 
+    @MainActor
+    private static var postDownloadPosterKeys = Set<String>()
+
+    /// 下载完成、资格就绪后的独立抽帧：只补封面，不改桌面/锁屏，不登记视频成片。
+    @MainActor
+    static func schedulePosterAfterEligibility(itemID: String) {
+        guard BackgroundRuntimeRole.isHelper,
+              !WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
+              let record = MediaLibraryService.shared.downloadRecord(for: itemID), record.isActive,
+              let eligibility = record.sceneBakeEligibility else { return }
+        let contentRoot = URL(fileURLWithPath: eligibility.contentRootPath)
+        guard record.hasSameLocalContent(as: contentRoot) else { return }
+        let key = "\(itemID):\(eligibility.analysisId.uuidString)"
+        guard postDownloadPosterKeys.insert(key).inserted else { return }
+
+        Task(priority: .utility) { @MainActor in
+            defer { postDownloadPosterKeys.remove(key) }
+            // 排队后重新读取，不能为已删除、替换或切换策略的记录继续工作。
+            guard !Task.isCancelled,
+                  !WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
+                  let current = MediaLibraryService.shared.downloadRecord(for: itemID), current.isActive,
+                  current.sceneBakeEligibility?.analysisId == eligibility.analysisId,
+                  current.hasSameLocalContent(as: contentRoot) else { return }
+
+            let posterURL: URL?
+            if let artifact = usableCurrentArtifact(from: current) {
+                posterURL = await ensureSceneBakePosterAndNotify(
+                    itemID: itemID, videoURL: URL(fileURLWithPath: artifact.videoPath), notify: false
+                )
+            } else {
+                posterURL = await regenerateDetailRealtimePoster(
+                    record: current, reason: "download", forceRegenerate: false
+                )
+            }
+            guard let posterURL, !Task.isCancelled,
+                  let latest = MediaLibraryService.shared.downloadRecord(for: itemID), latest.isActive,
+                  latest.sceneBakeEligibility?.analysisId == eligibility.analysisId,
+                  latest.hasSameLocalContent(as: contentRoot) else { return }
+            NotificationCenter.default.post(
+                name: .sceneOfflineBakeThumbnailDidUpdate,
+                object: itemID,
+                userInfo: ["thumbnailURL": posterURL]
+            )
+            print("[SceneOfflineBake] download poster finished \(itemID): \(posterURL.lastPathComponent)")
+        }
+    }
+
     /// 资格写入后后台自动烘焙（推荐/边缘档位）；已有同 `analysisId` 成品则跳过。
     static func scheduleAutoBakeAfterEligibility(itemID: String) {
         Task(priority: .utility) {
@@ -3828,8 +3877,11 @@ enum SceneOfflineBakeService {
     /// 有烘焙的调用方走视频路径，不要调这里。
     /// 静态 → `detect-static` 直接出 PNG；动态 → 1s 临时烘焙抽一帧。
     /// 只产主屏尺寸的 `scene_realtime_*`（详情 hero + 列表共用），不写屏、不触发整片烘焙。
+    /// 下载后补封面传 `forceRegenerate: false` 复用缓存；手动「重新抽帧」默认强制刷新。
     @MainActor
-    static func regenerateDetailRealtimePoster(record: MediaDownloadRecord, reason: String) async -> URL? {
+    static func regenerateDetailRealtimePoster(
+        record: MediaDownloadRecord, reason: String, forceRegenerate: Bool = true
+    ) async -> URL? {
         let itemID = record.item.id
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: record.localFileURL)
         guard FileManager.default.fileExists(atPath: contentRoot.path) else { return nil }
@@ -3856,6 +3908,14 @@ enum SceneOfflineBakeService {
         let size = primary.size
         let posterCacheID = itemID
         let variantKey = realtimePosterVariantKey(eligibility: eligibility, size: size)
+        if !forceRegenerate {
+            if let cached = VideoThumbnailCache.shared.cachedSceneRealtimePosterFileURLIfExists(
+                itemID: posterCacheID, variantKey: variantKey
+            ) {
+                return cached
+            }
+        }
+        guard !Task.isCancelled, SystemMemoryPressure.hasRoomForSceneOfflineBake() else { return nil }
         let userProperties = SceneConfigOverrideService.mergedPropertiesJSON(
             userPropertiesJSON: SceneWallpaperPropertiesService.propertiesOverrideJSON(
                 for: contentRoot.path
@@ -3878,49 +3938,70 @@ enum SceneOfflineBakeService {
                 variantKey: variantKey,
                 targetWidth: size.width,
                 targetHeight: size.height,
-                forceRegenerate: true
+                forceRegenerate: forceRegenerate
             )
         }
 
-        // 动态无烘焙：1s 临时烘焙抽一帧（只为出封面，不进 SceneBakes）。
-        let temporaryDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("WaifuX", isDirectory: true)
-            .appendingPathComponent("TransientScenePosters", isDirectory: true)
-        let temporaryVideoURL = temporaryDirectory
-            .appendingPathComponent("\(UUID().uuidString).mp4")
-        let temporarySidecarURL = temporaryVideoURL
-            .deletingPathExtension()
-            .appendingPathExtension("json")
-        try? FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-        defer {
-            try? FileManager.default.removeItem(at: temporaryVideoURL)
-            try? FileManager.default.removeItem(at: temporarySidecarURL)
-        }
-        guard let artifact = try? await bakeWithWallpaperWgpu(
-            contentRoot: contentRoot,
-            outURL: temporaryVideoURL,
-            eligibility: eligibility,
-            width: size.width,
-            height: size.height,
-            fps: min(resolvedBakeFPS(requestedFPS: nil), 30),
-            durationSeconds: 1,
-            userProperties: userProperties,
-            progress: nil,
-            isCompanion: false,
-            companionGeneration: nil
-        ) else {
-            return nil
-        }
-        let videoURL = URL(fileURLWithPath: artifact.videoPath)
-        guard isUsableBakedVideo(at: videoURL) else { return nil }
-        return await VideoThumbnailCache.shared.sceneRealtimePosterJPEGFileURL(
-            forLocalVideo: videoURL,
-            itemID: posterCacheID,
-            variantKey: variantKey,
-            targetWidth: size.width,
-            targetHeight: size.height,
-            forceRegenerate: true
-        )
+        // 检测自己持有串行队列；等检测归还后再为动态抽帧排队，不能嵌套持有。
+        let queueJobID = UUID()
+        await OfflineBakeSerialQueue.shared.waitForTurn(jobID: queueJobID)
+        let posterURL = await { () async -> URL? in
+            // 等待期间可能由设壁纸/另一个详情页补好了同一封面。
+            if !forceRegenerate {
+                guard !WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
+                      let current = MediaLibraryService.shared.downloadRecord(for: itemID), current.isActive,
+                      current.sceneBakeEligibility?.analysisId == eligibility.analysisId,
+                      current.hasSameLocalContent(as: contentRoot) else { return nil }
+                if let cached = VideoThumbnailCache.shared.cachedSceneRealtimePosterFileURLIfExists(
+                    itemID: posterCacheID, variantKey: variantKey
+                ) {
+                    return cached
+                }
+            }
+            guard !Task.isCancelled, SystemMemoryPressure.hasRoomForSceneOfflineBake() else { return nil }
+
+            // 动态无烘焙：1s 临时烘焙抽一帧（只为出封面，不进 SceneBakes）。
+            let temporaryDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("WaifuX", isDirectory: true)
+                .appendingPathComponent("TransientScenePosters", isDirectory: true)
+            let temporaryVideoURL = temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).mp4")
+            let temporarySidecarURL = temporaryVideoURL
+                .deletingPathExtension()
+                .appendingPathExtension("json")
+            try? FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+            defer {
+                try? FileManager.default.removeItem(at: temporaryVideoURL)
+                try? FileManager.default.removeItem(at: temporarySidecarURL)
+            }
+            guard let artifact = try? await bakeWithWallpaperWgpu(
+                contentRoot: contentRoot,
+                outURL: temporaryVideoURL,
+                eligibility: eligibility,
+                width: size.width,
+                height: size.height,
+                fps: min(resolvedBakeFPS(requestedFPS: nil), 30),
+                durationSeconds: 1,
+                userProperties: userProperties,
+                progress: nil,
+                isCompanion: false,
+                companionGeneration: nil
+            ) else {
+                return nil
+            }
+            let videoURL = URL(fileURLWithPath: artifact.videoPath)
+            guard isUsableBakedVideo(at: videoURL) else { return nil }
+            return await VideoThumbnailCache.shared.sceneRealtimePosterJPEGFileURL(
+                forLocalVideo: videoURL,
+                itemID: posterCacheID,
+                variantKey: variantKey,
+                targetWidth: size.width,
+                targetHeight: size.height,
+                forceRegenerate: forceRegenerate
+            )
+        }()
+        await OfflineBakeSerialQueue.shared.leave(jobID: queueJobID)
+        return posterURL
     }
 
     /// Lightweight, main-thread-safe gate: file exists and is non-trivial.

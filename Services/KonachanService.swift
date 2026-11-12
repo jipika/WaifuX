@@ -14,10 +14,6 @@ actor KonachanService {
 
     private let networkService = NetworkService.shared
 
-    /// 基础 URL
-    private let safeBaseURL = "https://konachan.net"
-    private let matureBaseURL = "https://konachan.com"
-
     /// 请求限速：两次请求之间至少间隔的时间
     private let minimumRequestInterval: TimeInterval = 0.5
     private var lastRequestTime: Date = .distantPast
@@ -55,13 +51,9 @@ actor KonachanService {
             tags.append(sorting.orderTag)
         }
 
-        // konachan.net 是安全版，不提供 explicit 帖子；只要允许 NSFW 就必须走 .com。
-        let includesExplicit = purity.contains(.explicit)
-        let primaryBaseURL = includesExplicit ? matureBaseURL : safeBaseURL
-        let fallbackBaseURL: String? = includesExplicit ? nil : matureBaseURL
-
-        guard let primaryURL = buildURL(
-            baseURL: primaryBaseURL,
+        // 统一使用完整分级站点 .com，内容范围由 rating 标签控制。
+        // .net 对 Questionable / Explicit 返回成功的空结果，不能作为 API 回退。
+        guard let url = buildURL(
             path: "/post.json",
             queryItems: [
                 URLQueryItem(name: "limit", value: "\(perPage)"),
@@ -71,25 +63,13 @@ actor KonachanService {
         ) else {
             throw NetworkError.invalidResponse
         }
-        let fallbackURL = fallbackBaseURL.flatMap {
-            buildURL(
-                baseURL: $0,
-                path: "/post.json",
-                queryItems: [
-                    URLQueryItem(name: "limit", value: "\(perPage)"),
-                    URLQueryItem(name: "page", value: "\(page)"),
-                    URLQueryItem(name: "tags", value: tags.joined(separator: " "))
-                ]
-            )
-        }
 
         // 限速
         await enforceRateLimit()
 
-        let posts: [KonachanPost] = try await fetchWithFallback(
+        let posts: [KonachanPost] = try await fetch(
             [KonachanPost].self,
-            primaryURL: primaryURL,
-            fallbackURL: fallbackURL
+            from: url
         )
 
         // 映射为 Wallpaper
@@ -156,16 +136,7 @@ actor KonachanService {
             return []
         }
 
-        guard let primaryURL = buildURL(
-            baseURL: safeBaseURL,
-            path: "/tag.json",
-            queryItems: [
-                URLQueryItem(name: "limit", value: "\(limit)"),
-                URLQueryItem(name: "page", value: "1"),
-                URLQueryItem(name: "name", value: query)
-            ]
-        ), let fallbackURL = buildURL(
-            baseURL: matureBaseURL,
+        guard let url = buildURL(
             path: "/tag.json",
             queryItems: [
                 URLQueryItem(name: "limit", value: "\(limit)"),
@@ -178,10 +149,9 @@ actor KonachanService {
 
         await enforceRateLimit()
 
-        let tags: [KonachanTag] = try await fetchWithFallback(
+        let tags: [KonachanTag] = try await fetch(
             [KonachanTag].self,
-            primaryURL: primaryURL,
-            fallbackURL: fallbackURL
+            from: url
         )
 
         // 按 count 降序排序，热门标签在前
@@ -191,17 +161,7 @@ actor KonachanService {
     /// 获取热门标签（按使用次数降序，仅 General 类型）
     /// - Parameter limit: 返回数量，默认 6
     func fetchHotTags(limit: Int = 6) async throws -> [KonachanTag] {
-        guard let primaryURL = buildURL(
-            baseURL: safeBaseURL,
-            path: "/tag.json",
-            queryItems: [
-                URLQueryItem(name: "limit", value: "\(limit)"),
-                URLQueryItem(name: "page", value: "1"),
-                URLQueryItem(name: "order", value: "count"),
-                URLQueryItem(name: "type", value: "0")
-            ]
-        ), let fallbackURL = buildURL(
-            baseURL: matureBaseURL,
+        guard let url = buildURL(
             path: "/tag.json",
             queryItems: [
                 URLQueryItem(name: "limit", value: "\(limit)"),
@@ -213,10 +173,9 @@ actor KonachanService {
             throw NetworkError.invalidResponse
         }
         await enforceRateLimit()
-        return try await fetchWithFallback(
+        return try await fetch(
             [KonachanTag].self,
-            primaryURL: primaryURL,
-            fallbackURL: fallbackURL
+            from: url
         )
     }
     // MARK: - Private
@@ -231,8 +190,11 @@ actor KonachanService {
         lastRequestTime = Date()
     }
 
-    private func buildURL(baseURL: String, path: String, queryItems: [URLQueryItem]) -> URL? {
-        guard var components = URLComponents(string: baseURL) else {
+    private func buildURL(path: String, queryItems: [URLQueryItem]) -> URL? {
+        guard var components = URLComponents(
+            url: KonachanRequestConfiguration.siteURL,
+            resolvingAgainstBaseURL: false
+        ) else {
             return nil
         }
         components.path = path
@@ -240,32 +202,19 @@ actor KonachanService {
         return components.url
     }
 
-    /// 带可选域名回退的请求方法；explicit 查询只允许访问 konachan.com。
-    private func fetchWithFallback<T: Decodable & Sendable>(
+    /// 请求完整分级站点；访问失败时保留登录 / Cloudflare 提示。
+    private func fetch<T: Decodable & Sendable>(
         _ type: T.Type,
-        primaryURL: URL,
-        fallbackURL: URL?
+        from url: URL
     ) async throws -> T {
         do {
             return try await networkService.fetch(
                 T.self,
-                from: primaryURL,
-                headers: KonachanRequestConfiguration.apiHeaders(for: primaryURL)
+                from: url,
+                headers: KonachanRequestConfiguration.apiHeaders(for: url)
             )
         } catch {
-            guard let fallbackURL else {
-                throw translatedAccessError(error)
-            }
-            print("[KonachanService] Primary API failed (\(primaryURL.host ?? "unknown")): \(error). Retrying fallback...")
-            do {
-                return try await networkService.fetch(
-                    T.self,
-                    from: fallbackURL,
-                    headers: KonachanRequestConfiguration.apiHeaders(for: fallbackURL)
-                )
-            } catch {
-                throw translatedAccessError(error)
-            }
+            throw translatedAccessError(error)
         }
     }
 

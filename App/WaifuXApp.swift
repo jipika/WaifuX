@@ -522,6 +522,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // 154 在用户机上留下 launchd 找不到 App 路径的坏记录（exit 78）。
         installHelperQuitHandlers()
         WaifuXPreferences.shared.loadLegacyPreferences()
+        NotificationCenter.default.addObserver(self, selector: #selector(reloadImportedUICaches(_:)),
+                                               name: .cloudSyncSettingsImported, object: nil)
         BackgroundAgentClient.shared.start()
         AppResponsivenessMonitor.startIfNeeded()
         AppResponsivenessMonitor.noteScenePhase("didFinishLaunching")
@@ -683,6 +685,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     private func restoreAllDataAsync() {
         LocalizationService.shared.restoreSavedSettings()
         ThemeManager.shared.restoreSavedSettings()
+        CloudSyncConfiguration.shared.reloadFromPreferences()
+        ArcBackgroundSettings.shared.reloadFromPreferences()
+        LiquidGlassClockSettings.shared.reloadFromPreferences()
         WallpaperLibraryService.shared.restoreSavedData()
         MediaLibraryService.shared.restoreSavedData()
         LibraryFolderStore.shared.restoreSavedData()
@@ -699,6 +704,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             vm.restoreSavedSettings()
             settingsViewModel = vm
         }
+        // Observe even when SyncSettingsTab has never been opened. A replayed
+        // first snapshot asynchronously reconciles imports missed while offline.
+        _ = CloudSyncService.shared
+    }
+
+    /// CloudSyncService synchronizes preferences and deduplicates revisions before
+    /// posting. These reload APIs update caches without writing runtime settings;
+    /// SettingsViewModel independently refreshes every existing settings window.
+    @objc private func reloadImportedUICaches(_ notification: Notification) {
+        ThemeManager.shared.restoreSavedSettings()
+        LocalizationService.shared.reloadFromPreferences()
+        ArcBackgroundSettings.shared.reloadFromPreferences()
+        LiquidGlassClockSettings.shared.reloadFromPreferences()
     }
 
     private func restoreMainWindowDataIfNeeded() {

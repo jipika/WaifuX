@@ -734,7 +734,7 @@ final class MediaLibraryService: ObservableObject {
     }
 
     /// 由 `SceneBakeEligibilityAnalyzer` 在后台线程完成后调用，写入带 UUID 的分析快照。
-    /// - Parameter triggerAutoBake: 为 false 时不在此触发后台自动烘焙（例如用户正在「设为壁纸」流程里同步烘焙）。
+    /// - Parameter triggerAutoBake: 为 false 时不触发下载后的烘焙/抽帧（例如手动烘焙或抽帧流程回写资格）。
     func attachSceneBakeEligibility(itemID: String, snapshot: SceneBakeEligibilitySnapshot, triggerAutoBake: Bool = true) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("library.media.attachSceneBakeEligibility0", ["itemID": itemID, "snapshot": try? JSONEncoder().encode(snapshot), "triggerAutoBake": triggerAutoBake]); return }
 
@@ -743,7 +743,7 @@ final class MediaLibraryService: ObservableObject {
         }
         let record = downloadRecords[index]
 
-        // 同一工程、同一 analysisId：只刷新 notes/score 时间戳类字段，不触发重复 auto-bake。
+        // 同一工程、同一 analysisId：刷新快照；缺失成片/封面的后台处理自行复用缓存和去重。
         if let existing = record.sceneBakeEligibility,
            existing.analysisId == snapshot.analysisId,
            SceneBakeEligibilityAnalyzer.isSameContentRoot(existing.contentRootPath, snapshot.contentRootPath) {
@@ -751,11 +751,8 @@ final class MediaLibraryService: ObservableObject {
             saveDlToCache(downloadRecords[index])
             syncDlIndex()
             downloadRecords = Array(downloadRecords)
-            if triggerAutoBake,
-               WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"),
-               snapshot.isEligibleForOfflineBake,
-               SceneOfflineBakeService.usableCurrentArtifact(from: downloadRecords[index]) == nil {
-                SceneOfflineBakeService.scheduleAutoBakeAfterEligibility(itemID: itemID)
+            if triggerAutoBake {
+                scheduleSceneDownloadProcessing(itemID: itemID, eligibility: snapshot)
             }
             return
         }
@@ -779,8 +776,19 @@ final class MediaLibraryService: ObservableObject {
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
 
-        if triggerAutoBake, WaifuXPreferences.shared.bool(forKey: "auto_bake_scene"), snapshot.isEligibleForOfflineBake {
+        if triggerAutoBake {
+            scheduleSceneDownloadProcessing(itemID: itemID, eligibility: snapshot)
+        }
+    }
+
+    /// 自动烘焙关闭只影响视频成片，不能同时关掉下载后的独立封面抽帧。
+    private func scheduleSceneDownloadProcessing(itemID: String, eligibility: SceneBakeEligibilitySnapshot) {
+        if WaifuXPreferences.shared.bool(forKey: "auto_bake_scene") {
+            guard eligibility.isEligibleForOfflineBake,
+                  SceneOfflineBakeService.usableCurrentArtifact(from: downloadRecord(for: itemID)) == nil else { return }
             SceneOfflineBakeService.scheduleAutoBakeAfterEligibility(itemID: itemID)
+        } else {
+            SceneOfflineBakeService.schedulePosterAfterEligibility(itemID: itemID)
         }
     }
 

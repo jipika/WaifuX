@@ -12,12 +12,12 @@ class SettingsViewModel: ObservableObject {
     private var systemWallpaperSyncTransitionGeneration: UInt64 = 0
 
     @Published var saveToDownloads = true {
-        didSet { WaifuXPreferences.shared.set(saveToDownloads, forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(saveToDownloads, forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) }
     }
     @Published private var themeModeRawValue: String = ThemeMode.dark.rawValue
-    @Published var launchAtLogin = false { didSet { WaifuXPreferences.shared.set(launchAtLogin, forKey: "launch_at_login") } }
+    @Published var launchAtLogin = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(launchAtLogin, forKey: "launch_at_login") } }
     @Published var swapMenuBarClickActions = false {
-        didSet { WaifuXPreferences.shared.set(swapMenuBarClickActions, forKey: "menu_bar_swap_click_actions") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(swapMenuBarClickActions, forKey: "menu_bar_swap_click_actions") }
     }
     /// 永不休眠：持有 IOPM assertion，阻止空闲息屏 / 系统睡眠，锁屏时桌面可继续显示。
     @Published var preventSystemSleep = false {
@@ -35,7 +35,7 @@ class SettingsViewModel: ObservableObject {
             VideoWallpaperManager.shared.refreshGrainOverlay()
         }
     }
-    @Published var grainTextureQuality = "high" { didSet { WaifuXPreferences.shared.set(grainTextureQuality, forKey: "grain_texture_quality") } }
+    @Published var grainTextureQuality = "high" { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(grainTextureQuality, forKey: "grain_texture_quality") } }
     /// 颗粒度强度 0.0~1.0，同步到 ArcBackgroundSettings.grainIntensity
     @Published var grainIntensity: Double = 0.5 {
         didSet {
@@ -53,10 +53,10 @@ class SettingsViewModel: ObservableObject {
             NotchOverlayManager.shared.setEnabled(hideNotch)
         }
     }
-    @Published var pauseWhenOtherAppForeground = false { didSet { WaifuXPreferences.shared.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
-    @Published var pauseInactiveDisplays = false { didSet { WaifuXPreferences.shared.set(pauseInactiveDisplays, forKey: "pause_inactive_displays") } }
-    @Published var pauseWhenFullscreenCovers = false { didSet { WaifuXPreferences.shared.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
-    @Published var pauseOnBatteryPower = false { didSet { WaifuXPreferences.shared.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
+    @Published var pauseWhenOtherAppForeground = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
+    @Published var pauseInactiveDisplays = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(pauseInactiveDisplays, forKey: "pause_inactive_displays") } }
+    @Published var pauseWhenFullscreenCovers = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
+    @Published var pauseOnBatteryPower = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
     /// 电池供电时暂停自动轮换（默认开启）。与「暂停播放」分开：
     /// 轮换会重新加载视频壁纸、把电池策略刚暂停的渲染重新激活（issue #119）。
     @Published var pauseRotationOnBattery = true {
@@ -80,11 +80,11 @@ class SettingsViewModel: ObservableObject {
             DynamicWallpaperAutoPauseManager.shared.displaySleepPolicy = displaySleepPlaybackPolicy
         }
     }
-    @Published var pauseWhenWindowCoverage = false { didSet { WaifuXPreferences.shared.set(pauseWhenWindowCoverage, forKey: "pause_when_window_coverage") } }
-    @Published var windowCoveragePauseThreshold: Double = 50 { didSet { WaifuXPreferences.shared.set(windowCoveragePauseThreshold, forKey: "window_coverage_pause_threshold") } }
+    @Published var pauseWhenWindowCoverage = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(pauseWhenWindowCoverage, forKey: "pause_when_window_coverage") } }
+    @Published var windowCoveragePauseThreshold: Double = 50 { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(windowCoveragePauseThreshold, forKey: "window_coverage_pause_threshold") } }
     /// 默认关闭：桌面 AVPlayerLayer 开启逐帧 HDR 元数据时，在部分 15.x + XDR 上会偶发整层 tone-map 闪暗。
     /// 用户仍可在设置里手动打开；仅影响新创建的 AVPlayerItem。
-    @Published var hdrEnabled = false { didSet { WaifuXPreferences.shared.set(hdrEnabled, forKey: "hdr_enabled") } }
+    @Published var hdrEnabled = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(hdrEnabled, forKey: "hdr_enabled") } }
     /// 使用独立视频渲染子进程；默认关闭，使用 App 内置播放器。
     @Published var externalVideoRendererEnabled = false {
         didSet {
@@ -162,10 +162,11 @@ class SettingsViewModel: ObservableObject {
             applyVideoOptimizationSettings()
         }
     }
-    @Published var showAllWorkshopContent = false { didSet { WaifuXPreferences.shared.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
+    @Published var showAllWorkshopContent = false { didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
     /// 下载 Workshop 资源时自动订阅，用户删除本地资源后自动取消订阅。
     @Published var workshopSubscriptionAutomationEnabled = false {
         didSet {
+            guard !isReloadingImportedSettings else { return }
             WaifuXPreferences.shared.set(
                 workshopSubscriptionAutomationEnabled,
                 forKey: WorkshopSubscriptionAutomation.defaultsKey
@@ -189,18 +190,19 @@ class SettingsViewModel: ObservableObject {
     /// 超分辨率模式开关
     /// 开启后，动态壁纸将以低分辨率运行，利用 Apple MetalFX 超分辨率技术提升性能
     @Published var upscalingEnabled = true {
-        didSet { WaifuXPreferences.shared.set(upscalingEnabled, forKey: "upscaling_enabled") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(upscalingEnabled, forKey: "upscaling_enabled") }
     }
 
     /// 超分辨率缩放比例 (30% ~ 100%)
     @Published var upscalingPercent: Double = 70 {
-        didSet { WaifuXPreferences.shared.set(upscalingPercent, forKey: "upscaling_percent") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(upscalingPercent, forKey: "upscaling_percent") }
     }
 
     /// 性能模式（--effect-reduction）：压缩次级采样等 effect 中间 RT 精度
     /// 仅在超分模式启用时生效；默认关闭以避免静默损失 effect 精度
     @Published var effectReductionEnabled = false {
         didSet {
+            guard !isReloadingImportedSettings else { return }
             WaifuXPreferences.shared.set(effectReductionEnabled, forKey: "effect_reduction_enabled")
             // 与 perfMode 同通道：effect 压缩变化即时热推给运行中的渲染器。
             WallpaperEngineXBridge.shared.applyPerfModeChange(wallpaperPerfMode)
@@ -209,13 +211,14 @@ class SettingsViewModel: ObservableObject {
 
     /// 壁纸引擎实时渲染帧率上限 (60 ~ 显示器最大刷新率)
     @Published var wallpaperEngineFPS: Double = 60 {
-        didSet { WaifuXPreferences.shared.set(wallpaperEngineFPS, forKey: "wallpaper_engine_fps") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(wallpaperEngineFPS, forKey: "wallpaper_engine_fps") }
     }
 
     /// 渲染性能模式：只影响 effect RT 精度，不影响帧率（帧率由 wallpaperEngineFPS 单独控制）。
     /// high/balanced = effectRT 全尺寸（等价），power = effectRT 宽高减半（省 GPU）。
     @Published var wallpaperPerfMode: String = "balanced" {
         didSet {
+            guard !isReloadingImportedSettings else { return }
             let allowed = ["high", "balanced", "power"]
             let value = allowed.contains(wallpaperPerfMode) ? wallpaperPerfMode : "balanced"
             if value != wallpaperPerfMode { wallpaperPerfMode = value; return }
@@ -229,23 +232,24 @@ class SettingsViewModel: ObservableObject {
     /// Web 壁纸画布分辨率比例；100% 保持原画质，降低后减少 WebGL 像素占用。
     @Published var webWallpaperRenderScalePercent: Double = 100 {
         didSet {
+            guard !isReloadingImportedSettings else { return }
             WaifuXPreferences.shared.set(webWallpaperRenderScalePercent, forKey: "web_wallpaper_render_scale_percent")
         }
     }
 
     /// 壁纸引擎离线烘焙帧率 (15 ~ 显示器最高刷新率)
     @Published var sceneBakeFPS: Double = 30 {
-        didSet { WaifuXPreferences.shared.set(sceneBakeFPS, forKey: "scene_bake_fps") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(sceneBakeFPS, forKey: "scene_bake_fps") }
     }
 
     /// 壁纸引擎离线烘焙时长（秒）
     @Published var sceneBakeDuration: Double = 15 {
-        didSet { WaifuXPreferences.shared.set(sceneBakeDuration, forKey: "scene_bake_duration") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(sceneBakeDuration, forKey: "scene_bake_duration") }
     }
 
     /// 下载完成后自动烘焙场景壁纸
     @Published var autoBakeScene: Bool = true {
-        didSet { WaifuXPreferences.shared.set(autoBakeScene, forKey: "auto_bake_scene") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(autoBakeScene, forKey: "auto_bake_scene") }
     }
 
     /// 动态锁屏壁纸开关（仅 macOS 26+ 可用，关闭后走旧逻辑）
@@ -353,13 +357,13 @@ class SettingsViewModel: ObservableObject {
     // 而非这三个标志——这样切换开关在当前会话不立即生效（避免 tab 树重建 / 管线半加载）。
     // `hasPendingModuleChanges` 对比快照判定"待应用"，UI 据此显示"立即重启"。
     @Published var wallpaperModuleEnabled: Bool = true {
-        didSet { WaifuXPreferences.shared.set(wallpaperModuleEnabled, forKey: "module_wallpaper_enabled") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(wallpaperModuleEnabled, forKey: "module_wallpaper_enabled") }
     }
     @Published var mediaModuleEnabled: Bool = true {
-        didSet { WaifuXPreferences.shared.set(mediaModuleEnabled, forKey: "module_media_enabled") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(mediaModuleEnabled, forKey: "module_media_enabled") }
     }
     @Published var animeModuleEnabled: Bool = true {
-        didSet { WaifuXPreferences.shared.set(animeModuleEnabled, forKey: "module_anime_enabled") }
+        didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(animeModuleEnabled, forKey: "module_anime_enabled") }
     }
 
     @Published var proxyEnabled = false {
@@ -395,15 +399,18 @@ class SettingsViewModel: ObservableObject {
     /// 批量更新标志。为 true 时，各 @Published 的 didSet 跳过单例副作用与 UserDefaults 写入，
     /// 由 withBatchUpdate 结束时统一补齐，避免批量恢复设置时触发数十次级联 objectWillChange/单例调用。
     private var isBatchUpdating = false
+    /// Imported values are already durable. Updating UI mirrors must neither
+    /// persist them again nor run startup migrations / runtime control commands.
+    private var isReloadingImportedSettings = false
 
-    /// 在闭包内批量修改设置属性，期间所有 didSet 副作用被抑制；
-    /// 闭包返回后统一应用被抑制的副作用（UserDefaults + 单例）。
-    /// 用于 restoreSavedSettings() 等一次性恢复多个设置的场景。
-    func withBatchUpdate(_ updates: () throws -> Void) rethrows {
+    /// Startup/user batches keep their existing deferred effects. Cloud reloads
+    /// explicitly opt out; the read-only flag also guards plain preference didSet.
+    func withBatchUpdate(applySideEffects: Bool = true, _ updates: () throws -> Void) rethrows {
+        let wasBatchUpdating = isBatchUpdating
         isBatchUpdating = true
-        defer { isBatchUpdating = false }
+        defer { isBatchUpdating = wasBatchUpdating }
         try updates()
-        applyDeferredSideEffects()
+        if applySideEffects { applyDeferredSideEffects() }
     }
 
     /// 应用批量更新期间被抑制的副作用。只处理含单例级联的属性，
@@ -513,18 +520,36 @@ class SettingsViewModel: ObservableObject {
     private let maxCacheSize: Int64 = 500_000_000 // 500MB 预估最大值
 
     init() {
-        // ⚠️ init 中不读 UserDefaults！所有持久化数据通过 restoreSavedSettings() 延迟恢复
-        // refreshDataSourceProfiles() 等延后到 restore 中执行
+        // No preference reads during init. A cloud notification is delivered by
+        // CloudSyncService only after synchronization, outside singleton init.
+        NotificationCenter.default.publisher(for: .cloudSyncSettingsImported)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.reloadImportedSettings() }
+            .store(in: &cancellables)
+    }
+
+    /// Refresh the @Published UI mirrors without writing imported preferences,
+    /// migrating legacy values, disabling clock, or restarting runtime modules.
+    func reloadImportedSettings() {
+        restoreSavedSettings(readOnly: true)
+        // The cloud importer writes the shared domain, not UserDefaults.standard
+        // (the profile store's legacy default). Keep this reload on that domain.
+        let defaults = WaifuXPreferences.shared
+        dataSourceProfiles = DataSourceProfileStore.allProfiles(defaults: defaults)
+        activeDataSourceProfileID = DataSourceProfileStore.activeProfileID(defaults: defaults)
     }
 
     /// ⚠️ 延迟恢复所有持久化设置（完全异步，避免阻塞主线程）
     /// 在 applicationDidFinishLaunching 完成后的 DispatchQueue.main.async 中调用
-    func restoreSavedSettings() {
+    func restoreSavedSettings(readOnly: Bool = false) {
+        let wasReloadingImportedSettings = isReloadingImportedSettings
+        isReloadingImportedSettings = readOnly
+        defer { isReloadingImportedSettings = wasReloadingImportedSettings }
         // 第一步：快速恢复基本设置（UserDefaults 读取很快）
         // 用 withBatchUpdate 包裹：一次性赋值 20+ 个 @Published，期间 didSet 的
         // 单例副作用与 UserDefaults 写入被抑制，结束后统一补齐，避免启动时数十次级联。
         let defaults = WaifuXPreferences.shared
-        withBatchUpdate {
+        withBatchUpdate(applySideEffects: !readOnly) {
             saveToDownloads = defaults.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
             themeModeRawValue = ThemeManager.savedMode(in: defaults).rawValue
             launchAtLogin = defaults.bool(forKey: "launch_at_login")
@@ -540,9 +565,19 @@ class SettingsViewModel: ObservableObject {
             pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")
             pauseOnBatteryPower = defaults.bool(forKey: "pause_on_battery_power")
             pauseRotationOnBattery = defaults.object(forKey: "pause_rotation_on_battery") as? Bool ?? true
-            // 策略值从 AutoPauseManager 读取（内含旧布尔开关的一次性迁移）
-            batteryPlaybackPolicy = DynamicWallpaperAutoPauseManager.shared.batteryPolicy
-            displaySleepPlaybackPolicy = DynamicWallpaperAutoPauseManager.shared.displaySleepPolicy
+            if readOnly {
+                // AutoPauseManager's battery getter migrates by writing a key.
+                // Resolve the same fallback locally without triggering migration.
+                batteryPlaybackPolicy = defaults.string(forKey: "playback_policy_on_battery")
+                    .flatMap(WallpaperPlaybackTriggerPolicy.init(rawValue:))
+                    ?? (pauseOnBatteryPower ? .pause : .keepRunning)
+                displaySleepPlaybackPolicy = defaults.string(forKey: "playback_policy_display_sleep")
+                    .flatMap(WallpaperPlaybackTriggerPolicy.init(rawValue:)) ?? .pause
+            } else {
+                // Startup retains its one-time legacy migration.
+                batteryPlaybackPolicy = DynamicWallpaperAutoPauseManager.shared.batteryPolicy
+                displaySleepPlaybackPolicy = DynamicWallpaperAutoPauseManager.shared.displaySleepPolicy
+            }
             pauseWhenWindowCoverage = defaults.bool(forKey: "pause_when_window_coverage")
             let savedThreshold = defaults.double(forKey: "window_coverage_pause_threshold")
             windowCoveragePauseThreshold = savedThreshold > 0 ? savedThreshold : 50
@@ -560,12 +595,14 @@ class SettingsViewModel: ObservableObject {
             let legacyAutoInterpolate = defaults.object(forKey: "frame_interpolation_auto_on_download") as? Bool ?? false
             let legacyAutoLoop = defaults.object(forKey: "auto_analyze_loop_point") as? Bool ?? false
             autoOptimizeVideosAfterDownload = legacyAutoInterpolate || legacyAutoLoop
-            defaults.set(true, forKey: "frame_interpolation_enabled")
-            defaults.set(true, forKey: "loop_point_analysis_enabled")
-            defaults.set(false, forKey: "frame_interpolation_auto_enqueue")
-            defaults.set(autoOptimizeVideosAfterDownload, forKey: "frame_interpolation_auto_on_download")
-            defaults.set(autoOptimizeVideosAfterDownload, forKey: "auto_analyze_loop_point")
-            applyVideoOptimizationSettings()
+            if !readOnly {
+                defaults.set(true, forKey: "frame_interpolation_enabled")
+                defaults.set(true, forKey: "loop_point_analysis_enabled")
+                defaults.set(false, forKey: "frame_interpolation_auto_enqueue")
+                defaults.set(autoOptimizeVideosAfterDownload, forKey: "frame_interpolation_auto_on_download")
+                defaults.set(autoOptimizeVideosAfterDownload, forKey: "auto_analyze_loop_point")
+                applyVideoOptimizationSettings()
+            }
             showAllWorkshopContent = defaults.bool(forKey: "show_all_workshop_content")
             workshopSubscriptionAutomationEnabled = WorkshopSubscriptionAutomation.isEnabled(in: defaults)
             // 未写过 key 时默认 true（与属性初始值一致）；bool(forKey:) 会把缺失当成 false
@@ -605,6 +642,9 @@ class SettingsViewModel: ObservableObject {
             Self._cachedAPIKey = defaults.string(forKey: apiKeyUserDefaultsKey)
             Self._apiKeyRestored = true
         }
+
+        // Imported state is a UI-only mirror refresh, not another launch.
+        if readOnly { return }
 
         // 第二步：后台异步执行耗时操作
         Task(priority: .background) { @MainActor in

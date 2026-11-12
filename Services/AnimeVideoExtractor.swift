@@ -29,14 +29,34 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
     
     // Video source detection
     private var detectedSources: Set<String> = []
+    private var candidateSources: [VideoSource] = []
     private var isVideoFound = false
     private var currentRule: AnimeRule?
+    private var currentPageURL = ""
+
+    static func requestHeaders(for url: URL, rule: AnimeRule, pageURL: String) -> [String: String] {
+        var request = URLRequest(url: url)
+        for (key, value) in rule.headers ?? [:] {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        if let userAgent = rule.userAgent {
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        }
+        if request.value(forHTTPHeaderField: "Referer") == nil {
+            request.setValue(rule.referer ?? pageURL, forHTTPHeaderField: "Referer")
+        }
+        let cookies = HTTPCookieStorage.shared.cookies(for: url) ?? []
+        if !cookies.isEmpty, request.value(forHTTPHeaderField: "Cookie") == nil {
+            request.setValue(HTTPCookie.requestHeaderFields(with: cookies)["Cookie"], forHTTPHeaderField: "Cookie")
+        }
+        return request.allHTTPHeaderFields ?? [:]
+    }
     
     // 使用非持久化数据存储，避免多个 WebView 实例共享 SQLite 连接导致 "API call with unopened database connection" 错误
     // Cookie 同步通过 WebViewCookieSync 在验证码完成后单独处理
     private let dataStore = WKWebsiteDataStore.nonPersistent()
     
-    private override init() {
+    override init() {
         super.init()
     }
     
@@ -50,13 +70,17 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         timeout: TimeInterval = 30.0
     ) async -> VideoExtractionResult {
         // 取消之前的解析
-        await cancelAndCleanup()
+        cancelAndCleanup()
+        self.currentRule = rule
+        self.currentPageURL = episodeURL
+        guard !Task.isCancelled else { return .error("已取消") }
         
         // MARK: - 快速路径：检测视频文件直链
         // 某些源返回的 episodeURL 本身就是 .mp4/.m3u8 等视频文件直链，
         // 无需 WebView 解析（WebView 加载非 HTML 内容时 JS 脚本可能无法正常执行）
-        if let directSource = detectDirectVideoURL(episodeURL) {
+        if var directSource = detectDirectVideoURL(episodeURL), let url = URL(string: directSource.url) {
             addLog("🚀 检测到视频直链，跳过 WebView 解析")
+            directSource.httpHeaders = Self.requestHeaders(for: url, rule: rule, pageURL: rule.baseURL)
             return .success([directSource])
         }
         
@@ -68,14 +92,17 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         progressMessage = LocalizationService.shared.t("正在初始化解析器...")
         logMessages.removeAll()
         detectedSources.removeAll()
+        candidateSources.removeAll()
         isVideoFound = false
         
-        return await withCheckedContinuation { continuation in
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
             self.continuation = continuation
             
             // 设置超时
             self.timeoutTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                do { try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000)) }
+                catch { return }
                 await self?.handleTimeout(resolveId: currentResolveId)
             }
             
@@ -90,47 +117,30 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
             addLog("开始解析: \(episodeURL)")
             
             // 同步规则相关的 Cookie（如果有）
-            syncRuleCookiesToWebView(rule: rule, url: url)
-            
-            // 加载 URL
-            var request = URLRequest(url: url, timeoutInterval: timeout)
-            
-            // 添加规则中的 headers
-            if let headers = rule.headers {
-                for (key, value) in headers {
-                    request.setValue(value, forHTTPHeaderField: key)
-                }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.syncRuleCookiesToWebView(rule: rule, url: url)
+                guard self.resolveId == currentResolveId, self.continuation != nil else { return }
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
+                request.allHTTPHeaderFields = Self.requestHeaders(for: url, rule: rule, pageURL: rule.baseURL)
+                self.webView?.load(request)
             }
-            
-            // 添加 User-Agent
-            if let userAgent = rule.userAgent {
-                request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             }
-            
-            // 添加 Referer
-            let referer = rule.referer ?? rule.baseURL
-            request.setValue(referer, forHTTPHeaderField: "Referer")
-            
-            // 添加 Cookie
-            let cookieString = HTTPCookieStorage.shared.cookies(for: url)?.map { "\($0.name)=\($0.value)" }.joined(separator: "; ") ?? ""
-            if !cookieString.isEmpty {
-                request.setValue(cookieString, forHTTPHeaderField: "Cookie")
-                addLog("使用 Cookie: \(cookieString.prefix(50))...")
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, self.resolveId == currentResolveId else { return }
+                self.cancelAndCleanup()
             }
-            
-            self.webView?.load(request)
         }
     }
     
     /// 取消当前解析（真正停止 WebView）
     func cancel() {
-        Task { @MainActor in
-            await cancelAndCleanup()
-        }
+        cancelAndCleanup()
     }
     
-    /// 清理并取消所有操作
-    private func cancelAndCleanup() async {
+    /// MainActor 同步撤销，避免延迟执行的取消误伤下一次解析。
+    private func cancelAndCleanup() {
         resolveId += 1
         let cancelledResolveId = resolveId
         
@@ -142,6 +152,7 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         
         // 真正停止 WebView 加载
         if let webView = webView {
+            webView.navigationDelegate = nil
             webView.stopLoading()
             // 移除所有脚本处理器以避免回调
             let userContentController = webView.configuration.userContentController
@@ -153,6 +164,7 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         // 清理状态
         webView = nil
         detectedSources.removeAll()
+        candidateSources.removeAll()
         isVideoFound = false
         currentRule = nil
         
@@ -208,12 +220,12 @@ private extension AnimeVideoExtractor {
     }
     
     /// 同步规则相关的 Cookie 到 WebView
-    func syncRuleCookiesToWebView(rule: AnimeRule, url: URL) {
+    func syncRuleCookiesToWebView(rule: AnimeRule, url: URL) async {
         let cookies = HTTPCookieStorage.shared.cookies(for: url) ?? []
         let cookieStore = dataStore.httpCookieStore
         
         for cookie in cookies {
-            cookieStore.setCookie(cookie)
+            await cookieStore.setCookie(cookie)
         }
         
         if !cookies.isEmpty {
@@ -269,13 +281,13 @@ private extension AnimeVideoExtractor {
         ]
         """
         
+        let requestID = resolveId
         WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: "AdBlockingRules_\(resolveId)",
+            forIdentifier: "AnimeVideoAdBlockingRules",
             encodedContentRuleList: blockRules
         ) { [weak self] ruleList, error in
-            if let ruleList = ruleList {
-                self?.webView?.configuration.userContentController.add(ruleList)
-            }
+            guard let self, self.resolveId == requestID, let ruleList else { return }
+            self.webView?.configuration.userContentController.add(ruleList)
         }
     }
 }
@@ -733,6 +745,8 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
         didReceive message: WKScriptMessage
     ) {
         Task { @MainActor in
+            guard let sourceWebView = message.webView, sourceWebView === self.webView,
+                  self.continuation != nil else { return }
             switch message.name {
             case "LogBridge":
                 if let log = message.body as? String {
@@ -789,7 +803,11 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
                                lowercased.contains("x-oss-expires=") ||    // 阿里 OSS 签名
                                (lowercased.contains("sign=") && (lowercased.contains("cdn") || lowercased.contains("object")))
         
-        guard isM3U8 || isMP4 || isTS || isFLV || isWebM || isMKV || isMPD || isHLS || lowercased.contains("video") || isCDNDirectLink else {
+        // TS 是 HLS 子分片；含 video 的 HTML/API 也不能作为完整影片播放。
+        guard let candidateURL = URL(string: urlString),
+              ["http", "https"].contains(candidateURL.scheme?.lowercased() ?? ""),
+              !isTS,
+              isM3U8 || isMP4 || isFLV || isWebM || isMKV || isMPD || isHLS || isCDNDirectLink else {
             addLog("⚠️ URL 格式不符合视频特征，继续等待")
             return
         }
@@ -827,15 +845,19 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
         }
         
         // 创建 VideoSource
-        let source = VideoSource(
+        var source = VideoSource(
             quality: quality,
             url: urlString,
             type: type,
             label: nil
         )
-        
-        // 取消之前的延迟任务
-        videoFoundTask?.cancel()
+        if let rule = currentRule {
+            source.httpHeaders = Self.requestHeaders(for: candidateURL, rule: rule, pageURL: currentPageURL)
+        }
+        candidateSources.append(source)
+
+        // 从首个完整候选起固定收集窗口，后来的分片不能无限重置截止时间。
+        guard videoFoundTask == nil else { return }
         
         // 标记视频已找到
         isVideoFound = true
@@ -851,7 +873,19 @@ extension AnimeVideoExtractor: WKScriptMessageHandler {
                   self.resolveId == currentResolveId,
                   self.isVideoFound else { return }
             
-            let sources = [source]
+            if let cookieStore = self.webView?.configuration.websiteDataStore.httpCookieStore {
+                let cookies = await cookieStore.allCookies()
+                guard self.resolveId == currentResolveId, self.continuation != nil else { return }
+                cookies.forEach { HTTPCookieStorage.shared.setCookie($0) }
+            }
+            var sources = self.rankedSources
+            if let rule = self.currentRule {
+                for index in sources.indices {
+                    if let url = URL(string: sources[index].url) {
+                        sources[index].httpHeaders = Self.requestHeaders(for: url, rule: rule, pageURL: self.currentPageURL)
+                    }
+                }
+            }
             self.finish(with: .success(sources), resolveId: currentResolveId)
         }
     }
@@ -865,6 +899,7 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
         didStartProvisionalNavigation navigation: WKNavigation!
     ) {
         Task { @MainActor in
+            guard webView === self.webView, self.continuation != nil else { return }
             self.progressMessage = LocalizationService.shared.t("正在加载页面...")
             self.addLog("页面开始加载")
         }
@@ -875,6 +910,7 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
         didFinish navigation: WKNavigation!
     ) {
         Task { @MainActor in
+            guard webView === self.webView, self.continuation != nil else { return }
             self.progressMessage = LocalizationService.shared.t("页面加载完成，扫描视频...")
             self.addLog("✅ 页面加载完成")
             
@@ -897,6 +933,8 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
         withError error: Error
     ) {
         Task { @MainActor in
+            guard webView === self.webView, self.continuation != nil else { return }
+            guard (error as NSError).code != NSURLErrorCancelled else { return }
             self.addLog("❌ 页面加载失败: \(error.localizedDescription)")
             if !self.isVideoFound {
                 self.finish(
@@ -913,6 +951,8 @@ extension AnimeVideoExtractor: WKNavigationDelegate {
         withError error: Error
     ) {
         Task { @MainActor in
+            guard webView === self.webView, self.continuation != nil else { return }
+            guard (error as NSError).code != NSURLErrorCancelled else { return }
             // 检查是否是验证码相关的错误
             let errorDescription = error.localizedDescription.lowercased()
             if errorDescription.contains("captcha") ||
@@ -1066,11 +1106,20 @@ private extension AnimeVideoExtractor {
         return type.uppercased()
     }
     
+    var rankedSources: [VideoSource] {
+        candidateSources.sorted { lhs, rhs in
+            func rank(_ source: VideoSource) -> Int {
+                switch source.type { case "m3u8": return 0; case "mp4": return 1; default: return 2 }
+            }
+            return rank(lhs) < rank(rhs)
+        }
+    }
+
     func handleTimeout(resolveId: Int) async {
         guard resolveId == self.resolveId else { return }
         
-        if isVideoFound {
-            // 已找到视频，忽略超时
+        if !candidateSources.isEmpty {
+            finish(with: .success(rankedSources), resolveId: resolveId)
             return
         }
         
@@ -1121,6 +1170,7 @@ private extension AnimeVideoExtractor {
     /// 安全地清理 WebView 资源
     private func cleanupWebView() {
         // 停止加载
+        webView?.navigationDelegate = nil
         webView?.stopLoading()
         
         // 移除所有脚本处理器

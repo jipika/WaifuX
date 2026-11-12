@@ -7,7 +7,9 @@ class LocalizationService: ObservableObject {
 
     @Published var currentLanguage: Language {
         didSet {
-            WaifuXPreferences.shared.set(currentLanguage.rawValue, forKey: "app_language")
+            if !isReloadingPreferences {
+                WaifuXPreferences.shared.set(currentLanguage.rawValue, forKey: "app_language")
+            }
             NotificationCenter.default.post(name: .appLanguageDidChange, object: nil)
         }
     }
@@ -28,6 +30,8 @@ class LocalizationService: ObservableObject {
         }
     }
 
+    private var isReloadingPreferences = false
+
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
         // 使用系统检测的默认语言作为占位符
@@ -43,6 +47,13 @@ class LocalizationService: ObservableObject {
             // 重新检测系统语言（init 时用的就是默认值）
             self.currentLanguage = Self.detectSystemLanguage()
         }
+    }
+
+    /// 云端导入后的只读重载：仍通知界面换语言，但不制造反向偏好写入。
+    func reloadFromPreferences() {
+        isReloadingPreferences = true
+        defer { isReloadingPreferences = false }
+        restoreSavedSettings()
     }
 
     private static func detectSystemLanguage() -> Language {
@@ -3108,6 +3119,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "appearanceSettingsDesc": "Customize visual effects including grain texture overlay.",
         "compactMode": "Compact Mode",
         "compactModeDesc": "Remove background ambiance effects and use a simple black background.",
+        "detailLiquidAnimation": "Liquid Detail Animation",
+        "detailLiquidAnimationDesc": "Reveal details with a liquid glass effect. Turn off to use the classic page transition.",
         "hideNotch": "Hide Notch",
         "hideNotchDesc": "Cover the menu bar area with pure black to visually hide the notch on MacBooks.",
         "videoWallpaper": "VIDEO WALLPAPER",
@@ -4790,6 +4803,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "appearanceSettingsDesc": "自定义视觉效果，包括颗粒材质覆盖层。",
         "compactMode": "简洁模式",
         "compactModeDesc": "去除背景氛围效果，使用纯黑背景。",
+        "detailLiquidAnimation": "详情液滴动画",
+        "detailLiquidAnimationDesc": "以液态玻璃效果展开详情，关闭后使用原来的页面过渡动画。",
         "hideNotch": "隐藏刘海",
         "hideNotchDesc": "用纯黑色覆盖菜单栏区域，在视觉上隐藏 MacBook 刘海。",
         "videoWallpaper": "动态壁纸",
@@ -6474,6 +6489,8 @@ private let translations: [LocalizationService.Language: [String: String]] = [
         "appearanceSettingsDesc": "映画風の颗粒テクスチャオーバーレイなど、視覚効果をカスタマイズします。",
         "compactMode": "コンパクトモード",
         "compactModeDesc": "背景の雰囲気エフェクトを削除し、シンプルな黒背景を使用します。",
+        "detailLiquidAnimation": "詳細のリキッドアニメーション",
+        "detailLiquidAnimationDesc": "液体ガラスの効果で詳細を表示します。オフにすると従来のページ切り替えアニメーションを使用します。",
         "hideNotch": "ノッチを隠す",
         "hideNotchDesc": "メニューバー領域を純黒で覆い、MacBookのノッチを視覚的に隠します。",
         "videoWallpaper": "動的壁紙",

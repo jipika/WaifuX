@@ -153,6 +153,10 @@ final class BackgroundAgentRuntime {
             // 无保存凭据时不会启动子进程，也不会产生登录网络请求。
             SteamServiceManager.shared.restoreSavedSessionIfAvailable()
             LocalizationService.shared.restoreSavedSettings()
+            CloudSyncConfiguration.shared.reloadFromPreferences()
+            CloudSyncService.shared.restoreSavedState()
+            ArcBackgroundSettings.shared.reloadFromPreferences()
+            LiquidGlassClockSettings.shared.reloadFromPreferences()
             WallpaperLibraryService.shared.restoreSavedData()
             MediaLibraryService.shared.restoreSavedData()
             LibraryFolderStore.shared.restoreSavedData()
@@ -247,6 +251,36 @@ final class BackgroundAgentRuntime {
             .receive(on: DispatchQueue.main).sink { [weak self] _ in self?.releaseIdleDownloadExecutors() }.store(in: &subscriptions)
         NotificationCenter.default.publisher(for: .sceneOfflineBakeProgressDidUpdate)
             .receive(on: DispatchQueue.main).sink { [weak self] _ in self?.schedulePublish() }.store(in: &subscriptions)
+        // 失败不会发送 progress=1；必须发布删除条目后的终态，不能等下一次无关状态变化。
+        NotificationCenter.default.publisher(for: .sceneOfflineBakeDidComplete)
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in self?.schedulePublish() }.store(in: &subscriptions)
+        NotificationCenter.default.publisher(for: .cloudSyncSettingsImported)
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, !self.stopping, !self.upgrading else { return }
+                    WaifuXPreferences.shared.synchronize()
+                    await self.refreshSettings()
+                    guard !Task.isCancelled, !self.stopping, !self.upgrading else { return }
+                    LocalizationService.shared.reloadFromPreferences()
+                    CloudSyncService.shared.settingsDidImport()
+                    self.schedulePublish()
+                }
+            }.store(in: &subscriptions)
+        // 抽帧只更新磁盘封面，不改下载记录；单独转发事件，不能等库快照变化来刷新 UI。
+        NotificationCenter.default.publisher(for: .sceneOfflineBakeThumbnailDidUpdate)
+            .receive(on: DispatchQueue.main).sink { [weak self] notification in
+                guard let self,
+                      notification.userInfo?["lookupOnly"] as? Bool != true,
+                      let itemID = notification.object as? String else { return }
+                var update: [String: Any] = ["itemID": itemID]
+                if let url = notification.userInfo?["thumbnailURL"] as? URL, url.isFileURL {
+                    update["thumbnailURL"] = url.absoluteString
+                }
+                guard let data = try? BackgroundPropertyList.encode(["sceneThumbnailUpdate": update]) else { return }
+                for connection in self.observers.values {
+                    (connection.remoteObjectProxy as? BackgroundAgentObserver)?.snapshotChanged(data as NSData)
+                }
+            }.store(in: &subscriptions)
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification, object: WaifuXPreferences.shared)
             .receive(on: DispatchQueue.main).sink { [weak self] _ in self?.schedulePublish() }.store(in: &subscriptions)
     }

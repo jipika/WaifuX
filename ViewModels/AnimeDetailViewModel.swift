@@ -56,6 +56,7 @@ struct CaptchaVerificationSession: Identifiable {
     var replaySourceIndex: Int?
     /// 若设置，验证完成后重新获取该剧集的剧集列表
     var selectedSearchItem: SourceSearchItem?
+    var isDownload = false
 }
 
 // MARK: - 动漫详情页 ViewModel
@@ -76,6 +77,18 @@ class AnimeDetailViewModel: ObservableObject {
 
     // MARK: - 播放器状态
     @Published var currentPlayURL: URL?
+    @Published private(set) var currentHTTPHeaders: [String: String] = [:]
+    @Published private(set) var playbackID = UUID()
+    @Published private(set) var currentSourceID: String?
+    @Published private(set) var resolvingDownloads = Set<String>()
+    @Published private(set) var downloadErrors: [String: String] = [:]
+    private let playbackExtractor = AnimeVideoExtractor()
+    private var downloadExtractors: [String: AnimeVideoExtractor] = [:]
+    private var playbackRequestID = UUID()
+    private var candidateIndex = 0
+    private var automaticRecoveryCount = 0
+    private var recoveryStartTime: TimeInterval?
+    private var hasPlaybackPosition = false
     @Published var currentStartTime: TimeInterval = 0
     @Published var isPlaying: Bool = false
     @Published var currentEpisode: AnimeDetail.AnimeEpisodeItem?
@@ -674,13 +687,14 @@ class AnimeDetailViewModel: ObservableObject {
         )
     }
 
-    func presentCaptchaVerificationForPlayback(rule: AnimeRule, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int) {
+    func presentCaptchaVerificationForPlayback(rule: AnimeRule, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int, forDownload: Bool = false) {
         guard let url = URL(string: episode.url) else { return }
         captchaVerificationSession = CaptchaVerificationSession(
             rule: rule,
             startURL: url,
             replayEpisode: episode,
-            replaySourceIndex: sourceIndex
+            replaySourceIndex: sourceIndex,
+            isDownload: forDownload
         )
     }
 
@@ -712,7 +726,11 @@ class AnimeDetailViewModel: ObservableObject {
         if let ep = replayEp, let idx = replayIdx {
             // 播放阶段的验证码验证完成，重新尝试播放
             print("[AnimeDetailViewModel] 重新尝试播放...")
-            await playEpisode(ep, from: idx)
+            if session.isDownload {
+                await downloadEpisode(ep, from: idx)
+            } else {
+                await playEpisode(ep, from: idx)
+            }
         } else if let item = selectedItem {
             // 剧集列表阶段的验证码验证完成，重新获取剧集列表
             // 传入 clearCookies: true 确保使用新验证的 Cookie
@@ -727,54 +745,71 @@ class AnimeDetailViewModel: ObservableObject {
 
     // MARK: - 播放剧集
 
-    func playEpisode(_ episode: AnimeDetail.AnimeEpisodeItem, from sourceIndex: Int) async {
-        guard sourceIndex < sourceResults.count else { return }
-        
-        // 防止重复调用
-        guard !isLoadingVideo else {
-            print("[AnimeDetailViewModel] 视频正在加载中，忽略重复点击")
-            return
-        }
-
+    func playEpisode(_ episode: AnimeDetail.AnimeEpisodeItem, from sourceIndex: Int, isRecovery: Bool = false) async {
+        guard sourceResults.indices.contains(sourceIndex) else { return }
         let rule = sourceResults[sourceIndex].rule
-        
-        // 先停止之前的播放（避免 stopPlayback 把 currentEpisode 设为 nil）
+        let resumeTime = isRecovery ? (recoveryStartTime ?? currentTime) : nil
         stopPlayback()
-        
+        if !isRecovery { automaticRecoveryCount = 0 }
+        recoveryStartTime = resumeTime
+        let requestID = playbackRequestID
         currentEpisode = episode
+        currentSourceID = rule.id
+        selectedSourceIndex = sourceIndex
         isLoadingVideo = true
         videoError = nil
+        defer { if playbackRequestID == requestID { isLoadingVideo = false } }
 
-        defer { isLoadingVideo = false }
-
-        // 使用视频提取器（参考 Kazumi 的 WebView 拦截方式）
-        let result = await AnimeVideoExtractor.shared.extractVideoSources(
-            from: episode.url,
-            rule: rule
-        )
-
+        let result = await playbackExtractor.extractVideoSources(from: episode.url, rule: rule)
+        guard playbackRequestID == requestID, !Task.isCancelled else { return }
         switch result {
         case .success(let sources):
-            self.videoSources = sources
-
-            // 尝试播放第一个可用的视频源
-            if let firstSource = sources.first,
-               let url = URL(string: firstSource.url) {
-                self.setupPlayer(with: url, episode: episode, sourceIndex: sourceIndex)
+            videoSources = sources
+            candidateIndex = 0
+            if let first = sources.first, let url = URL(string: first.url) {
+                currentHTTPHeaders = first.httpHeaders ?? AnimeVideoExtractor.requestHeaders(for: url, rule: rule, pageURL: episode.url)
+                setupPlayer(with: url, episode: episode, rule: rule)
             } else {
                 videoError = t("未找到可播放的视频")
             }
-
         case .error(let error):
             videoError = error
-
         case .captcha:
-            // 触发验证码验证弹窗，验证完成后会自动重试播放
             presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex)
-
         case .timeout:
             videoError = t("视频解析超时，请重试或切换其他视频源")
         }
+    }
+
+    /// 先换候选，再最多刷新一次解析；预算在新选集或手动重试时重置。
+    func retryPlayback(automatically: Bool = false) async {
+        if currentPlayURL?.isFileURL == true {
+            guard !automatically else { return }
+            currentStartTime = hasPlaybackPosition ? currentTime : currentStartTime
+            videoError = nil
+            isBuffering = true
+            playbackID = UUID()
+            return
+        }
+        guard let episode = currentEpisode, let sourceID = currentSourceID,
+              let index = sourceResults.firstIndex(where: { $0.id == sourceID }) else { return }
+        recoveryStartTime = hasPlaybackPosition ? currentTime : (recoveryStartTime ?? currentStartTime)
+        if automatically, candidateIndex + 1 < videoSources.count {
+            candidateIndex += 1
+            let source = videoSources[candidateIndex]
+            if let url = URL(string: source.url) {
+                currentHTTPHeaders = source.httpHeaders ?? [:]
+                setupPlayer(with: url, episode: episode, rule: sourceResults[index].rule)
+                return
+            }
+        }
+        if automatically {
+            guard automaticRecoveryCount < 1 else { return }
+            automaticRecoveryCount += 1
+        } else {
+            automaticRecoveryCount = 0
+        }
+        await playEpisode(episode, from: index, isRecovery: true)
     }
 
     // MARK: - 本地缓存（下载）
@@ -804,6 +839,9 @@ class AnimeDetailViewModel: ObservableObject {
             thumbnailURL: nil
         )
         currentEpisode = episode
+        currentSourceID = record.sourceId
+        currentHTTPHeaders = [:]
+        playbackID = UUID()
         isLoadingVideo = false
         videoError = nil
         videoSources = [VideoSource(quality: "Local", url: record.localFilePath, type: "mp4", label: record.sourceName)]
@@ -835,45 +873,51 @@ class AnimeDetailViewModel: ObservableObject {
         loadDanmaku(for: episode)
     }
 
-    /// 解析某集的视频直链并发起下载（选集列表下载按钮入口）
+    /// 下载独立解析；当前正在播放的同一集直接复用已解析的源与请求头。
     func downloadEpisode(_ episode: AnimeDetail.AnimeEpisodeItem, from sourceIndex: Int) async {
-        guard sourceIndex < sourceResults.count else { return }
+        guard sourceResults.indices.contains(sourceIndex) else { return }
         let rule = sourceResults[sourceIndex].rule
-
-        // 已缓存则不重复下载
-        guard !AnimeDownloadStore.shared.isDownloaded(episodeId: episode.id, sourceId: rule.id) else { return }
-
-        // 已在队列/下载中则忽略
-        guard !AnimeDownloadEngine.shared.isDownloading(episodeId: episode.id, sourceId: rule.id) else { return }
-
-        // 解析直链（复用播放链路的提取器）
-        let result = await AnimeVideoExtractor.shared.extractVideoSources(
-            from: episode.url,
-            rule: rule
-        )
-
+        let recordID = AnimeDownloadRecord.recordID(ruleId: rule.id, episodeId: episode.id)
+        guard !AnimeDownloadStore.shared.isDownloaded(episodeId: episode.id, sourceId: rule.id),
+              !AnimeDownloadEngine.shared.isDownloading(episodeId: episode.id, sourceId: rule.id),
+              !resolvingDownloads.contains(recordID) else { return }
+        resolvingDownloads.insert(recordID)
+        downloadErrors.removeValue(forKey: recordID)
+        defer {
+            resolvingDownloads.remove(recordID)
+            downloadExtractors.removeValue(forKey: recordID)
+        }
+        let result: VideoExtractionResult
+        if currentEpisode?.id == episode.id, currentSourceID == rule.id,
+           let url = currentPlayURL, !url.isFileURL {
+            var source = videoSources.indices.contains(candidateIndex) ? videoSources[candidateIndex]
+                : VideoSource(quality: "Auto", url: url.absoluteString, type: AnimeDownloadEngine.isHLSURL(url) ? "m3u8" : "mp4", label: nil)
+            source.httpHeaders = currentHTTPHeaders
+            result = .success([source])
+        } else {
+            let extractor = AnimeVideoExtractor()
+            downloadExtractors[recordID] = extractor
+            result = await extractor.extractVideoSources(from: episode.url, rule: rule)
+        }
+        guard !Task.isCancelled, resolvingDownloads.contains(recordID) else { return }
         switch result {
         case .success(let sources):
             guard let first = sources.first, let url = URL(string: first.url) else {
-                videoError = t("无法解析视频地址，下载失败")
+                downloadErrors[recordID] = t("无法解析视频地址，下载失败")
                 return
             }
-            // HLS 判定优先取 extractor 给的 type，URL 形态只作兜底
-            let isHLS = first.type.lowercased().contains("m3u8")
-                || AnimeDownloadEngine.isHLSURL(url)
             AnimeDownloadEngine.shared.enqueue(
-                anime: anime,
-                source: rule,
-                episode: episode,
-                videoURL: url,
-                isHLS: isHLS
+                anime: anime, source: rule, episode: episode, videoURL: url,
+                isHLS: first.type.lowercased().contains("m3u8") || AnimeDownloadEngine.isHLSURL(url),
+                httpHeaders: first.httpHeaders ?? AnimeVideoExtractor.requestHeaders(for: url, rule: rule, pageURL: episode.url)
             )
         case .error(let message):
-            videoError = String(format: t("下载解析失败：%@"), String(describing: message))
+            downloadErrors[recordID] = String(format: t("下载解析失败：%@"), String(describing: message))
         case .captcha:
-            presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex)
+            downloadErrors[recordID] = "请完成验证后重试下载"
+            presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex, forDownload: true)
         case .timeout:
-            videoError = t("下载解析超时，请重试")
+            downloadErrors[recordID] = t("下载解析超时，请重试")
         }
     }
 
@@ -898,8 +942,7 @@ class AnimeDetailViewModel: ObservableObject {
     }
 
     /// 使用原生播放器设置播放器
-    private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, sourceIndex: Int) {
-        let rule = sourceResults[sourceIndex].rule
+    private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, rule: AnimeRule) {
         
         // 使用 cleanupPlayerOnly 而不是 stopPlayback，避免 currentEpisode 被清空
         cleanupPlayerOnly()
@@ -915,8 +958,11 @@ class AnimeDetailViewModel: ObservableObject {
             print("[AnimeDetailViewModel] 将从 \(savedProgress.formattedProgress) 恢复播放")
         }
         
-        self.currentStartTime = startTime
+        hasPlaybackPosition = false
+        self.currentStartTime = recoveryStartTime ?? startTime
+        recoveryStartTime = nil
         self.currentPlayURL = url
+        playbackID = UUID()
         self.isPlaying = true
         self.isBuffering = true
         
@@ -951,12 +997,14 @@ class AnimeDetailViewModel: ObservableObject {
         case .paused:
             print("[AnimeDetailViewModel] ⏸️ 播放器状态: paused")
             isPlaying = false
+            isBuffering = false
             SleepPreventer.shared.stopPreventingSleep()
         case .failed(let msg):
             print("[AnimeDetailViewModel] ❌ 播放器状态: error - \(msg)")
-            videoError = t("视频播放失败，请尝试切换其他视频源")
+            videoError = "视频播放失败：\(msg)"
             isBuffering = false
             isPlaying = false
+            isBuffering = false
             SleepPreventer.shared.stopPreventingSleep()
         case .idle, .loading:
             break
@@ -967,11 +1015,14 @@ class AnimeDetailViewModel: ObservableObject {
             SleepPreventer.shared.startPreventingSleep()
         case .finished:
             isPlaying = false
+            isBuffering = false
             SleepPreventer.shared.stopPreventingSleep()
         }
     }
 
     func handlePlayerProgress(currentTime: TimeInterval, totalTime: TimeInterval) {
+        guard currentTime.isFinite, totalTime.isFinite else { return }
+        if currentTime > 0 || (currentStartTime == 0 && totalTime > 0) { hasPlaybackPosition = true }
         self.currentTime = currentTime
         self.totalDuration = totalTime
         let progress = totalTime > 0 ? currentTime / totalTime : 0
@@ -1014,6 +1065,11 @@ class AnimeDetailViewModel: ObservableObject {
 
     /// 停止播放并保存进度
     func stopPlayback() {
+        playbackRequestID = UUID()
+        playbackExtractor.cancel()
+        isLoadingVideo = false
+        currentSourceID = nil
+        hasPlaybackPosition = false
         // 保存最终进度到 AnimeProgressStore
         if let currentEpisode = currentEpisode {
             AnimeProgressStore.shared.updateProgress(
@@ -1037,6 +1093,9 @@ class AnimeDetailViewModel: ObservableObject {
         // 清理所有播放器相关的 Combine 订阅
         cancellables.removeAll()
         currentEpisode = nil
+        currentTime = 0
+        totalDuration = 0
+        currentProgress = 0
 
         // 取消弹幕加载
         danmakuTask?.cancel()
@@ -1047,7 +1106,9 @@ class AnimeDetailViewModel: ObservableObject {
     /// 前台窗口释放时使用：保留收藏/偏好等持久状态，清掉播放页的大对象和临时数据。
     func releaseForegroundMemory() {
         stopPlayback()
-        AnimeVideoExtractor.shared.cancel()
+        downloadExtractors.values.forEach { $0.cancel() }
+        downloadExtractors.removeAll()
+        resolvingDownloads.removeAll()
 
         availableRules.removeAll(keepingCapacity: false)
         sourceResults.removeAll(keepingCapacity: false)

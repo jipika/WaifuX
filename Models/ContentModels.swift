@@ -142,6 +142,8 @@ struct VideoSource: Codable {
     let url: String
     let type: String
     let label: String?
+    /// 播放与下载共用解析时的请求上下文，避免防盗链校验结果不一致。
+    var httpHeaders: [String: String]? = nil
 }
 
 // MARK: - 观看进度

@@ -130,6 +130,16 @@ class WallpaperSchedulerService: ObservableObject {
     private var pendingUnlockSwitch = false
     private var shouldStartAfterDisplayRestore = false
     private var unlockRotationTask: Task<Void, Never>?
+    /// 观测到的「任一屏被自动暂停记账压住」状态，用于 tick 跳过与日志去重。
+    private var rotationSuppressedByAutoPause = false
+    /// 轮换跟随自动暂停：前台 / 非活动屏 / 全屏覆盖 / 窗口覆盖比例任一原因
+    /// 压住的按屏集合。电池全局暂停走 `isBatteryRotationSuspended` 单独通道。
+    private var autoPausedScreenIDsForRotation: Set<String> {
+        DynamicWallpaperAutoPauseManager.shared.autoPausedScreenIDsForRotation
+    }
+    /// 自动暂停挂起期间的轻轮询间隔：定时器以此节奏空转检查暂停是否解除，
+    /// 解除后立即恢复正常轮换节奏。
+    private let autoPausePollDelay: TimeInterval = 5
     /// 每个进程只记录一次「按精确指纹认领归属」的日志，避免设置页读路径刷屏。
     private var loggedExactFingerprintOwners: Set<String> = []
     /// 排布超过采样上限后先放行调度，把配置迁移延后到一次稳定复核。
@@ -216,6 +226,15 @@ class WallpaperSchedulerService: ObservableObject {
         // issue #119：电池供电 + 用户开启「电池时暂停自动轮换」时，轮换必须停，
         // 否则到点重新加载视频壁纸会把刚暂停的渲染重新激活。
         setupBatteryMonitoring()
+
+        // 轮换跟随自动暂停：任一屏的自动暂停记账翻转时取消/重排下一次定时轮换，
+        // 与电池挂起（`isBatteryRotationSuspended`）同一条「暂停即停表」语义。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAutoPauseTrackingDidChange),
+            name: DynamicWallpaperAutoPauseManager.autoPauseTrackingDidChangeNotification,
+            object: nil
+        )
     }
 
     // MARK: - 电池轮换暂停
@@ -289,6 +308,34 @@ class WallpaperSchedulerService: ObservableObject {
         reevaluateBatterySuspension()
     }
 
+    // MARK: - 轮换跟随自动暂停
+
+    /// 指定屏当前是否被自动暂停原因（前台 / 非活动屏 / 全屏覆盖 / 窗口覆盖）压住。
+    /// 全局同步模式只有一个逻辑 state key，任一屏被压住都视为整组被压住。
+    private func isRotationSuspendedByAutoPause() -> Bool {
+        guard BackgroundRuntimeRole.isHelper else { return false }
+        return !autoPausedScreenIDsForRotation.isEmpty
+    }
+
+    /// 自动暂停记账翻转回调：暂停出现 → 轻轮询尽快感知解除时机；原因全部
+    /// 解除 → 立即重排定时器，让因暂停跳过的轮换尽快补上
+    /// （lastChangeTimes 未动，仍是原定时刻）。
+    @objc private func handleAutoPauseTrackingDidChange() {
+        guard isRunning, !isScreenLocked, canScheduleForCurrentScreens,
+              !isBatteryRotationSuspended else { return }
+        let suppressed = isRotationSuspendedByAutoPause()
+        if suppressed != rotationSuppressedByAutoPause {
+            print("\(logTag) Auto-pause tracking flipped (\(rotationSuppressedByAutoPause)→\(suppressed)); \(suppressed ? "deferring" : "rescheduling") rotation")
+        }
+        rotationSuppressedByAutoPause = suppressed
+        if suppressed {
+            // 挂起期间低频轮询，兼顾「解除后尽快恢复轮换」与省电。
+            scheduleNextChange(earliestDelay: autoPausePollDelay)
+        } else {
+            scheduleNextChange()
+        }
+    }
+
     @objc private func handleVideoPlaybackEnded(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let screenID = userInfo["screenID"] as? String else {
@@ -296,12 +343,24 @@ class WallpaperSchedulerService: ObservableObject {
         }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // 轮换跟随自动暂停：壁纸被自动暂停期间到达的播完事件不切换
+            // （换片会重新激活渲染）。恢复播放后视频从头再走一遍片尾，
+            // 会再次触发播完事件，轮换不丢。
+            if self.autoPausedScreenIDsForRotation.contains(screenID) {
+                print("\(self.logTag) Skipping on-end switch for screen \(screenID): wallpaper auto-paused")
+                return
+            }
             if self.displayModeTransitionTask != nil,
                !self.config.isGlobalDisplaySyncEnabled {
                 print("\(self.logTag) Ignoring playback-end event during global-to-independent transition")
                 return
             }
             if self.config.isGlobalDisplaySyncEnabled {
+                // 全局同步：任一屏被自动暂停压住时整组不换（与定时路径同口径）。
+                if !self.autoPausedScreenIDsForRotation.isEmpty {
+                    print("\(self.logTag) Skipping global on-end switch: some screens auto-paused")
+                    return
+                }
                 self.applyNextGlobalWallpaper(requiredMode: .onEnd)
             } else {
                 self.triggerNextWallpaper(for: screenID)
@@ -2534,6 +2593,13 @@ class WallpaperSchedulerService: ObservableObject {
     @discardableResult
     private func changeWallpaperIfNeeded() -> Bool {
         guard canScheduleForCurrentScreens, !isBatteryRotationSuspended else { return false }
+        // 轮换跟随自动暂停：壁纸被自动暂停期间到点不换（换片会重新激活渲染）。
+        // 挂起期间定时器轻轮询，暂停解除的 tick 会从这里恢复正常轮换。
+        let autoPauseSuppressed = isRotationSuspendedByAutoPause()
+        if autoPauseSuppressed != rotationSuppressedByAutoPause {
+            print("\(logTag) Auto-pause tracking now \(autoPauseSuppressed ? "suppressing" : "released for") rotation")
+            rotationSuppressedByAutoPause = autoPauseSuppressed
+        }
         if isScreenLocked {
             clearStuckScreenLockIfNeeded(source: "timer")
         }
@@ -2570,6 +2636,12 @@ class WallpaperSchedulerService: ObservableObject {
             // 用户手动关闭该屏壁纸期间不自动拉起；重新开启（有活跃壁纸）时自然解除抑制。
             guard !isSuppressedForScheduling(screen: screen, stateKey: screenID) else {
                 print("\(logTag) Skipping screen \(screenID): suppressed by manual stop")
+                continue
+            }
+            // 轮换跟随自动暂停：该屏壁纸正被自动暂停（全屏覆盖/前台/窗口覆盖/
+            // 非活动屏）时不换，换片会重新激活被暂停的渲染。lastChangeTimes
+            // 不动，暂停解除后按原时刻照常轮换。
+            if autoPauseSuppressed, autoPausedScreenIDsForRotation.contains(screenID) {
                 continue
             }
             guard let interval = timedIntervalSeconds(for: displayConfig) else {
@@ -2823,6 +2895,12 @@ class WallpaperSchedulerService: ObservableObject {
     /// - Returns: true if a global apply task was started or is already in flight.
     @discardableResult
     private func changeGlobalWallpaperIfNeeded() -> Bool {
+        // 轮换跟随自动暂停：任一屏被自动暂停压住时整组不换（全局同步共用一个
+        // 逻辑 state key，换片会同时重新激活所有屏的渲染）。
+        if isRotationSuspendedByAutoPause() {
+            print("\(logTag) Skipping global rotation: dynamic wallpaper auto-paused")
+            return false
+        }
         let global = config.globalDisplayConfig
         guard global.isEnabled, !global.isOnUnlockMode else { return false }
         guard let interval = timedIntervalSeconds(for: global) else { return false }

@@ -213,12 +213,10 @@ extension KonachanPost {
             small: normalizeURL(previewPath)
         )
 
-        let detailHost = rating.lowercased() == "e" ? "konachan.com" : "konachan.net"
-
         return Wallpaper(
             id: "konachan-\(id)",
             title: nil,
-            url: "https://\(detailHost)/post/show/\(id)",
+            url: "https://konachan.com/post/show/\(id)",
             shortUrl: nil,
             views: 0,
             favorites: score ?? 0,

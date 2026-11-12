@@ -102,9 +102,9 @@ struct SyncSettingsTab: View {
             }
 
             // MARK: 同步状态
-            if config.lastSyncedAt != nil || syncService.isSyncing || syncService.lastError != nil {
+            if syncService.lastSyncedAt != nil || syncService.isSyncing || syncService.lastError != nil {
                 MacSettingsSection(header: t("sync.progress")) {
-                    if let lastSyncedAt = config.lastSyncedAt {
+                    if let lastSyncedAt = syncService.lastSyncedAt {
                         MacSettingsRow(
                             title: t("sync.lastSync"),
                             subtitle: ""

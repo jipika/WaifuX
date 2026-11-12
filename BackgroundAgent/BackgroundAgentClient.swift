@@ -830,6 +830,20 @@ final class BackgroundAgentClient: ObservableObject {
             return
         }
         guard !isClosing else { return }
+        if let update = snapshot["sceneThumbnailUpdate"] as? [String: Any],
+           let itemID = update["itemID"] as? String {
+            var userInfo: [AnyHashable: Any] = [:]
+            if let path = update["thumbnailURL"] as? String,
+               let url = URL(string: path), url.isFileURL {
+                userInfo["thumbnailURL"] = url
+            }
+            NotificationCenter.default.post(
+                name: .sceneOfflineBakeThumbnailDidUpdate,
+                object: itemID,
+                userInfo: userInfo
+            )
+            return // 事件不是状态快照，不能覆盖 latestSnapshot 或重放所有状态观察者。
+        }
         if let revision = (snapshot["libraryRevision"] as? NSNumber)?.uint64Value, revision != libraryRevision {
             libraryRevision = revision
             if libraryFetchTask == nil {

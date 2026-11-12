@@ -544,7 +544,7 @@ struct WallpaperExploreContentView: View {
             onDismiss: { showWallpaperURLSheet = false },
             title: t("通过链接打开壁纸"),
             placeholder: t("粘贴壁纸链接..."),
-            supportedFormatsHint: t("支持格式：whvn.cc/{id}、wallhaven.cc/w/{id}、4kwallpapers.com/…/{name}-{id}.html、konachan.net/post/show/{id}、pixiv.net/artworks/{id}")
+            supportedFormatsHint: t("支持格式：whvn.cc/{id}、wallhaven.cc/w/{id}、4kwallpapers.com/…/{name}-{id}.html、konachan.com/post/show/{id}、pixiv.net/artworks/{id}")
         )
     }
 

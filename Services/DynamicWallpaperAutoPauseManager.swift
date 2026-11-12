@@ -20,6 +20,12 @@ enum WallpaperPlaybackTriggerPolicy: String {
 final class DynamicWallpaperAutoPauseManager {
     static let shared = DynamicWallpaperAutoPauseManager()
 
+    /// 由轮换调度器订阅：任一屏的自动暂停记账发生翻转（进入/离开）时发出，
+    /// 调度器据此取消/重排下一次定时轮换，避免到点把刚被自动暂停的壁纸重新激活。
+    static let autoPauseTrackingDidChangeNotification = Notification.Name(
+        "com.waifux.autopause.trackingDidChange"
+    )
+
     private var checkTimer: Timer?
     private var checkTimerCancellable: AnyCancellable?
     private var cancellables = Set<AnyCancellable>()
@@ -520,6 +526,7 @@ final class DynamicWallpaperAutoPauseManager {
         // 同理：壁纸切换后旧的 coverage 状态对新进程无意义，清掉等下一轮 checkAndApply 重建
         windowCoveragePausedScreenIDs.removeAll()
         windowCoverageCoveredScreenIDs.removeAll()
+        notifyRotationSchedulerOfTrackingChange()
 
         guard !pausedIDs.isEmpty else { return }
 
@@ -758,6 +765,7 @@ final class DynamicWallpaperAutoPauseManager {
         let screenIDsToResume = fullscreenAutoPausedScreenIDs.subtracting(newFullscreenIDs)
         if !screenIDsToResume.isEmpty {
             fullscreenAutoPausedScreenIDs.subtract(screenIDsToResume)
+            notifyRotationSchedulerOfTrackingChange()
             // 排除当前被前台暂停或窗口覆盖比例暂停的屏幕（独立机制，不应被全屏恢复 override）
             let filteredResumeIDs = screenIDsToResume
                 .subtracting(foregroundPausedScreenIDs)
@@ -773,6 +781,7 @@ final class DynamicWallpaperAutoPauseManager {
         if !screenIDsToPause.isEmpty {
             let pausedIDs = pauseScreens(byIDs: screenIDsToPause)
             fullscreenAutoPausedScreenIDs.formUnion(pausedIDs)
+            notifyRotationSchedulerOfTrackingChange()
         }
 
         // 兼容旧路径：若此前走了全局 WE pause，而当前已无 WE 管理屏处于全屏覆盖，则清掉全局标志。
@@ -985,6 +994,7 @@ final class DynamicWallpaperAutoPauseManager {
             return
         }
         foregroundPausedScreenIDs = newForegroundPausedIDs
+        notifyRotationSchedulerOfTrackingChange()
 
         // 仍被独立机制（全屏/非活动屏/窗口覆盖）压住的屏不能被前台恢复 override
         let stillBlocked = fullscreenAutoPausedScreenIDs
@@ -1544,6 +1554,7 @@ final class DynamicWallpaperAutoPauseManager {
             if !foregroundPausedScreenIDs.isEmpty {
                 let pausedIDs = foregroundPausedScreenIDs
                 foregroundPausedScreenIDs.removeAll()
+                notifyRotationSchedulerOfTrackingChange()
                 // 电池暂停期间不实际恢复（推迟到插电时执行）
                 let stillBlocked = fullscreenAutoPausedScreenIDs
                     .union(inactiveDisplayPausedScreenIDs)
@@ -1613,6 +1624,7 @@ final class DynamicWallpaperAutoPauseManager {
         let manuallyPausedScreenIDs = inactiveDisplayManuallyPausedScreenIDs
         inactiveDisplayPausedScreenIDs.removeAll()
         inactiveDisplayManuallyPausedScreenIDs.removeAll()
+        notifyRotationSchedulerOfTrackingChange()
 
         let blockedByOtherReasons = foregroundPausedScreenIDs
             .union(fullscreenAutoPausedScreenIDs)
@@ -1649,7 +1661,12 @@ final class DynamicWallpaperAutoPauseManager {
         let previouslyPausedIDs = inactiveDisplayPausedScreenIDs
         let screenIDsToResume = previouslyPausedIDs.subtracting(desiredPausedIDs)
         let manuallyPausedScreenIDs = inactiveDisplayManuallyPausedScreenIDs
-        inactiveDisplayPausedScreenIDs = desiredPausedIDs
+        if desiredPausedIDs != previouslyPausedIDs {
+            inactiveDisplayPausedScreenIDs = desiredPausedIDs
+            notifyRotationSchedulerOfTrackingChange()
+        } else {
+            inactiveDisplayPausedScreenIDs = desiredPausedIDs
+        }
         inactiveDisplayManuallyPausedScreenIDs.subtract(screenIDsToResume)
 
         if !batteryPauseRequested {
@@ -1858,6 +1875,27 @@ final class DynamicWallpaperAutoPauseManager {
         batteryPauseRequested
     }
 
+    /// 轮换调度器查询：当前被任一自动暂停原因（前台 / 非活动屏 / 全屏覆盖 /
+    /// 窗口覆盖比例）压住的按屏集合。电池全局暂停走调度器自己的
+    /// `isBatteryRotationSuspended`，不在该集合里重复记账。
+    /// 与播放实际状态解耦——电池期间记账照常维护，调度器据此判断「恢复轮换
+    /// 后该屏会不会立刻被压住」。
+    var autoPausedScreenIDsForRotation: Set<String> {
+        foregroundPausedScreenIDs
+            .union(inactiveDisplayPausedScreenIDs)
+            .union(fullscreenAutoPausedScreenIDs)
+            .union(windowCoveragePausedScreenIDs)
+    }
+
+    /// 自动暂停记账集合发生变化时通知轮换调度器重排定时器。
+    /// 只发进程内通知（调度器在 Helper 进程内），频率由各检测路径天然节流。
+    private func notifyRotationSchedulerOfTrackingChange() {
+        NotificationCenter.default.post(
+            name: Self.autoPauseTrackingDidChangeNotification,
+            object: nil
+        )
+    }
+
     // MARK: - AXObserver for Window Moves/Resizes
 
     private func setupAXObserver(for pid: pid_t) {
@@ -2001,6 +2039,7 @@ final class DynamicWallpaperAutoPauseManager {
                 windowCoverageCoveredScreenIDs.insert(screenID)
                 if !windowCoveragePausedScreenIDs.contains(screenID), !hasActiveGlobalPauseReason {
                     applyWindowCoveragePause(screenID: screenID)
+                    notifyRotationSchedulerOfTrackingChange()
                 } else if windowCoveragePausedScreenIDs.contains(screenID), !hasActiveGlobalPauseReason {
                     // 已在暂停集合但播放器可能被唤醒路径拉起，强制再 pause
                     applyWindowCoveragePause(screenID: screenID)
@@ -2009,6 +2048,7 @@ final class DynamicWallpaperAutoPauseManager {
                 windowCoverageCoveredScreenIDs.remove(screenID)
                 if windowCoveragePausedScreenIDs.contains(screenID) {
                     applyWindowCoverageResume(screenIDs: [screenID])
+                    notifyRotationSchedulerOfTrackingChange()
                 }
             }
         }
@@ -2111,6 +2151,7 @@ final class DynamicWallpaperAutoPauseManager {
         let toResume = windowCoveragePausedScreenIDs
         windowCoveragePausedScreenIDs.removeAll()
         windowCoverageCoveredScreenIDs.removeAll()
+        notifyRotationSchedulerOfTrackingChange()
         let stillPaused = foregroundPausedScreenIDs
             .union(inactiveDisplayPausedScreenIDs)
             .union(fullscreenAutoPausedScreenIDs)

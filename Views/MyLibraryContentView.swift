@@ -118,6 +118,7 @@ private struct LibraryScrollObserver: NSViewRepresentable {
     }
 }
 
+/// <#Description#>
 struct MyLibraryContentView: View {
     // 共享 AppDelegate 持有的全局 ViewModel 实例（与首页/壁纸探索/媒体探索共用）。
     // ⚠️ 不用 @ObservedObject：WallpaperViewModel / MediaExploreViewModel 各有大量

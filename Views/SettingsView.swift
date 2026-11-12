@@ -363,6 +363,7 @@ private struct ModulesSettingsTab: View {
 private struct GeneralSettingsTab: View {
     @ObservedObject var viewModel: SettingsViewModel
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
+    @AppStorage(CardMorphPreferences.enabledKey) private var detailLiquidAnimationEnabled = CardMorphPreferences.defaultEnabled
     @State private var showClearLockScreenAlert = false
     @State private var importProfileURL = ""
 
@@ -488,6 +489,14 @@ private struct GeneralSettingsTab: View {
                     showDivider: true
                 ) {
                     MacToggle(isOn: $arcSettings.compactMode)
+                }
+
+                MacSettingsRow(
+                    title: t("detailLiquidAnimation"),
+                    subtitle: t("detailLiquidAnimationDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $detailLiquidAnimationEnabled)
                 }
 
                 MacSettingsRow(
@@ -968,6 +977,8 @@ private struct DownloadSettingsTab: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    // 同性能模式：掐掉整页重建流入的隐式动画，避免高亮重放抖动
+                    .transaction { $0.animation = nil }
                     .frame(width: 180)
                 }
             }
@@ -1273,6 +1284,8 @@ private struct SchedulerSettingsTab: View {
                 Text(t("random")).tag(ScheduleOrder.random)
             }
             .pickerStyle(.segmented)
+            // 掐掉整页重建流入的隐式动画，避免高亮重放抖动
+            .transaction { $0.animation = nil }
             .frame(width: 130, alignment: .trailing)
         }
         .padding(.horizontal, 16)
@@ -1420,6 +1433,8 @@ private struct SchedulerSettingsTab: View {
                 Text(t("random")).tag(ScheduleOrder.random)
             }
             .pickerStyle(.segmented)
+            // 掐掉整页重建流入的隐式动画，避免高亮重放抖动
+            .transaction { $0.animation = nil }
             .frame(width: 130, alignment: .trailing)
         }
         .padding(.horizontal, 16)
@@ -2111,6 +2126,9 @@ private struct WorkshopSettingsTab: View {
                                 Text(t("workshop.perfModePower")).tag("power")
                             }
                             .pickerStyle(.segmented)
+                            // 整页任一 @Published 变更都会重建本 tab，segmented 高亮会跟着重放隐式动画（抖动）；
+                            // 掐掉流入的事务动画，点击选中仍由 AppKit 原生高亮，不受影响
+                            .transaction { $0.animation = nil }
                             .frame(width: 180)
                         }
                         MacSettingsRow(title: t("workshop.webRenderScale"), subtitle: t("workshop.webRenderScaleDesc"), showDivider: false) {

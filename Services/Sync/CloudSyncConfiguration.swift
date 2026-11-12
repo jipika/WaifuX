@@ -107,7 +107,7 @@ final class CloudSyncConfiguration: ObservableObject {
 
     // MARK: - 初始化
     private init() {
-        load()
+        // 由 App/Helper 启动恢复阶段显式 reload，不在 singleton init 读取偏好。
     }
 
     // MARK: - 持久化

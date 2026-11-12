@@ -6,6 +6,11 @@ import SwiftUI
 /// injected cancellation-aware loader; no list screenshot or duplicate detail hosting tree.
 enum CardMorphImageLayout: Equatable { case fill, portrait }
 
+enum CardMorphPreferences {
+    static let enabledKey = "detail_liquid_animation_enabled"
+    static let defaultEnabled = true
+}
+
 @MainActor
 final class WallpaperCardMorphCoordinator: ObservableObject {
     enum Phase: Equatable { case idle, opening, handoff, open, closing }
@@ -273,6 +278,12 @@ final class WallpaperCardMorphCoordinator: ObservableObject {
         case .idle, .open:
             break
         }
+    }
+
+    /// A setting change must not discard a clicked route or leave a half-visible overlay.
+    func settleForAnimationPreferenceChange() {
+        if phase == .opening { commitOpen() }
+        cancelAll()
     }
 
     func cancelAll() {

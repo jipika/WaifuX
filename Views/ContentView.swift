@@ -343,6 +343,7 @@ struct ContentView: View {
     @StateObject private var navigationState = MainContentNavigationState()
     @StateObject private var guessYouLikeVM = GuessYouLikeViewModel()
     @StateObject private var cardMorph = WallpaperCardMorphCoordinator()
+    @AppStorage(CardMorphPreferences.enabledKey) private var detailLiquidAnimationEnabled = CardMorphPreferences.defaultEnabled
     @State private var activeCardSourceTab: MainTab?
     @ObservedObject private var localization = LocalizationService.shared
     // 注意：WallpaperSourceManager.shared 不在此顶层观察。
@@ -399,6 +400,13 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .appDidHideWindow)) { _ in
             cardMorph.cancelAll()
+            activeCardSourceTab = nil
+            navigationState.pendingCardSource = nil
+            navigationState.pendingCardSourceTab = nil
+        }
+        .onChange(of: detailLiquidAnimationEnabled) { _, enabled in
+            guard !enabled else { return }
+            cardMorph.settleForAnimationPreferenceChange()
             activeCardSourceTab = nil
             navigationState.pendingCardSource = nil
             navigationState.pendingCardSourceTab = nil
@@ -828,7 +836,7 @@ struct ContentView: View {
         cardMorph.cancelAll()
         activeCardSourceTab = navigationState.selectedTab
         clearTriggerBinding(for: route)
-        if animated, detailPath.isEmpty, let source, source.itemID == route.transitionItemID,
+        if detailLiquidAnimationEnabled, animated, detailPath.isEmpty, let source, source.itemID == route.transitionItemID,
            cardMorph.present(source, imageLayout: transitionImageLayout(for: route), prepareImage: { size, scale in
                if case .media(let item, _) = route {
                    let record = MediaLibraryService.shared.downloadRecord(for: item.id)
@@ -879,7 +887,7 @@ struct ContentView: View {
 
     private func requestDetailPath(_ newPath: [MainDetailRoute]) {
         guard newPath != detailPath else { return }
-        if newPath.isEmpty, detailPath.count == 1,
+        if detailLiquidAnimationEnabled, newPath.isEmpty, detailPath.count == 1,
            let itemID = detailPath[0].transitionItemID,
            cardMorph.close(itemID: itemID, pop: {
                self.updateDetailPath([], animated: false)

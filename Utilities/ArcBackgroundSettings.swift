@@ -71,11 +71,11 @@ final class ArcBackgroundSettings: ObservableObject {
     ]
 
     private var cancellables = Set<AnyCancellable>()
+    private var isReloadingPreferences = false
+    private var preferenceWriteGeneration: UInt64 = 0
 
     private init() {
-        loadSettings()
-        updateLightMode()
-
+        // 偏好由 App/Helper 启动完成后的恢复阶段显式读取，避免 singleton init 递归。
         DistributedNotificationCenter.default
             .publisher(for: Notification.Name("AppleInterfaceThemeChangedNotification"))
             .receive(on: DispatchQueue.main)
@@ -86,29 +86,36 @@ final class ArcBackgroundSettings: ObservableObject {
 
         // 颗粒开关联动：grainTextureEnabled 控制桌面 useNoiseTexture
         $grainTextureEnabled
+            .dropFirst()
+            .filter { [weak self] _ in self?.isReloadingPreferences == false }
+            .map { [weak self] enabled in (enabled, self?.preferenceWriteGeneration) }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] enabled in
-                self?.useNoiseTexture = enabled
+            .sink { [weak self] enabled, generation in
+                guard let self, let generation, generation == self.preferenceWriteGeneration else { return }
+                self.useNoiseTexture = enabled
             }
             .store(in: &cancellables)
 
         // 持久化监听
         Publishers.MergeMany(
-            $themeMode.map { _ in () }.eraseToAnyPublisher(),
-            $accentColor.map { _ in () }.eraseToAnyPublisher(),
-            $frostedIntensity.map { _ in () }.eraseToAnyPublisher(),
-            $grainTextureEnabled.map { _ in () }.eraseToAnyPublisher(),
-            $grainIntensity.map { _ in () }.eraseToAnyPublisher(),
-            $dotGridOpacity.map { _ in () }.eraseToAnyPublisher(),
-            $useNoiseTexture.map { _ in () }.eraseToAnyPublisher(),
-            $compactMode.map { _ in () }.eraseToAnyPublisher(),
-            $exploreGrainWallpaper.map { _ in () }.eraseToAnyPublisher(),
-            $exploreGrainAnime.map { _ in () }.eraseToAnyPublisher(),
-            $exploreGrainMedia.map { _ in () }.eraseToAnyPublisher()
+            $themeMode.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $accentColor.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $frostedIntensity.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $grainTextureEnabled.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $grainIntensity.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $dotGridOpacity.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $useNoiseTexture.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $compactMode.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $exploreGrainWallpaper.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $exploreGrainAnime.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $exploreGrainMedia.dropFirst().map { _ in () }.eraseToAnyPublisher()
         )
+        .filter { [weak self] _ in self?.isReloadingPreferences == false }
+        .map { [weak self] _ in self?.preferenceWriteGeneration }
         .debounce(for: .seconds(0.3), scheduler: RunLoop.main)
-        .sink { [weak self] in
-            self?.saveSettings()
+        .sink { [weak self] generation in
+            guard let self, let generation, generation == self.preferenceWriteGeneration else { return }
+            self.saveSettings()
         }
         .store(in: &cancellables)
     }
@@ -184,7 +191,14 @@ final class ArcBackgroundSettings: ObservableObject {
 
     // MARK: - 持久化
 
-    func reloadFromPreferences() { loadSettings() }
+    func reloadFromPreferences() {
+        // 同时失效旧的保存任务与 grain→noise 联动，保留云端导入的完整组合。
+        preferenceWriteGeneration &+= 1
+        isReloadingPreferences = true
+        defer { isReloadingPreferences = false }
+        loadSettings()
+        updateLightMode()
+    }
 
     private func loadSettings() {
         let defaults = WaifuXPreferences.shared

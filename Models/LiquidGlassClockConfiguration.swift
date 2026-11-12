@@ -264,14 +264,20 @@ public final class LiquidGlassClockSettings: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var onChangeNotifier: (() -> Void)?
     private let configKey = "liquid_glass_clock_config_v2"
+    private var isReloadingPreferences = false
+    private var preferenceWriteGeneration: UInt64 = 0
 
     private init() {
-        load()
-        // 自动持久化（防抖）
+        // 偏好恢复由启动完成后的 reloadFromPreferences 执行，不在 singleton init 读取。
+        // 只保存用户修改；初始值和外部偏好重载都不能反向覆盖刚导入的数据。
         $config
+            .dropFirst()
+            .filter { [weak self] _ in self?.isReloadingPreferences == false }
+            .map { [weak self] _ in self?.preferenceWriteGeneration }
             .debounce(for: .seconds(0.3), scheduler: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.save()
+            .sink { [weak self] generation in
+                guard let self, let generation, generation == self.preferenceWriteGeneration else { return }
+                self.save()
             }
             .store(in: &cancellables)
     }
@@ -289,7 +295,13 @@ public final class LiquidGlassClockSettings: ObservableObject {
     }
 
     // MARK: - 持久化
-    func reloadFromPreferences() { load() }
+    func reloadFromPreferences() {
+        // 旧的用户修改可能还在 debounce 队列里；让它失效，避免重载后再回写一次。
+        preferenceWriteGeneration &+= 1
+        isReloadingPreferences = true
+        defer { isReloadingPreferences = false }
+        load()
+    }
 
     private func load() {
         guard let data = WaifuXPreferences.shared.data(forKey: configKey),

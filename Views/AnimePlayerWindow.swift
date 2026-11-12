@@ -162,13 +162,13 @@ private struct PlayerSection: View {
                 } else if let url = viewModel.currentPlayURL {
                     NativeVideoPlayerView(player: player)
                         .onAppear {
-                            player.load(url: url, startTime: viewModel.currentStartTime)
+                            player.load(url: url, startTime: viewModel.currentStartTime, httpHeaders: viewModel.currentHTTPHeaders, playbackID: viewModel.playbackID)
                         }
-                        .onChange(of: viewModel.currentPlayURL) { oldValue, newURL in
-                            if let newURL {
-                                player.load(url: newURL, startTime: viewModel.currentStartTime)
+                        .onChange(of: viewModel.playbackID) { _, _ in
+                            if let newURL = viewModel.currentPlayURL {
+                                player.load(url: newURL, startTime: viewModel.currentStartTime, httpHeaders: viewModel.currentHTTPHeaders, playbackID: viewModel.playbackID)
                                 // 新视频开始播放时自动展开侧边栏
-                                if oldValue == nil && isRightPanelCollapsed {
+                                if isRightPanelCollapsed {
                                     withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                                         isRightPanelCollapsed = false
                                     }
@@ -176,12 +176,21 @@ private struct PlayerSection: View {
                             }
                         }
                         .onReceive(player.$state) { state in
+                            guard player.playbackID == viewModel.playbackID else { return }
                             viewModel.handlePlayerState(state)
+                            if case .failed = state {
+                                let failedPlaybackID = viewModel.playbackID
+                                Task {
+                                    guard viewModel.playbackID == failedPlaybackID else { return }
+                                    await viewModel.retryPlayback(automatically: true)
+                                }
+                            }
                             if state == .readyToPlay {
                                 SleepPreventer.shared.startPreventingSleep()
                             }
                         }
                         .onReceive(player.currentTimePublisher) { newTime in
+                            guard player.playbackID == viewModel.playbackID, !player.isSeeking else { return }
                             viewModel.handlePlayerProgress(currentTime: newTime, totalTime: player.totalDuration)
                         }
                         .overlay(alignment: .bottom) {
@@ -211,7 +220,9 @@ private struct PlayerSection: View {
 
             // 错误提示覆盖层
             if let error = viewModel.videoError {
-                ErrorOverlay(error: error)
+                ErrorOverlay(error: error) {
+                    Task { await viewModel.retryPlayback() }
+                }
             }
 
             // 自定义标题栏（播放器左上角，不遮挡主要内容）
@@ -243,6 +254,9 @@ private struct PlayerSection: View {
         .onReceive(NotificationCenter.default.publisher(for: .playerHideControlBar)) { notification in
             guard notification.object as? String == viewModel.anime.id else { return }
             hideControlBar()
+        }
+        .onChange(of: viewModel.currentPlayURL) { _, url in
+            if url == nil { player.stop() }
         }
         // 状态变化时同步控制栏显隐模式
         .onChange(of: isPlayerFullscreen) { _, _ in syncControlBarMode() }
@@ -594,6 +608,7 @@ private struct BufferingOverlay: View {
 // MARK: - 错误覆盖层
 private struct ErrorOverlay: View {
     let error: String
+    let onRetry: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -612,6 +627,9 @@ private struct ErrorOverlay: View {
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
                 .padding(.horizontal, 20)
+
+            Button(t("retry"), action: onRetry)
+                .buttonStyle(.borderedProminent)
         }
         .padding(32)
         .background(
@@ -1589,7 +1607,7 @@ private struct EpisodeRow: View {
 
     /// 是否正在播放当前剧集
     private var isPlaying: Bool {
-        viewModel.currentEpisode?.id == episode.id
+        viewModel.currentEpisode?.id == episode.id && viewModel.currentSourceID == sourceId
     }
 
     /// 已缓存（记录存在且文件可用）
@@ -1618,8 +1636,9 @@ private struct EpisodeRow: View {
     }
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 12) {
+        HStack(spacing: 6) {
+            Button(action: onSelect) {
+                HStack(spacing: 12) {
                 // 序号或播放图标
                 ZStack {
                     if isPlaying {
@@ -1648,32 +1667,6 @@ private struct EpisodeRow: View {
                 }
 
                 Spacer()
-
-                // 下载状态 / 缓存标记 / 下载按钮
-                if let state = downloadState {
-                    if state.isCompleted {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(hex: "34D399"))
-                    } else if let error = state.errorMessage {
-                        Image(systemName: "exclamationmark.circle")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(hex: "FF6B6B"))
-                            .help(error)
-                    } else {
-                        // 进度环
-                        ProgressView(value: max(0.02, state.progress))
-                            .progressViewStyle(.circular)
-                            .scaleEffect(0.55)
-                            .frame(width: 18, height: 18)
-                            .help("\(Int(state.progress * 100))%")
-                    }
-                } else if isCached {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color(hex: "34D399"))
-                        .help(t("anime.download.cached"))
-                }
 
                 // 播放状态
                 if isPlaying {
@@ -1704,31 +1697,53 @@ private struct EpisodeRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.2)) {
-                isHovered = hovering
-            }
+            .buttonStyle(.plain)
+            downloadControl
+                .frame(width: 32, height: 32)
         }
-        .overlay(alignment: .trailing) {
-            // hover 时显示的下载按钮（叠加在行尾右侧，不嵌套进播放 Button）
-            if isHovered, downloadState == nil, !isCached {
-                Button {
-                    guard let index = viewModel.sourceResults.firstIndex(where: { $0.id == sourceId }) else { return }
-                    Task {
-                        await viewModel.downloadEpisode(episode, from: index)
-                    }
-                } label: {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .frame(width: 26, height: 26)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .help(t("anime.download.download"))
-                .padding(.trailing, 10)
+        .onHover { isHovered = $0 }
+    }
+
+    @ViewBuilder private var downloadControl: some View {
+        let recordID = AnimeDownloadRecord.recordID(ruleId: sourceId, episodeId: episode.id)
+        let resolving = viewModel.resolvingDownloads.contains(recordID)
+        let error = viewModel.downloadErrors[recordID] ?? downloadState?.errorMessage
+        if isCached || downloadState?.isCompleted == true {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color(hex: "34D399"))
+                .help(t("anime.download.cached"))
+        } else if resolving {
+            Image(systemName: "hourglass.circle")
+                .font(.system(size: 17))
+                .foregroundStyle(Color(hex: "00AEEC"))
+        } else if let state = downloadState, error == nil {
+            Button {
+                downloadEngine.cancel(episodeId: episode.id, sourceId: sourceId)
+            } label: {
+                ZStack {
+                    Circle().stroke(.white.opacity(0.15), lineWidth: 2)
+                    Circle().trim(from: 0, to: max(0.02, state.progress))
+                        .stroke(Color(hex: "00AEEC"), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    Image(systemName: "stop.fill").font(.system(size: 7))
+                }.frame(width: 20, height: 20)
             }
+            .buttonStyle(.plain)
+            .help("\(Int(state.progress * 100))% · \(t("cancel"))")
+        } else {
+            Button {
+                guard let index = viewModel.sourceResults.firstIndex(where: { $0.id == sourceId }) else { return }
+                Task { await viewModel.downloadEpisode(episode, from: index) }
+            } label: {
+                Image(systemName: error == nil ? "arrow.down.circle" : "arrow.clockwise.circle")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(error == nil ? .white.opacity(isHovered ? 0.9 : 0.5) : Color(hex: "FF6B6B"))
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(error.map { "\($0) · \(t("retry"))" } ?? t("anime.download.download"))
+            .accessibilityLabel(t(error == nil ? "anime.download.download" : "retry"))
         }
     }
 }

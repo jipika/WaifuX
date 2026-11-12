@@ -111,14 +111,36 @@ class AnimeViewModel: ObservableObject {
         currentQueryMode = .trending
         invalidatePreload()
 
-        // 先读本地缓存；若无则全量从 Kazumi 拉取并覆盖落盘（与启动后台同步策略一致）
+        // 1. 先读本地缓存（即使为空也继续，不阻塞用户）
         var rules = await AnimeRuleStore.shared.loadAllRules()
-        if rules.isEmpty {
-            await AnimeRuleStore.shared.ensureDefaultRulesCopied()
-            rules = await AnimeRuleStore.shared.loadAllRules()
-        }
         self.availableRules = rules
-        print("[AnimeViewModel] 详情页可用规则: \(self.availableRules.count) 个")
+        print("[AnimeViewModel] 详情页可用规则（本地缓存）: \(self.availableRules.count) 个")
+        
+        // 2. 如果本地为空，后台静默同步，但不阻塞用户界面
+        if rules.isEmpty {
+            let currentGen = gen
+            Task.detached(priority: .utility) { [weak self] in
+                do {
+                    print("[AnimeViewModel] 后台开始同步 Kazumi 规则...")
+                    try await AnimeRuleStore.shared.ensureDefaultRulesCopied()
+                    
+                    // 同步完成后，在主线程更新规则列表（仅当未被新操作取代）
+                    guard let self = self else { return }
+                    let updated = await AnimeRuleStore.shared.loadAllRules()
+                    
+                    await MainActor.run {
+                        if self.fetchGeneration == currentGen {
+                            self.availableRules = updated
+                            print("[AnimeViewModel] 后台规则同步完成: \(updated.count) 个")
+                        } else {
+                            print("[AnimeViewModel] 后台规则同步完成但已过期 (gen=\(currentGen), current=\(self.fetchGeneration))")
+                        }
+                    }
+                } catch {
+                    print("[AnimeViewModel] 后台规则同步失败: \(error)")
+                }
+            }
+        }
 
         // 如果在加载规则期间用户触发了新的搜索/标签/分类切换，跳过本次加载
         guard gen == fetchGeneration else {

@@ -22,6 +22,22 @@ final class CloudSyncService: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var exitSyncTask: Task<Void, Never>?
 
+    // Memory-only: a fresh Helper epoch also refreshes a UI that missed an
+    // import while disconnected. Never restore this token from preferences.
+    private var settingsImportRevision = UUID().uuidString
+    private var lastObservedSettingsImportRevision: String?
+
+    /// 配置在启动恢复阶段读入后补齐缓存；即使订阅提前创建了本服务也不会丢失旧时间。
+    func restoreSavedState() {
+        lastSyncedAt = config.lastSyncedAt
+    }
+
+    /// Called by Helper after its imported settings have been refreshed.
+    /// MainActor isolation serializes revision changes with snapshot publishing.
+    func settingsDidImport() {
+        settingsImportRevision = UUID().uuidString
+    }
+
     private init() {
         lastSyncedAt = config.lastSyncedAt
         #if !WAIFUX_HELPER
@@ -464,7 +480,8 @@ final class CloudSyncService: ObservableObject {
 
     func backgroundSnapshot() -> [String: Any] {
         var state: [String: Any] = ["running": isSyncing, "progress": syncProgress,
-            "status": syncStatusMessage, "error": lastError?.localizedDescription ?? ""]
+            "status": syncStatusMessage, "error": lastError?.localizedDescription ?? "",
+            "settingsImportRevision": settingsImportRevision]
         if let lastSyncedAt { state["lastSyncedAt"] = lastSyncedAt.timeIntervalSince1970 }
         return state
     }
@@ -484,21 +501,44 @@ final class CloudSyncService: ObservableObject {
         isSyncing = state["running"] as? Bool ?? false
         syncProgress = state["progress"] as? Double ?? 0
         syncStatusMessage = state["status"] as? String ?? ""
-        if let timestamp = state["lastSyncedAt"] as? Double { lastSyncedAt = Date(timeIntervalSince1970: timestamp) }
+        lastSyncedAt = (state["lastSyncedAt"] as? Double).map { Date(timeIntervalSince1970: $0) }
         let message = state["error"] as? String ?? ""
         lastError = message.isEmpty ? nil : NSError(domain: "WaifuXCloudSync", code: 1,
             userInfo: [NSLocalizedDescriptionKey: message])
-    }
 
-    private func requestRemote(_ operation: String) async {
-        do {
-            let response = try await BackgroundAgentClient.shared.request(operation)
-            if let state = response["cloud"] as? [String: Any] { applyRemoteSnapshot(state) }
+        guard let revision = state["settingsImportRevision"] as? String,
+              revision != lastObservedSettingsImportRevision else { return }
+        lastObservedSettingsImportRevision = revision
+        // observe() can replay synchronously from CloudSyncService.init. Defer
+        // defaults/cache access and notifications until the singleton exists.
+        // Coalesce revisions arriving in the same actor turn, and mark them
+        // before posting so notification consumers cannot create a feedback loop.
+        Task { @MainActor [weak self] in
+            guard let self, self.lastObservedSettingsImportRevision == revision else { return }
             WaifuXPreferences.shared.synchronize()
             AnimeFavoriteStore.shared.restoreSavedData()
             AnimeProgressStore.shared.restoreSavedData()
             PlaybackProgressCache.shared.restoreSavedData()
             LibraryGridOrderStore.shared.reloadFromPreferences()
+            NotificationCenter.default.post(name: .cloudSyncSettingsImported, object: nil)
+        }
+    }
+
+    private func requestRemote(_ operation: String) async {
+        let revisionBeforeRequest = lastObservedSettingsImportRevision
+        do {
+            let response = try await BackgroundAgentClient.shared.request(operation)
+            if let state = response["cloud"] as? [String: Any] { applyRemoteSnapshot(state) }
+            // Cloud-preferred settings imports use the shared revision consumer.
+            // Local-preferred metadata merges do not import settings / advance
+            // that revision, but still need the original data-store refresh.
+            if lastObservedSettingsImportRevision == revisionBeforeRequest {
+                WaifuXPreferences.shared.synchronize()
+                AnimeFavoriteStore.shared.restoreSavedData()
+                AnimeProgressStore.shared.restoreSavedData()
+                PlaybackProgressCache.shared.restoreSavedData()
+                LibraryGridOrderStore.shared.reloadFromPreferences()
+            }
         } catch {
             isSyncing = false
             lastError = error

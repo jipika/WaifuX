@@ -9,17 +9,18 @@ enum KonachanRequestConfiguration {
     static let browserUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15"
 
+    /// API、详情页与登录统一使用支持 Safe / Questionable / Explicit 的 .com。
+    static let siteURL = URL(string: "https://konachan.com")!
+    static let loginURL = siteURL.appendingPathComponent("user/login")
+    // 保留旧 .net 会话和图片的兼容支持。
     static let safeSiteURL = URL(string: "https://konachan.net")!
-    static let matureSiteURL = URL(string: "https://konachan.com")!
-    static let siteURL = safeSiteURL
-    // 成人内容只存在于 .com；默认在该域完成登录 / Cloudflare 验证。
-    static let loginURL = URL(string: "https://konachan.com/user/login")!
     static let cookieDomains = ["konachan.net", "konachan.com"]
 
     static func siteURL(for requestURL: URL?) -> URL {
-        requestURL?.host?.lowercased().contains("konachan.com") == true
-            ? matureSiteURL
-            : safeSiteURL
+        let host = requestURL?.host?.lowercased() ?? ""
+        return host == "konachan.net" || host.hasSuffix(".konachan.net")
+            ? safeSiteURL
+            : siteURL
     }
 
     static func referer(for requestURL: URL?) -> String {
