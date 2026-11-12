@@ -142,6 +142,8 @@ App Launch → Check for Updates → Load Latest Rules → Ready to Use
 | 🇯🇵 日本語 | ✅ Full Support |
 | [🇪🇸 Español (España)](LOCALIZATION.md) | ✅ Full Support |
 
+Spanish (Spain) localization contributed by Jesús Jódar Piernas ([@jesusjodar](https://github.com/jesusjodar)) in [PR #123](https://github.com/jipika/WaifuX/pull/123).
+
 ---
 
 ## ☕ Support Open Source

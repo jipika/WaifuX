@@ -18,6 +18,41 @@ objects = json.loads(subprocess.check_output(['plutil', '-convert', 'json', '-o'
 project = next(value for value in objects.values() if value.get('isa') == 'PBXProject')
 project_settings = {objects[config]['name']: objects[config]['buildSettings']
                     for config in objects[project['buildConfigurationList']]['buildConfigurations']}
+
+# A shared localized file must have one group parent. Otherwise Xcode may resolve
+# App/es.lproj/InfoPlist.strings as App/es.lproj/es.lproj/InfoPlist.strings.
+parents = {}
+for object_id, value in objects.items():
+    if value.get('isa') in ('PBXGroup', 'PBXVariantGroup'):
+        for child in value.get('children', []):
+            parents.setdefault(child, []).append(object_id)
+
+
+def source_path(object_id, ancestors=()):
+    assert object_id not in ancestors, ('cyclic resource group', object_id)
+    value = objects[object_id]
+    tree = value.get('sourceTree', '<group>')
+    if tree == '<group>':
+        groups = parents.get(object_id, [])
+        assert len(groups) <= 1, ('resource has multiple parent groups', value.get('path'), groups)
+        base = source_path(groups[0], ancestors + (object_id,)) if groups else ROOT
+    else:
+        assert tree in ('SOURCE_ROOT', '<absolute>'), ('unsupported resource source tree', tree)
+        base = ROOT if tree == 'SOURCE_ROOT' else Path('/')
+    return (base / value.get('path', '')).resolve()
+
+
+def localized_resource_paths(object_id):
+    value = objects[object_id]
+    if value.get('isa') == 'PBXVariantGroup':
+        return {path for child in value['children'] for path in localized_resource_paths(child)}
+    if value.get('path', '').endswith('.strings'):
+        path = source_path(object_id)
+        assert path.is_file(), ('localized resource is missing', str(path))
+        return {path}
+    return set()
+
+
 expected = {
     'WaifuX': ('com.waifux.app', 'WaifuX.entitlements'),
     'WaifuXHelper': ('com.waifux.app.helper', 'BackgroundAgent/BackgroundAgent.entitlements'),
@@ -66,6 +101,15 @@ for target in objects.values():
             for file in objects[phase]['files']
         }
         assert 'Assets.xcassets' in resource_paths, (name, 'shared icon catalog')
+        localized_resources = {
+            path
+            for phase in target['buildPhases'] if objects[phase]['isa'] == 'PBXResourcesBuildPhase'
+            for file in objects[phase]['files']
+            for path in localized_resource_paths(objects[file]['fileRef'])
+        }
+        for permission_strings in (ROOT / 'App').glob('*.lproj/InfoPlist.strings'):
+            assert permission_strings.resolve() in localized_resources, \
+                (name, 'missing localized privacy descriptions', str(permission_strings))
     if entitlements:
         permissions = plistlib.loads((ROOT / entitlements).read_bytes())
         assert 'group.com.waifux.app' in permissions['com.apple.security.application-groups'], name

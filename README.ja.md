@@ -142,6 +142,8 @@ WaifuX はダイナミックルールシステムを採用しており、スク�
 | 🇯🇵 日本語 | ✅ 完全対応 |
 | [🇪🇸 Español (España)](LOCALIZATION.md) | ✅ 完全対応 |
 
+スペイン語（スペイン）の翻訳は Jesús Jódar Piernas（[@jesusjodar](https://github.com/jesusjodar)）による貢献です。[PR #123](https://github.com/jipika/WaifuX/pull/123) を参照してください。
+
 ---
 
 ## ☕ オープンソースをサポートする

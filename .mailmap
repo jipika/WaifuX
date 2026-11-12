@@ -1,0 +1,4 @@
+# Canonical identity requested by @jesusjodar in PR #123:
+# https://github.com/jipika/WaifuX/pull/123#issuecomment-6778882733
+# Applies to Git's mailmap-aware author/committer display, without rewriting commits.
+Jesús Jódar Piernas <jesusjodarpiernas@gmail.com> Jesús Jódar Piernas <j.jodar@thex.com>
