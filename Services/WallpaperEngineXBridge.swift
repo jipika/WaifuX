@@ -658,6 +658,27 @@ final class WallpaperEngineXBridge: ObservableObject {
         return isControllingExternalEngine && activeRenderKind == .scene
     }
 
+    /// 当前由本 Bridge 持有的桌面 renderer；覆盖检测不能把壁纸自身当作外应用。
+    /// `_deinitPIDs` 也保留交接期间尚未退出的旧 Scene，不能只查新 screenProcesses。
+    /// Web PID 文件须核对 UID、可执行文件和 daemon 参数，避免过期 PID 排除别的应用。
+    var autoPauseRendererProcessIDs: Set<pid_t> {
+        guard !BackgroundRuntimeRole.isRemoteUI else { return [] }
+        var result = Set(screenProcesses.values.filter { $0.process.isRunning }.map(\.pid))
+        for pid in _deinitPIDs where !result.contains(pid) {
+            guard let cli = Self.resolvedCLIExecutableURL(),
+                  let identity = OwnedProcessIdentity.capture(pid, expectedExecutables: [cli]),
+                  identity.stillMatches() else { continue }
+            result.insert(pid)
+        }
+        if let cli = Self.resolvedLegacyCLIExecutableURL(),
+           let identity = OwnedDaemonPIDFile.identity(
+               at: URL(fileURLWithPath: "/tmp/wallpaperengine-cli.pid"), expectedExecutables: [cli]
+           ), identity.stillMatches() {
+            result.insert(identity.pid)
+        }
+        return result
+    }
+
     // MARK: - 复制当前帧（媒体详情「复制静态图片」）
 
     /// 抓取外部渲染引擎（scene 渲染进程 / web daemon）桌面壁纸窗口的当前画面。
@@ -901,6 +922,11 @@ final class WallpaperEngineXBridge: ObservableObject {
             // 一条「setWallpaper 开始」，无法区分是顶掉、Web 早退还是卡住。
             // 这里只在「没有走到完成标记」时补一条痕迹，正常路径零额外输出。
             if !didReachCompletion {
+                // 自动暂停在首帧交接期间延后；失败后若仍保有旧 renderer，
+                // 也要补算期间发生的电源/覆盖变化（电池单策略没有轮询兜底）。
+                if !isTerminating, wallpaperSwitchGeneration == switchGeneration {
+                    DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
+                }
                 AppLogger.error(.wallpaper, "setWallpaper 未走到完成标记即退出", metadata: [
                     "path": path,
                     "switchGeneration": switchGeneration,
@@ -2061,13 +2087,23 @@ final class WallpaperEngineXBridge: ObservableObject {
         screenID: String,
         pid: pid_t,
         signalName: String,
-        result: Int32
+        result: Int32,
+        reason: String = "unspecified",
+        caller: String = #function,
+        line: Int = #line
     ) {
         AppLogger.error(.wallpaper, "WallpaperEngineX renderer \(action) signal", metadata: [
             "screenID": screenID,
             "pid": pid,
             "signal": signalName,
             "result": result,
+            "reason": reason,
+            "caller": caller,
+            "line": line,
+            "settingWallpaper": isSettingWallpaper,
+            "displayAsleep": isDisplayAsleep,
+            "screenLocked": VideoWallpaperManager.shared.isScreenLocked,
+            "autoPausedScreens": DynamicWallpaperAutoPauseManager.shared.autoPausedScreenIDsForRotation.sorted().joined(separator: ","),
             "pidAlive": kill(pid, 0) == 0,
             "perScreenPaused": perScreenPausedScreenIDs.sorted().joined(separator: ",")
         ])
@@ -2281,7 +2317,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     /// 暂停渲染（发送 SIGSTOP）
-    func pauseWallpaper() {
+    func pauseWallpaper(reason: String = "manual", caller: String = #function, line: Int = #line) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.pause", [:]); return }
 
         if screenRenderStates.values.contains(where: { $0.renderKind == .web }) || activeRenderKind == .web {
@@ -2317,7 +2353,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                 screenID: screenID,
                 pid: pid,
                 signalName: "SIGSTOP",
-                result: result
+                result: result,
+                reason: reason, caller: caller, line: line
             )
         }
     }
@@ -2439,7 +2476,7 @@ final class WallpaperEngineXBridge: ObservableObject {
     }
 
     /// 暂停指定屏幕的渲染（scene：SIGSTOP；web：按屏 IPC）
-    func pauseWallpaper(for screenID: String) {
+    func pauseWallpaper(for screenID: String, reason: String = "manual", caller: String = #function, line: Int = #line) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.screenPause", ["id": screenID]); return }
 
         guard isControllingExternalEngine else { return }
@@ -2471,7 +2508,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                 screenID: screenID,
                 pid: info.pid,
                 signalName: "SIGSTOP",
-                result: result
+                result: result,
+                reason: reason, caller: caller, line: line
             )
             updateExternalPausedStateFromPerScreenPauses()
             return
@@ -6521,7 +6559,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         displaySleepPausedScreenIDs.formUnion(screensToPause)
         // Web 的 set 会新建 WKWebView；即使本地暂停标记已存在，也要向新实例重发 pause。
         for screenID in managedScreenIDs {
-            pauseWallpaper(for: screenID)
+            pauseWallpaper(for: screenID, reason: "display-sleep")
         }
         if !screensToPause.isEmpty {
             AppLogger.info(.wallpaper, "WE renderers paused for display sleep", metadata: [
@@ -6549,7 +6587,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
         displaySleepPausedScreenIDs.removeAll()
         for screenID in screensToKeepPaused {
-            pauseWallpaper(for: screenID)
+            pauseWallpaper(for: screenID, reason: "preserved-pause-after-wake")
         }
         if !screensToResume.isEmpty {
             AppLogger.info(.wallpaper, "WE renderers resumed after display wake", metadata: [
