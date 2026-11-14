@@ -459,22 +459,49 @@ jobs:
               build/WaifuX.dmg
           fi
 
-          NOTARY_OUTPUT=$(xcrun notarytool submit build/WaifuX.dmg \
+          # 预检 secrets：notarytool 在任一凭证为空时会立刻非零退出，
+          # 而 `set -e` + 命令替换会连 stderr 一起吞掉，日志里只剩
+          # "Process completed with exit code 1"。这里先显式检查并打印状态。
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "❌ 公证缺少必要凭证："
+            echo "   APPLE_ID                    : ${APPLE_ID:+SET}${APPLE_ID:-EMPTY}"
+            echo "   APPLE_APP_SPECIFIC_PASSWORD : ${APPLE_APP_SPECIFIC_PASSWORD:+SET}${APPLE_APP_SPECIFIC_PASSWORD:-EMPTY}"
+            echo "   APPLE_TEAM_ID               : ${APPLE_TEAM_ID:+SET}${APPLE_TEAM_ID:-EMPTY}"
+            exit 1
+          fi
+
+          # 关键：不要用 NOTARY_OUTPUT=$(...) —— set -e 下命令替换里
+          # notarytool 非零会立即终止脚本，看不到任何 stderr。改成先写
+          # 文件、不让该行非零中断脚本，再 cat 出来后判断 rc。
+          set +e
+          xcrun notarytool submit build/WaifuX.dmg \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait 2>&1)
-          echo "$NOTARY_OUTPUT"
+            --wait > build/notary.log 2>&1
+          NOTARY_RC=$?
+          set -e
+          echo "=== notarytool output (rc=$NOTARY_RC) ==="
+          cat build/notary.log || true
+          echo "=========================================="
+          NOTARY_OUTPUT="$(cat build/notary.log)"
 
           SUBMISSION_ID=$(echo "$NOTARY_OUTPUT" | grep -m1 "id:" | awk '{print $2}' | tr -d '[:space:]')
+          echo "Submission ID: $SUBMISSION_ID"
           STATUS=$(echo "$NOTARY_OUTPUT" | awk '/^  status:/{print $2; exit}' | tr -d '[:space:]')
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "=== Notarization Log ==="
-            xcrun notarytool log "$SUBMISSION_ID" \
-              --apple-id "$APPLE_ID" \
-              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-              --team-id "$APPLE_TEAM_ID" 2>&1 || true
-            echo "========================"
+          echo "Notarization status: $STATUS"
+          if [ "$NOTARY_RC" -ne 0 ] || [ "$STATUS" != "Accepted" ]; then
+            if [ -n "$SUBMISSION_ID" ]; then
+              echo "=== Notarization Log ==="
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" 2>&1 || true
+              echo "========================"
+            fi
+            echo "❌ 公证失败 (rc=$NOTARY_RC, status=${STATUS:-<none>})"
+            echo "   rc!=0 且没有 status：多为凭证失效（改过 Apple ID 密码会吊销 App 专用密码）、"
+            echo "   网络或 Apple 公证服务不可用；本轮产物未公证，不可分发。"
             exit 1
           fi
 
