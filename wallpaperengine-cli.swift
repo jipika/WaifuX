@@ -1073,6 +1073,44 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         forMainFrameOnly: false
     )
 
+    /// 旧 Spine 4.0 在 loading logo 尚未创建时直接 dispose()，会先释放着色器，
+    /// 再因 null.dispose() 中断播放器清理，下一帧即向 WebGL 传入已清空的 program。
+    /// 仅替换已知的无空值检查实现；资源与作者脚本不落盘修改，也不吞 WebGL 错误。
+    private static let spineLifecycleCompatScript = WKUserScript(
+        source: """
+        (function() {
+          var patched = new WeakSet();
+          function patchRuntime(runtime) {
+            if (!runtime || !runtime.SpinePlayer || !runtime.LoadingScreen) return;
+            var proto = runtime.LoadingScreen.prototype;
+            if (!proto || patched.has(proto) || typeof proto.dispose !== 'function') return;
+            var source = Function.prototype.toString.call(proto.dispose).replace(/\\s+/g, '');
+            if (source !== 'dispose(){this.logo.dispose();this.spinner.dispose();}'
+              && source !== 'function(){this.logo.dispose();this.spinner.dispose();}') return;
+            proto.dispose = function() {
+              if (this.logo) this.logo.dispose();
+              if (this.spinner) this.spinner.dispose();
+            };
+            patched.add(proto);
+          }
+          function install() {
+            patchRuntime(window.spine);
+            patchRuntime(window.spine40);
+            patchRuntime(window.spine41);
+          }
+          window.__wxInstallSpineLifecycleCompat = install;
+          // 外部 runtime 执行后、后续 main.js / 用户属性切换角色之前完成修补。
+          document.addEventListener('load', function(event) {
+            if (event.target && event.target.tagName === 'SCRIPT') install();
+          }, true);
+          document.addEventListener('DOMContentLoaded', install, { once: true });
+          install();
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: false
+    )
+
     /// 生成 document-start 用户属性 shim：拦截页面对
     /// `window.wallpaperPropertyListener` 的赋值，在页面 init() 定义监听器的
     /// 同一同步上下文里先应用 pending 属性，确保 init 期读取的属性已就位。
@@ -1092,6 +1130,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                 window.__wxPendingListener = v;
                 try {
                   var props = JSON.parse(__propsJSON);
+                  if (typeof window.__wxInstallSpineLifecycleCompat === 'function') {
+                    window.__wxInstallSpineLifecycleCompat();
+                  }
                   if (v && typeof v.applyUserProperties === 'function') {
                     v.applyUserProperties(props);
                   }
@@ -2881,6 +2922,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         }
         ucc.addUserScript(Self.wallpaperEngineWebAPIShim)
         ucc.addUserScript(Self.localFileCompatScript)
+        ucc.addUserScript(Self.spineLifecycleCompatScript)
         ucc.addUserScript(Self.mouseEventBridgeScript)
         if !offscreen {
             ucc.addUserScript(Self.dockSafeAreaScript)

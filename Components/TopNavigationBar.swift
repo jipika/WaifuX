@@ -641,14 +641,24 @@ private struct TopBarSegmentedControl: View {
 
     @Namespace private var selectionNamespace
     @State private var hoveredTab: MainTab?
+    /// 只驱动顶部选中胶囊。真实页面状态在事务外同步提交，不能把
+    /// NSTabViewController 与 toolbar 的切换也卷进这段弹簧动画。
+    @State private var highlightedTab: MainTab
+
+    init(selectedTab: Binding<MainTab>, controlHeight: CGFloat) {
+        self._selectedTab = selectedTab
+        self.controlHeight = controlHeight
+        self._highlightedTab = State(initialValue: selectedTab.wrappedValue)
+    }
 
     var body: some View {
         HStack(spacing: 6) {
             // 仅显示启动快照启用的 tab（home/myMedia 永远显示；三个 Explore 受功能模块开关门控）
             ForEach(MainTab.allCases.filter { ModuleAvailability.shared.isTabEnabled($0) }, id: \.self) { tab in
                 Button {
+                    selectedTab = tab
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                        selectedTab = tab
+                        highlightedTab = tab
                     }
                 } label: {
                     Text(tab.title)
@@ -663,7 +673,7 @@ private struct TopBarSegmentedControl: View {
                             maxHeight: controlHeight - 8
                         )
                         .background {
-                            if selectedTab == tab {
+                            if highlightedTab == tab {
                                 selectedTabGlass(for: tab)
                             } else if hoveredTab == tab {
                                 Capsule(style: .continuous)
@@ -685,6 +695,12 @@ private struct TopBarSegmentedControl: View {
         .liquidGlassSurface(.prominent, tint: Color.black.opacity(0.18), in: Capsule(style: .continuous))
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
         .guideAnchor(.homeTabBar)
+        .onChange(of: selectedTab) { _, tab in
+            // 状态栏与首页快捷入口也复用同一个胶囊，不能留下上次选中的标签。
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                highlightedTab = tab
+            }
+        }
     }
 
     /// 标签宽度随文案自适应：中文「静态壁纸」、英文「STATIC WALLPAPER」都比旧的固定 76pt 宽，
@@ -692,7 +708,7 @@ private struct TopBarSegmentedControl: View {
     private let minimumItemWidth: CGFloat = 76
 
     private func labelColor(for tab: MainTab) -> Color {
-        if selectedTab == tab {
+        if highlightedTab == tab {
             return .white.opacity(0.96)
         }
         if hoveredTab == tab {

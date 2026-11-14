@@ -500,8 +500,17 @@ jobs:
               echo "========================"
             fi
             echo "❌ 公证失败 (rc=$NOTARY_RC, status=${STATUS:-<none>})"
-            echo "   rc!=0 且没有 status：多为凭证失效（改过 Apple ID 密码会吊销 App 专用密码）、"
-            echo "   网络或 Apple 公证服务不可用；本轮产物未公证，不可分发。"
+            # 403 且提示协议缺失/过期是账号侧法律协议问题，不是凭证或代码问题：
+            # notarytool 在提交前就被挡回，几秒内退出且没有 Submission ID。
+            if grep -qiE "required agreement is missing or has expired|HTTP status code: 403" build/notary.log 2>/dev/null; then
+              echo "   → 原因：Apple 团队法律协议缺失或已过期（HTTP 403）。"
+              echo "     Account Holder 登录 App Store Connect →「协议、税务和银行业务」签署待生效协议；"
+              echo "     Apple 更新 Program License Agreement 后必须重新接受，否则 notarytool 一律 403，"
+              echo "     这跟证书、App 专用密码、代码签名都无关。"
+            else
+              echo "   rc!=0 且没有 status：多为凭证失效（改过 Apple ID 密码会吊销 App 专用密码）、"
+              echo "   网络或 Apple 公证服务不可用；本轮产物未公证，不可分发。"
+            fi
             exit 1
           fi
 

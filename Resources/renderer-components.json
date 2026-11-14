@@ -12,13 +12,13 @@
     }
   },
   "web": {
-    "version": "1.0.45",
-    "revision": 46,
+    "version": "1.0.47",
+    "revision": 48,
     "sourceSHA256": {
       "ffmpeg": "106ece4ba0df8411833c9e78c85698803848dafae6b9411420f25fcf0b648c35",
       "ffmpeg-x86_64": "9e5420d4f5b9fc0150d1818da5e70cfea46b2b44ea49efc794ca305ed0c6903f",
-      "wallpaperengine-cli": "3acca24fc70c83f7d3ca64ccc1bcd77cd8ed1c2a3c599703461e7ff5f84cd152",
-      "wallpaperengine-cli-x86_64": "dd2afeec078040d553b62ef8268d39eaa350f331aaef9be2ea6b22449a7b2325"
+      "wallpaperengine-cli": "1cd7b7105764279aded26c4bd4083e1682a01737f623e40ac30899ef9915fd22",
+      "wallpaperengine-cli-x86_64": "8060e01519f6aaafa64a620a5e870eeb895e761f381a4bb7b97991078aeb7605"
     }
   },
   "video": {

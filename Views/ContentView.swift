@@ -135,7 +135,11 @@ private struct MainTabContainerView: NSViewControllerRepresentable {
     }
 
     func updateNSViewController(_ controller: MainTabViewController, context: Context) {
-        controller.select(tab: navigationState.selectedTab)
+        // SwiftUI 的状态事务不应替 AppKit 决定页面转场；胶囊动画由顶栏自己负责。
+        controller.select(
+            tab: navigationState.selectedTab,
+            animated: context.transaction.animation != nil && !context.transaction.disablesAnimations
+        )
     }
 }
 
@@ -166,6 +170,9 @@ private final class MainTabViewController: NSTabViewController {
         super.viewDidLoad()
         tabStyle = .unspecified
         tabView.tabViewType = .noTabsNoBorder
+        // 主页面没有位移动效，切换必须即时替换子控制器；不要让系统 crossfade
+        // 与顶栏自己的胶囊弹簧共同决定旧页面何时退出可见层级。
+        transitionOptions = []
     }
 
     func configure(
@@ -218,7 +225,7 @@ private final class MainTabViewController: NSTabViewController {
         select(tab: navigationState.selectedTab)
     }
 
-    func select(tab: MainTab) {
+    func select(tab: MainTab, animated: Bool = false) {
         // 用 addedTabs 的真实位置查找，不依赖固定 controllerIndex（禁用 tab 后会错位）。
         guard let targetIndex = addedTabs.firstIndex(of: tab) else {
             // tab 被禁用（不在 addedTabs 中），回退到 home
@@ -230,7 +237,22 @@ private final class MainTabViewController: NSTabViewController {
             return
         }
         guard selectedTabViewItemIndex != targetIndex else { return }
-        selectedTabViewItemIndex = targetIndex
+        let previousIndex = selectedTabViewItemIndex
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        NSAnimationContext.runAnimationGroup { context in
+            // 不受 SwiftUI 弹簧事务影响，关闭子视图替换时的 AppKit 隐式动画。
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            selectedTabViewItemIndex = targetIndex
+        }
+        CATransaction.commit()
+        let visibleLabel = tabView.selectedTabViewItem?.label ?? "nil"
+        AppLogger.throttled(
+            .error, .general,
+            key: "navigation.tab.commit.\(tab.rawValue)", interval: 2,
+            "[Navigation] tab commit | tab=\(tab.rawValue), fromIndex=\(previousIndex), targetIndex=\(targetIndex), selectedIndex=\(selectedTabViewItemIndex), visible=\(visibleLabel), animated=\(animated)"
+        )
     }
 
     private func addPage<Content: View>(title: String, view: Content) {
@@ -498,6 +520,9 @@ struct ContentView: View {
         }
         .ignoresSafeArea()
         .applyTheme()
+        // 顶栏胶囊使用局部 highlightedTab 弹簧；这里避免该事务穿过整个
+        // ContentView，影响 mainContentBase 的页面选择和工具栏显隐。
+        .transaction { $0.animation = nil }
     }
 
     /// 从长 body 修饰符链中拆出，避免新增导航泛型增加 SwiftUI 类型检查负担。
@@ -627,6 +652,8 @@ struct ContentView: View {
             .id(localization.currentLanguage)
             .environment(\.locale, Locale(identifier: localization.currentLanguage.rawValue))
         }
+        // AppKit 页面切换与 SwiftUI 工具栏显隐不需要跟随顶部胶囊弹簧。
+        .transaction { $0.animation = nil }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationBarBackButtonHidden(true)
         .toolbar(navigationState.selectedTab == .myMedia ? .visible : .hidden, for: .automatic)
