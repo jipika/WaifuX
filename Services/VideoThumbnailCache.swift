@@ -1169,16 +1169,16 @@ final class VideoThumbnailCache {
               spec.pixelWidth <= 8192, spec.pixelHeight <= 8192,
               Int64(spec.pixelWidth) * Int64(spec.pixelHeight) <= 33_554_432,
               pixels.width * pixels.height <= 33_554_432 else { return nil }
-        let crop: CGRect
-        let viewport: CGRect
+        let layout: (crop: CGRect, viewport: CGRect, isTiled: Bool, backgroundColor: CGColor)
         if sourceCropSignature == spec.cropSignature {
-            crop = CGRect(x: 0, y: 0, width: 1, height: 1)
-            viewport = crop
+            // This image already contains the requested layout, including its
+            // viewport, bars and repeated tiles. Only resize the completed canvas.
+            let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+            layout = (full, full, false, CGColor(gray: 0, alpha: 1))
         } else {
             guard sourceCropSignature == "none",
-                  let layout = Self.transitionCropLayout(signature: spec.cropSignature) else { return nil }
-            crop = layout.crop
-            viewport = layout.viewport
+                  let requestedLayout = Self.transitionCropLayout(signature: spec.cropSignature) else { return nil }
+            layout = requestedLayout
         }
         let imageURL = sceneTransitionPosterURL(spec: spec)
         guard sourceURL != imageURL else { return nil }
@@ -1193,19 +1193,28 @@ final class VideoThumbnailCache {
         }
         guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary),
-              let cropped = image.cropping(to: CGRect(x: crop.minX * CGFloat(image.width),
-                  y: crop.minY * CGFloat(image.height), width: crop.width * CGFloat(image.width),
-                  height: crop.height * CGFloat(image.height))),
               let space = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(data: nil, width: spec.pixelWidth, height: spec.pixelHeight,
                   bitsPerComponent: 8, bytesPerRow: 0, space: space,
                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         let width = CGFloat(spec.pixelWidth), height = CGFloat(spec.pixelHeight)
-        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        let viewport = CGRect(x: layout.viewport.minX * width, y: (1 - layout.viewport.maxY) * height,
+                              width: layout.viewport.width * width, height: layout.viewport.height * height)
+        let mediaWidth = viewport.width / layout.crop.width
+        let mediaHeight = viewport.height / layout.crop.height
+        // crop/viewport use a top-left origin. Invert that UV mapping into the
+        // CGContext's bottom-left space while retaining the complete source image.
+        let mediaFrame = CGRect(x: viewport.minX - layout.crop.minX * mediaWidth,
+                                y: viewport.minY - (1 - layout.crop.maxY) * mediaHeight,
+                                width: mediaWidth, height: mediaHeight)
+        guard [viewport.minX, viewport.minY, viewport.width, viewport.height,
+               mediaFrame.minX, mediaFrame.minY, mediaFrame.width, mediaFrame.height].allSatisfy(\.isFinite),
+              mediaFrame.width > 0, mediaFrame.height > 0 else { return nil }
+        context.setFillColor(layout.backgroundColor)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.interpolationQuality = .high
-        context.draw(cropped, in: CGRect(x: viewport.minX * width, y: (1 - viewport.maxY) * height,
-                                        width: viewport.width * width, height: viewport.height * height))
+        context.clip(to: viewport)
+        context.draw(image, in: mediaFrame, byTiling: layout.isTiled)
         guard let output = context.makeImage(), let jpeg = Self.encodeJPEG(output, quality: 0.90) else { return nil }
         do {
             Self.ensureParentDirectory(of: imageURL)
@@ -1217,23 +1226,66 @@ final class VideoThumbnailCache {
     }
 
     /// 直接消费实时启动已算好的归一化 crop/viewport；不重新计算 cover、pan 或 zoom。
-    nonisolated static func transitionCropLayout(signature: String) -> (crop: CGRect, viewport: CGRect)? {
-        let args = signature.split(separator: " ").map(String.init)
-        func rect(_ value: String) -> CGRect? {
+    nonisolated static func transitionCropLayout(
+        signature: String
+    ) -> (crop: CGRect, viewport: CGRect, isTiled: Bool, backgroundColor: CGColor)? {
+        let args = signature.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let black = CGColor(gray: 0, alpha: 1)
+        if args == ["none"] { return (full, full, false, black) }
+        func numbers(_ value: String) -> [Double]? {
             let components = value.split(separator: ",", omittingEmptySubsequences: false)
             guard components.count == 4 else { return nil }
-            let numbers = components.compactMap { Double($0) }
-            guard numbers.count == 4, numbers.allSatisfy(\.isFinite),
-                  numbers[0] >= 0, numbers[1] >= 0, numbers[2] > 0, numbers[3] > 0,
-                  numbers[0] + numbers[2] <= 1.000001, numbers[1] + numbers[3] <= 1.000001 else { return nil }
-            return CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+            let values = components.compactMap { Double($0) }
+            return values.count == 4 && values.allSatisfy(\.isFinite) ? values : nil
         }
-        guard args.count == 2 || args.count == 4, args[0] == "--crop", let crop = rect(args[1]) else { return nil }
-        if args.count == 4 {
-            guard args[2] == "--crop-viewport", let viewport = rect(args[3]) else { return nil }
-            return (crop, viewport)
+        func rect(_ value: String, unitBounds: Bool) -> CGRect? {
+            guard let values = numbers(value), values[2] > 0, values[3] > 0,
+                  (values[0] + values[2]).isFinite, (values[1] + values[3]).isFinite else { return nil }
+            if unitBounds {
+                guard values[0] >= 0, values[1] >= 0,
+                      values[0] + values[2] <= 1.000001, values[1] + values[3] <= 1.000001 else { return nil }
+            }
+            return CGRect(x: values[0], y: values[1], width: values[2], height: values[3])
         }
-        return (crop, CGRect(x: 0, y: 0, width: 1, height: 1))
+        var crop: CGRect?
+        var viewport = full
+        var isTiled = false
+        var backgroundColor = black
+        var seen = Set<String>()
+        var index = 0
+        while index < args.count {
+            let flag = args[index]
+            guard seen.insert(flag).inserted else { return nil }
+            switch flag {
+            case "--crop-presentation":
+                // The source crop already encodes fit/center/stretch geometry.
+                // The renderer flag changes its sampling path, not this mapping.
+                index += 1
+            case "--crop-tiled":
+                isTiled = true
+                index += 1
+            case "--crop", "--crop-viewport", "--crop-background":
+                guard index + 1 < args.count else { return nil }
+                let value = args[index + 1]
+                switch flag {
+                case "--crop":
+                    guard let parsed = rect(value, unitBounds: false) else { return nil }
+                    crop = parsed
+                case "--crop-viewport":
+                    guard let parsed = rect(value, unitBounds: true) else { return nil }
+                    viewport = parsed
+                default:
+                    guard let rgba = numbers(value), rgba.allSatisfy({ (0...1).contains($0) }) else { return nil }
+                    backgroundColor = CGColor(red: rgba[0], green: rgba[1], blue: rgba[2], alpha: rgba[3])
+                }
+                index += 2
+            default:
+                return nil
+            }
+        }
+        guard let crop else { return nil }
+        return (crop, viewport, isTiled, backgroundColor)
     }
 
     /// 像素尺寸（不解码整图）；用于判断已有抽帧与目标屏比例是否一致。

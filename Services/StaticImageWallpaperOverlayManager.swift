@@ -163,6 +163,16 @@ final class StaticImageWallpaperOverlayManager {
     private func showPrepared(imageURL: URL, for screen: NSScreen, token: UUID, isCurrent: @escaping @MainActor () -> Bool = { true }) async {
         let screenID = screen.wallpaperScreenIdentifier
         guard !isTerminating, !Task.isCancelled, isCurrent(), presentationRequests[screenID] == token else { return }
+        let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+        let effective = settings.isEnabled ? settings : .defaultSettings
+        let usesOriginalSource = effective.displayMode != .fill
+            || effective.aspectPreset != .autoFill
+            || abs(effective.zoom - 1) > 0.000001
+            || effective.pan != CGPoint(x: 0.5, y: 0.5)
+        let imageURL = usesOriginalSource
+            ? await StaticWallpaperApplyService.originalStaticSourceURL(for: imageURL)
+            : imageURL
+        guard !isTerminating, !Task.isCancelled, isCurrent(), presentationRequests[screenID] == token else { return }
 
         guard FileManager.default.fileExists(atPath: imageURL.path) else {
             print("[StaticImageOverlay] ⚠️ 图片不存在，跳过 overlay 显示: \(imageURL.path)")
@@ -490,7 +500,8 @@ final class StaticImageWallpaperOverlayManager {
         guard let cropView = window.contentView as? StaticCropImageView else { return }
 
         let settings = DisplayCropSettingsStore.shared.settings(for: screen)
-        let contentCrop = autoRemoveImageLetterboxEnabled ? imageLetterboxContentCrops[screenID] : nil
+        let contentCrop = autoRemoveImageLetterboxEnabled
+            && (!settings.isEnabled || settings.displayMode == .fill) ? imageLetterboxContentCrops[screenID] : nil
         guard settings.shouldApplyCrop else {
             window.backgroundColor = .black
             if let contentCrop {
@@ -505,7 +516,9 @@ final class StaticImageWallpaperOverlayManager {
             }
             return
         }
-        let wallpaperSize = imageSizes[screenID] ?? screen.frame.size
+        let pixelSize = CGSize(width: screen.frame.width * screen.backingScaleFactor,
+                               height: screen.frame.height * screen.backingScaleFactor)
+        let wallpaperSize = imageSizes[screenID] ?? pixelSize
         let layoutWallpaperSize: CGSize
         if let contentCrop {
             layoutWallpaperSize = CGSize(
@@ -517,7 +530,7 @@ final class StaticImageWallpaperOverlayManager {
         }
         let layout = CropLayoutEngine.compute(
             wallpaperSize: layoutWallpaperSize,
-            screenSize: screen.frame.size,
+            screenSize: pixelSize,
             settings: settings)
         cropView.applyCropLayout(applyingSourceContentCrop(contentCrop, to: layout))
         window.backgroundColor = NSColor(cgColor: layout.letterboxColor) ?? .black
@@ -535,7 +548,8 @@ final class StaticImageWallpaperOverlayManager {
         return CropLayout(
             wallpaperCropRect: combinedCrop,
             viewportRect: layout.viewportRect,
-            letterboxColor: layout.letterboxColor
+            letterboxColor: layout.letterboxColor,
+            isTiled: layout.isTiled
         )
     }
 
@@ -836,10 +850,22 @@ final class StaticImageWallpaperOverlayManager {
     }
 
     @objc private func handleCropDidChange(_ note: Notification) {
-        guard let screenID = note.userInfo?["screenID"] as? String,
-              let window = imageWindows[screenID],
-              let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else { return }
-        applyCropToWindow(window, screenID: screenID, screen: screen)
+        guard let requested = note.userInfo?["screenID"] as? String else { return }
+        for screen in NSScreen.screens where requested == "*" || requested == screen.wallpaperScreenIdentifier {
+            let id = screen.wallpaperScreenIdentifier
+            guard let window = imageWindows[id] else { continue }
+            applyCropToWindow(window, screenID: id, screen: screen)
+            guard DisplayCropSettingsStore.shared.settings(for: screen).displayMode != .fill,
+                  let current = imageByScreen[id] else { continue }
+            Task { [weak self] in
+                let source = await StaticWallpaperApplyService.originalStaticSourceURL(for: current)
+                guard let self, source != current, self.imageByScreen[id] == current,
+                      self.imageWindows[id] != nil, !Self.isDynamicWallpaperLive(on: screen) else { return }
+                await self.showPrepared(imageURL: source, for: screen, isCurrent: {
+                    !Self.isDynamicWallpaperLive(on: screen)
+                })
+            }
+        }
     }
 }
 
@@ -1109,6 +1135,8 @@ private final class StaticImageOverlayWindow: NSWindow {
 /// override backing layer 为 masksToBounds 容器，与视频壁纸 layer 结构完全对齐。
 private final class StaticCropImageView: NSView {
     private let imageLayer = CALayer()
+    private let presentationTree = WallpaperPresentationLayerTree()
+    private var currentLayout: CropLayout?
 
     /// 保留 CGImage 强引用，防止 AppKit layer display cycle 清掉 contents 后无法恢复。
     private var storedCGImage: CGImage?
@@ -1141,7 +1169,8 @@ private final class StaticCropImageView: NSView {
         // AppKit layer-backed view 在 display cycle 中可能清掉子层 contents，
         // AVPlayerLayer 不受影响（播放器持续刷新），但静态 CGImage 一旦被清就无法恢复。
         imageLayer.frame = bounds
-        container.addSublayer(imageLayer)
+        container.addSublayer(presentationTree.rootLayer)
+        presentationTree.contentLayer.addSublayer(imageLayer)
     }
 
     required init?(coder: NSCoder) {
@@ -1155,56 +1184,37 @@ private final class StaticCropImageView: NSView {
         if imageLayer.contents == nil, let cg = storedCGImage {
             imageLayer.contents = cg
         }
-        // 无 crop 时保持 imageLayer 填满
-        if currentWallpaperCropRect == nil {
-            imageLayer.frame = bounds
-        }
+        applyCropLayout(currentLayout)
     }
 
-    /// 应用 CropLayout；nil 回退到 aspect-fill（与视频壁纸无 crop 时行为一致）。
-    /// 实现逻辑与 `WallpaperVideoContainerView.applyCropLayout` 完全对齐。
-    func applyCropLayout(_ layout: CropLayout?) {
-        // 兜底：确保 contents 存在（与 layout() 中的保护一致）
-        if imageLayer.contents == nil, let cg = storedCGImage {
-            imageLayer.contents = cg
+    @discardableResult
+    func applyCropLayout(_ layout: CropLayout?) -> Bool {
+        guard let geometry = WallpaperPresentationLayerTree.geometry(for: layout, in: bounds) else {
+            AppLogger.warn(.wallpaper, "Static image layout rejected: invalid geometry or tile copy budget exceeded",
+                           metadata: ["maximumCopies": WallpaperPresentationLayerTree.maximumTileCopies])
+            return false
         }
-        let viewBounds = bounds
-        guard let layout, viewBounds.width > 0, viewBounds.height > 0 else {
-            currentWallpaperCropRect = nil
-            imageLayer.contentsGravity = .resizeAspectFill
-            imageLayer.frame = viewBounds
-            layer?.mask = nil
-            return
-        }
-
-        // 与 WallpaperVideoContainerView.applyCropLayout 完全一致的计算
-        let vpW = layout.viewportRect.w * viewBounds.width
-        let vpH = layout.viewportRect.h * viewBounds.height
-        let vpX = layout.viewportRect.x * viewBounds.width
-        let vpY = (1.0 - layout.viewportRect.y - layout.viewportRect.h) * viewBounds.height
-        let viewport = CGRect(x: vpX, y: vpY, width: vpW, height: vpH)
-        currentWallpaperCropRect = layout.wallpaperCropRect
-
-        let crop = layout.wallpaperCropRect
-        let cropW = max(0.0001, crop.w)
-        let cropH = max(0.0001, crop.h)
-        let layerW = vpW / cropW
-        let layerH = vpH / cropH
-        let layerX = vpX - crop.x * layerW
-        let layerY = vpY - (1.0 - crop.y - crop.h) * layerH
-        imageLayer.frame = CGRect(x: layerX, y: layerY, width: layerW, height: layerH)
-
-        let isFullViewport = abs(vpX) < 0.5 && abs(vpY) < 0.5
-            && abs(vpW - viewBounds.width) < 0.5 && abs(vpH - viewBounds.height) < 0.5
-        if isFullViewport {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if imageLayer.contents == nil, let image = storedCGImage { imageLayer.contents = image }
+        currentLayout = layout
+        currentWallpaperCropRect = layout?.wallpaperCropRect
+        presentationTree.apply(geometry, in: bounds)
+        imageLayer.contentsGravity = layout == nil ? .resizeAspectFill : .resize
+        imageLayer.frame = geometry.sourceFrame
+        let viewport = geometry.viewport
+        if viewport.insetBy(dx: -0.5, dy: -0.5).contains(bounds) {
             layer?.mask = nil
         } else {
-            let mask = (layer?.mask as? CALayer) ?? CALayer()
+            let mask = layer?.mask ?? CALayer()
             mask.backgroundColor = CGColor(gray: 1, alpha: 1)
             mask.frame = viewport
             layer?.mask = mask
         }
+        CATransaction.commit()
+        return true
     }
+
 }
 
 // MARK: - Portrait Blur Fill Artifacts

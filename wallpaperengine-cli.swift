@@ -224,6 +224,7 @@ private struct IPCLyricLine: Codable {
 private struct InitialWebCropPayload: Codable {
     let crop: [Double]?
     let viewport: [Double]?
+    let cropTiled: Bool?
     let letterboxColorHex: String?
     let cropRevision: UInt64
 }
@@ -237,9 +238,12 @@ private struct IPCMessage: Codable {
     let fps: Int?
     /// Percent of native Web canvas pixel density; nil preserves original quality.
     let renderScalePercent: Int?
-    /// Web 壁纸裁切参数。均为 0...1 的 [x, y, w, h]，原点左上、y 向下。
+    /// viewport → 整屏 CSS 点源的 UV 矩形 [x, y, w, h]，原点左上、y 向下。
+    /// crop 允许负 origin / extent > 1；viewport 始终限制在单位范围。
     let crop: [Double]?
     let viewport: [Double]?
+    /// 重复同一个 WebView 的宿主输出；缺省 false，不创建额外网页实例。
+    let cropTiled: Bool?
     let letterboxColorHex: String?
     /// 每屏单调递增；乱序 crop 消息会被 daemon 丢弃。
     let cropRevision: UInt64?
@@ -287,6 +291,7 @@ private struct IPCMessage: Codable {
         renderScalePercent: Int? = nil,
         crop: [Double]? = nil,
         viewport: [Double]? = nil,
+        cropTiled: Bool? = nil,
         letterboxColorHex: String? = nil,
         cropRevision: UInt64? = nil,
         expectsResponse: Bool? = nil,
@@ -326,6 +331,7 @@ private struct IPCMessage: Codable {
         self.renderScalePercent = renderScalePercent
         self.crop = crop
         self.viewport = viewport
+        self.cropTiled = cropTiled
         self.letterboxColorHex = letterboxColorHex
         self.cropRevision = cropRevision
         self.expectsResponse = expectsResponse
@@ -716,6 +722,212 @@ private func readWebWallpaperUserPropertiesJSON(contentDir: URL) -> String? {
         return nil
     }
     return str
+}
+
+// MARK: - Pure Web presentation geometry (no views, media or desktop state)
+
+private struct WebPresentationRect {
+    var x: CGFloat
+    var y: CGFloat
+    var w: CGFloat
+    var h: CGFloat
+
+    static let full = WebPresentationRect(x: 0, y: 0, w: 1, h: 1)
+
+    /// Source UVs may leave the page to expose a border or repeat a tile.
+    static func source(from values: [Double]?) -> WebPresentationRect {
+        guard let values, values.count == 4, values.allSatisfy(\.isFinite),
+              abs(values[0]) <= 1_000_000, abs(values[1]) <= 1_000_000,
+              values[2] >= 0.0001, values[2] <= 1_000_000,
+              values[3] >= 0.0001, values[3] <= 1_000_000 else { return .full }
+        return WebPresentationRect(
+            x: CGFloat(values[0]), y: CGFloat(values[1]),
+            w: CGFloat(values[2]), h: CGFloat(values[3])
+        )
+    }
+
+    static func validSource(_ values: [Double]?) -> Bool {
+        guard let values else { return true }
+        return values.count == 4 && values.allSatisfy(\.isFinite)
+            && abs(values[0]) <= 1_000_000 && abs(values[1]) <= 1_000_000
+            && values[2] >= 0.0001 && values[2] <= 1_000_000
+            && values[3] >= 0.0001 && values[3] <= 1_000_000
+    }
+
+    static func validViewport(_ values: [Double]?) -> Bool {
+        guard let values else { return true }
+        return values.count == 4 && values.allSatisfy(\.isFinite)
+            && values[0] >= 0 && values[1] >= 0 && values[2] > 0 && values[3] > 0
+            && values[0] + values[2] <= 1.000001 && values[1] + values[3] <= 1.000001
+    }
+
+    /// Only source UVs may exceed the unit square; a destination never does.
+    static func viewport(from values: [Double]?) -> WebPresentationRect {
+        guard let values, validViewport(values) else { return .full }
+        return WebPresentationRect(x: CGFloat(values[0]), y: CGFloat(values[1]),
+                                   w: CGFloat(values[2]), h: CGFloat(values[3]))
+    }
+}
+
+private struct WebPresentationGeometry {
+    static let maximumInstancesPerAxis = 65_536
+    static let maximumTotalInstances = 65_536
+
+    let sourceSize: CGSize
+    let viewportFrame: CGRect // top-left logical points in the destination
+    let scaleX: CGFloat
+    let scaleY: CGFloat
+    let translation: CGPoint // unwrapped page origin in the destination
+    let firstTileOrigin: CGPoint // viewport-local, top-left logical points
+    let columns: Int
+    let rows: Int
+    let tiled: Bool
+
+    static func make(
+        sourceSize: CGSize,
+        targetSize: CGSize,
+        crop: WebPresentationRect,
+        viewport: WebPresentationRect,
+        tiled: Bool
+    ) -> WebPresentationGeometry? {
+        guard sourceSize.width.isFinite, sourceSize.height.isFinite,
+              targetSize.width.isFinite, targetSize.height.isFinite,
+              sourceSize.width > 0, sourceSize.height > 0,
+              targetSize.width > 0, targetSize.height > 0 else { return nil }
+        let frame = CGRect(
+            x: viewport.x * targetSize.width, y: viewport.y * targetSize.height,
+            width: viewport.w * targetSize.width, height: viewport.h * targetSize.height
+        )
+        let scaleX = frame.width / (sourceSize.width * crop.w)
+        let scaleY = frame.height / (sourceSize.height * crop.h)
+        let translation = CGPoint(
+            x: frame.minX - crop.x * sourceSize.width * scaleX,
+            y: frame.minY - crop.y * sourceSize.height * scaleY
+        )
+        guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0,
+              translation.x.isFinite, translation.y.isFinite else { return nil }
+        let tileSize = CGSize(width: sourceSize.width * scaleX, height: sourceSize.height * scaleY)
+        var first = CGPoint(x: translation.x - frame.minX, y: translation.y - frame.minY)
+        var columns = 1
+        var rows = 1
+        if tiled {
+            // The first copy starts at/before the viewport. Only forward copies
+            // are needed, regardless of negative source origins or large pans.
+            first.x = -positiveModulo(-first.x, period: tileSize.width)
+            first.y = -positiveModulo(-first.y, period: tileSize.height)
+            let countX = ceil((frame.width - first.x) / tileSize.width)
+            let countY = ceil((frame.height - first.y) / tileSize.height)
+            // Reject pathological IPC rather than ask the compositor to expand
+            // millions of instances. The ordinary 25% scale needs 4×4 copies.
+            guard countX.isFinite, countY.isFinite, countX >= 1, countY >= 1,
+                  countX <= CGFloat(maximumInstancesPerAxis),
+                  countY <= CGFloat(maximumInstancesPerAxis),
+                  countX * countY <= CGFloat(maximumTotalInstances) else { return nil }
+            columns = Int(countX)
+            rows = Int(countY)
+        }
+        return WebPresentationGeometry(
+            sourceSize: sourceSize, viewportFrame: frame,
+            scaleX: scaleX, scaleY: scaleY, translation: translation,
+            firstTileOrigin: first, columns: columns, rows: rows, tiled: tiled
+        )
+    }
+
+    static func positiveModulo(_ value: CGFloat, period: CGFloat) -> CGFloat {
+        let remainder = value.truncatingRemainder(dividingBy: period)
+        return remainder < 0 ? remainder + period : remainder
+    }
+
+    /// Inverse host transform, followed by source-period wrapping for tiles.
+    /// A point on a border is rejected before the JavaScript bridge can see it.
+    func sourcePoint(at point: CGPoint) -> CGPoint? {
+        let frame = viewportFrame
+        guard point.x.isFinite, point.y.isFinite,
+              point.x >= frame.minX, point.x < frame.maxX,
+              point.y >= frame.minY, point.y < frame.maxY else { return nil }
+        var x = (point.x - translation.x) / scaleX
+        var y = (point.y - translation.y) / scaleY
+        if tiled {
+            x = Self.positiveModulo(x, period: sourceSize.width)
+            y = Self.positiveModulo(y, period: sourceSize.height)
+        }
+        guard x >= 0, x < sourceSize.width, y >= 0, y < sourceSize.height else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+}
+
+/// AppKit owns the one page view. Only its native ancestor layers are transformed
+/// and replicated, so window.innerWidth / innerHeight and page CSS stay intact.
+private final class WebPresentationView: NSView {
+    private final class ReplicatorView: NSView {
+        override func makeBackingLayer() -> CALayer { CAReplicatorLayer() }
+        var replicator: CAReplicatorLayer { layer as! CAReplicatorLayer }
+    }
+
+    private let verticalCopies = ReplicatorView(frame: .zero)
+    private let horizontalCopies = ReplicatorView(frame: .zero)
+    private let sourceView = NSView(frame: .zero)
+    var geometry: WebPresentationGeometry?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        verticalCopies.wantsLayer = true
+        horizontalCopies.wantsLayer = true
+        verticalCopies.layer?.masksToBounds = false
+        horizontalCopies.layer?.masksToBounds = false
+        sourceView.wantsLayer = true
+        sourceView.layer?.masksToBounds = true
+        addSubview(verticalCopies)
+        verticalCopies.addSubview(horizontalCopies)
+        horizontalCopies.addSubview(sourceView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func install(_ webView: WKWebView) { sourceView.addSubview(webView) }
+
+    func apply(_ geometry: WebPresentationGeometry) {
+        self.geometry = geometry
+        let size = geometry.sourceSize
+        let tileWidth = size.width * geometry.scaleX
+        let tileHeight = size.height * geometry.scaleY
+        let origin = geometry.firstTileOrigin
+        // AppKit ancestor layers use bottom-left coordinates. The first copy is
+        // the top-left visible tile, with vertical instances extending downward.
+        let bottom = bounds.height - origin.y - tileHeight
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        verticalCopies.frame = bounds
+        horizontalCopies.frame = verticalCopies.bounds
+        // Scale the ancestor's coordinate space, keeping its WebView child at
+        // the original logical size. AppKit owns both frame and backing-layer
+        // geometry, so a later layout pass cannot undo a manual layer transform.
+        sourceView.frame = CGRect(x: origin.x, y: bottom, width: tileWidth, height: tileHeight)
+        sourceView.bounds = CGRect(origin: .zero, size: size)
+        let xCopies = horizontalCopies.replicator
+        let yCopies = verticalCopies.replicator
+        xCopies.instanceCount = geometry.columns
+        yCopies.instanceCount = geometry.rows
+        xCopies.instanceDelay = 0
+        yCopies.instanceDelay = 0
+        xCopies.instanceTransform = CATransform3DMakeTranslation(tileWidth, 0, 0)
+        yCopies.instanceTransform = CATransform3DMakeTranslation(0, -tileHeight, 0)
+        CATransaction.commit()
+    }
+
+    /// Native events are injected once through the existing desktop/Finder
+    /// bridge. Replicated layers have no AppKit view and cannot receive events.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard let geometry,
+              geometry.sourcePoint(at: CGPoint(
+                x: geometry.viewportFrame.minX + local.x,
+                y: geometry.viewportFrame.minY + bounds.height - local.y
+              )) != nil else { return nil }
+        return self
+    }
 }
 
 // MARK: - Web Renderer Bridge (WKWebView-based HTML wallpaper)
@@ -1150,6 +1362,16 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
     private static let mouseEventBridgeScript = WKUserScript(
         source: """
         (function() {
+          if (!window.__wxEventLog) {
+            window.__wxEventLog = [];
+            ['pointerdown','mousedown','mouseup','click'].forEach(function(t) {
+              document.addEventListener(t, function(e) {
+                var el = e.target;
+                window.__wxEventLog.push(t + '|' + (e.isTrusted ? 'T' : 'S') + '|' + ((el && (el.id || el.className)) || '?') + '|' + Math.round(e.clientX) + ',' + Math.round(e.clientY));
+                if (window.__wxEventLog.length > 80) window.__wxEventLog.shift();
+              }, true);
+            });
+          }
           if (window.__wxMouseBridge) return;
           window.__wxMouseBridge = {
             lastDownTarget: null,
@@ -1200,10 +1422,16 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
               }
               var event = new MouseEvent(type, mouseInit);
               el.dispatchEvent(event);
+              window.__wxLastMouseTarget = (el.id || el.className || el.tagName) + '@' + Math.round(x) + ',' + Math.round(y);
               if (type === 'mousedown') { this.lastDownTarget = el; }
               if (type === 'mouseup' && this.lastDownTarget) {
+                // click 派发到 mousedown 的目标：真实光标在 down/up 之间移动时
+                // mouseup 的 elementFromPoint 会落在别的元素上，旧实现把 click
+                // 派发到 up 元素导致按钮的 click 监听器永远收不到事件。
+                var downRect = this.lastDownTarget.getBoundingClientRect();
                 var clickEvent = new MouseEvent('click', {
-                  clientX: x, clientY: y,
+                  clientX: downRect.left + downRect.width / 2,
+                  clientY: downRect.top + downRect.height / 2,
                   bubbles: true, cancelable: true,
                   button: button || 0, view: window
                 });
@@ -2288,9 +2516,25 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         for attempt in 0..<4 {
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(attempt) * 0.15) { [weak self] in
                 guard let self else { return }
+                self.refreshHostPresentationGeometry()
                 self.updateDockSafeAreas()
                 if attempt == 3 { self.dockGeometryRefreshScheduled = false }
             }
+        }
+    }
+
+    private func refreshHostPresentationGeometry() {
+        // Match the stored physical display identity, including while paused.
+        // A page gets a new CSS viewport only when that screen's size changes.
+        for (screen, state) in screenStates where !state.isOffscreen {
+            guard let stored = state.targetScreen, let window = state.window,
+                  let target = NSScreen.screens.first(where: {
+                    $0.wallpaperScreenIdentifier == stored.wallpaperScreenIdentifier
+                  }) else { continue }
+            screenStates[screen]?.targetScreen = target
+            if window.frame != target.frame { window.setFrame(target.frame, display: false) }
+            state.webView?.layer?.contentsScale = target.backingScaleFactor
+            applyCropLayout(for: screen)
         }
     }
 
@@ -2353,14 +2597,10 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             (document.head || document.documentElement).appendChild(style);
           }
 
-          function clearManaged() {
-            for (var i = 0; i < managed.length; i++) {
-              var el = managed[i];
-              el.classList.remove('wx-dock-avoid-bottom', 'wx-dock-avoid-left', 'wx-dock-avoid-right');
-              el.style.removeProperty('--waifux-element-shift');
-              el.removeAttribute('data-wx-dock-moved');
-            }
-            managed.length = 0;
+          function unmanage(el) {
+            el.classList.remove('wx-dock-avoid-bottom', 'wx-dock-avoid-left', 'wx-dock-avoid-right');
+            el.style.removeProperty('--waifux-element-shift');
+            el.removeAttribute('data-wx-dock-moved');
           }
 
           function isExcluded(el) {
@@ -2385,9 +2625,6 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
               var el = candidates[i];
               if (!el || seen.has(el) || isExcluded(el)) continue;
               seen.add(el);
-              var rect = el.getBoundingClientRect();
-              if (rect.width < 24 || rect.height < 8) continue;
-              if (rect.width * rect.height > vw * vh * 0.55) continue;
               var style = window.getComputedStyle(el);
               if (style.display === 'none' || style.visibility === 'hidden') continue;
               var isKnown = el.matches(knownSelector);
@@ -2396,6 +2633,19 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                 if (position !== 'fixed' && position !== 'sticky' && position !== 'absolute') continue;
                 if (!isInteractive(el)) continue;
               }
+              /* 已避让的元素量到的是平移后的 rect；换算回未平移位置再过滤/算偏移，
+                 扫描才是幂等的，不会在「已平移」坐标上二次决策。 */
+              var live = el.getBoundingClientRect();
+              var applied = el.getAttribute('data-wx-dock-moved') ? (parseFloat(el.style.getPropertyValue('--waifux-element-shift')) || 0) : 0;
+              var rect = {
+                left: live.left + (config.edge === 'left' ? applied : config.edge === 'right' ? -applied : 0),
+                right: live.right + (config.edge === 'left' ? applied : config.edge === 'right' ? -applied : 0),
+                top: live.top + (config.edge === 'bottom' ? applied : 0),
+                bottom: live.bottom + (config.edge === 'bottom' ? applied : 0),
+                width: live.width, height: live.height
+              };
+              if (rect.width < 24 || rect.height < 8) continue;
+              if (rect.width * rect.height > vw * vh * 0.55) continue;
               if (config.edge !== 'bottom' && rect.width > vw * 0.72) continue;
               if (config.edge === 'bottom' && rect.height > vh * 0.45) continue;
               result.push({ el: el, rect: rect });
@@ -2404,50 +2654,68 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
           }
 
           function scan() {
-            clearManaged();
+            /* 幂等扫描：先算目标状态，再与现状 diff，只写真正变化的属性。
+               旧实现每轮先摘后加避让 class/偏移，配合注入样式的 translate 过渡，
+               页面任何持续 DOM 变化（每帧 dataset 写入、秒级文本刷新）都会让控件
+               「落回原位→弹起」无限抖动；这里稳态零 DOM 写入，断开自激循环。 */
             var vw = window.innerWidth, vh = window.innerHeight;
-            if (config.edge === 'none' || config.points <= 0) return [];
-            installStyle();
-            var candidates = collect(vw, vh);
-            var selected = [];
-            var limit = config.points + margin;
-            for (var i = 0; i < candidates.length; i++) {
-              var el = candidates[i].el;
-              var nested = false;
-              for (var j = 0; j < selected.length; j++) {
-                if (selected[j].contains(el)) { nested = true; break; }
+            var desired = new Map();
+            if (config.edge !== 'none' && config.points > 0) {
+              installStyle();
+              var candidates = collect(vw, vh);
+              var selected = [];
+              var limit = config.points + margin;
+              for (var i = 0; i < candidates.length; i++) {
+                var el = candidates[i].el;
+                var nested = false;
+                for (var j = 0; j < selected.length; j++) {
+                  if (selected[j].contains(el)) { nested = true; break; }
+                }
+                if (nested) continue;
+                var rect = candidates[i].rect;
+                var shift = 0;
+                var cls = '';
+                if (config.edge === 'bottom') {
+                  var bottomThreshold = vh - config.points - margin;
+                  if (rect.bottom > bottomThreshold) {
+                    shift = Math.min(limit, rect.bottom - bottomThreshold);
+                    cls = 'wx-dock-avoid-bottom';
+                  }
+                } else if (config.edge === 'left') {
+                  var leftThreshold = config.points + margin;
+                  if (rect.left < leftThreshold) {
+                    shift = Math.min(limit, leftThreshold - rect.left);
+                    cls = 'wx-dock-avoid-left';
+                  }
+                } else if (config.edge === 'right') {
+                  var rightThreshold = vw - config.points - margin;
+                  if (rect.right > rightThreshold) {
+                    shift = Math.min(limit, rect.right - rightThreshold);
+                    cls = 'wx-dock-avoid-right';
+                  }
+                }
+                if (!cls || shift < 0.5) continue;
+                desired.set(el, { cls: cls, shift: shift.toFixed(1) + 'px' });
+                selected.push(el);
               }
-              if (nested) continue;
-              var rect = el.getBoundingClientRect();
-              var shift = 0;
-              var cls = '';
-              if (config.edge === 'bottom') {
-                var bottomThreshold = vh - config.points - margin;
-                if (rect.bottom > bottomThreshold) {
-                  shift = Math.min(limit, rect.bottom - bottomThreshold);
-                  cls = 'wx-dock-avoid-bottom';
-                }
-              } else if (config.edge === 'left') {
-                var leftThreshold = config.points + margin;
-                if (rect.left < leftThreshold) {
-                  shift = Math.min(limit, leftThreshold - rect.left);
-                  cls = 'wx-dock-avoid-left';
-                }
-              } else if (config.edge === 'right') {
-                var rightThreshold = vw - config.points - margin;
-                if (rect.right > rightThreshold) {
-                  shift = Math.min(limit, rect.right - rightThreshold);
-                  cls = 'wx-dock-avoid-right';
-                }
-              }
-              if (!cls || shift < 0.5) continue;
-              el.style.setProperty('--waifux-element-shift', shift.toFixed(1) + 'px');
-              el.classList.add(cls);
-              el.setAttribute('data-wx-dock-moved', config.edge);
-              selected.push(el);
-              managed.push(el);
             }
-            return selected.map(function(el) {
+            for (var m = 0; m < managed.length; m++) {
+              if (!desired.has(managed[m])) unmanage(managed[m]);
+            }
+            desired.forEach(function(want, el) {
+              if (el.style.getPropertyValue('--waifux-element-shift') !== want.shift) {
+                el.style.setProperty('--waifux-element-shift', want.shift);
+              }
+              if (!el.classList.contains(want.cls)) {
+                el.classList.remove('wx-dock-avoid-bottom', 'wx-dock-avoid-left', 'wx-dock-avoid-right');
+                el.classList.add(want.cls);
+              }
+              if (el.getAttribute('data-wx-dock-moved') !== config.edge) {
+                el.setAttribute('data-wx-dock-moved', config.edge);
+              }
+            });
+            managed = Array.from(desired.keys());
+            return managed.map(function(el) {
               var rect = el.getBoundingClientRect();
               return {
                 tag: el.tagName,
@@ -2464,10 +2732,13 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             var root = document.documentElement;
             installStyle();
             root.dataset.wxDockEdge = config.edge;
-            root.style.setProperty('--waifux-dock-inset', config.points + 'px');
-            root.style.setProperty('--waifux-dock-bottom', (config.edge === 'bottom' ? config.points : 0) + 'px');
-            root.style.setProperty('--waifux-dock-left', (config.edge === 'left' ? config.points : 0) + 'px');
-            root.style.setProperty('--waifux-dock-right', (config.edge === 'right' ? config.points : 0) + 'px');
+            var setVar = function(name, value) {
+              if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value);
+            };
+            setVar('--waifux-dock-inset', config.points + 'px');
+            setVar('--waifux-dock-bottom', (config.edge === 'bottom' ? config.points : 0) + 'px');
+            setVar('--waifux-dock-left', (config.edge === 'left' ? config.points : 0) + 'px');
+            setVar('--waifux-dock-right', (config.edge === 'right' ? config.points : 0) + 'px');
             // 页面可直接使用这些变量做精确布局；固定控件由宿主按实际重叠量平移。
             root.style.setProperty('--safe-area-inset-bottom', 'var(--waifux-dock-bottom)');
             root.style.setProperty('--safe-area-inset-left', 'var(--waifux-dock-left)');
@@ -2510,43 +2781,24 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         forMainFrameOnly: true
     )
 
-    private struct WebCropRect {
-        var x: CGFloat
-        var y: CGFloat
-        var w: CGFloat
-        var h: CGFloat
-
-        static let full = WebCropRect(x: 0, y: 0, w: 1, h: 1)
-
-        static func normalized(from values: [Double]?) -> WebCropRect {
-            guard let values, values.count == 4, values.allSatisfy(\.isFinite) else {
-                return .full
-            }
-            let minimumSize: CGFloat = 0.0001
-            let x = max(0, min(1 - minimumSize, CGFloat(values[0])))
-            let y = max(0, min(1 - minimumSize, CGFloat(values[1])))
-            let w = min(1 - x, max(minimumSize, CGFloat(values[2])))
-            let h = min(1 - y, max(minimumSize, CGFloat(values[3])))
-            return WebCropRect(x: x, y: y, w: w, h: h)
-        }
-
-    }
-
     private struct WebCropLayout {
-        var crop: WebCropRect
-        var viewport: WebCropRect
+        var crop: WebPresentationRect
+        var viewport: WebPresentationRect
+        var tiled: Bool
         var letterboxColor: NSColor
 
-        static let full = WebCropLayout(crop: .full, viewport: .full, letterboxColor: .black)
+        static let full = WebCropLayout(crop: .full, viewport: .full, tiled: false, letterboxColor: .black)
 
         static func make(
             crop: [Double]?,
             viewport: [Double]?,
+            cropTiled: Bool?,
             letterboxColorHex: String?
         ) -> WebCropLayout {
             WebCropLayout(
-                crop: WebCropRect.normalized(from: crop),
-                viewport: WebCropRect.normalized(from: viewport),
+                crop: WebPresentationRect.source(from: crop),
+                viewport: WebPresentationRect.viewport(from: viewport),
+                tiled: cropTiled ?? false,
                 letterboxColor: color(from: letterboxColorHex)
             )
         }
@@ -2656,8 +2908,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
     /// 每个屏幕独立的 Web 渲染状态
     private struct ScreenState {
         var window: NSWindow?
-        /// 仅裁切容器裁掉超出 viewport 的区域，WebView 本身始终保留完整逻辑尺寸。
-        var cropContainer: NSView?
+        /// 宿主原生层负责裁切、变换与平铺，WebView 始终保留整屏 CSS 点尺寸。
+        var cropContainer: WebPresentationView?
         var webView: WKWebView?
         var videoGeometryWork: DispatchWorkItem?
         var isPaused: Bool = false
@@ -2717,6 +2969,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         userPropertiesJSON: String? = nil,
         initialCrop: [Double]? = nil,
         initialViewport: [Double]? = nil,
+        initialCropTiled: Bool? = nil,
         initialLetterboxColorHex: String? = nil,
         initialCropRevision: UInt64? = nil,
         completion: ((Bool) -> Void)? = nil
@@ -2737,6 +2990,20 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             screenIdx = 0
         }
 
+        let requestedLayout = WebCropLayout.make(
+            crop: initialCrop, viewport: initialViewport, cropTiled: initialCropTiled,
+            letterboxColorHex: initialLetterboxColorHex
+        )
+        guard WebPresentationGeometry.make(
+            sourceSize: CGSize(width: width, height: height),
+            targetSize: CGSize(width: width, height: height),
+            crop: requestedLayout.crop, viewport: requestedLayout.viewport, tiled: requestedLayout.tiled
+        ) != nil else {
+            dlog("[WebRendererBridge] Rejected initial crop geometry / tile budget screen=\(screenIdx); preserving prior page")
+            completion?(false)
+            return
+        }
+
         // 先保留旧 generation 再 stop：stop 会 fail 旧 pendingCompletion 并 +1 generation
         let previousGeneration = screenStates[screenIdx]?.firstFrameSettleGeneration ?? 0
         stop(screen: screenIdx) // 只清理目标屏幕的旧状态
@@ -2746,11 +3013,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         screenStates[screenIdx]?.firstFrameSettleGeneration = loadGeneration
         screenStates[screenIdx]?.pendingCompletion = completion
         screenStates[screenIdx]?.isOffscreen = offscreen
-        screenStates[screenIdx]?.cropLayout = WebCropLayout.make(
-            crop: initialCrop,
-            viewport: initialViewport,
-            letterboxColorHex: initialLetterboxColorHex
-        )
+        screenStates[screenIdx]?.cropLayout = requestedLayout
         screenStates[screenIdx]?.lastCropRevision = initialCropRevision ?? 0
 
         // 超时安全网：30 秒后如果本代 load 的 pendingCompletion 仍在，强制回调防止 IPC 卡死。
@@ -2903,7 +3166,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
 
         // 外层仅负责 viewport 裁切。WebView 保持完整屏幕尺寸，避免固定定位/WebGL
         // 壁纸因 crop 而重排或收到错误的 window.innerWidth/window.innerHeight。
-        let cropContainer = NSView(frame: contentView.bounds)
+        let cropContainer = WebPresentationView(frame: contentView.bounds)
         cropContainer.wantsLayer = true
         cropContainer.layer?.masksToBounds = true
         cropContainer.layer?.backgroundColor = NSColor.clear.cgColor
@@ -2962,14 +3225,18 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         web.layer?.backgroundColor = NSColor.clear.cgColor
         web.layer?.contentsScale = targetScreen.backingScaleFactor
 
-        cropContainer.addSubview(web)
+        cropContainer.install(web)
         contentView.addSubview(cropContainer)
 
         screenStates[screenIdx]?.window = w
         screenStates[screenIdx]?.cropContainer = cropContainer
         screenStates[screenIdx]?.webView = web
         screenStates[screenIdx]?.targetScreen = targetScreen
-        applyCropLayout(for: screenIdx)
+        guard applyCropLayout(for: screenIdx) else {
+            dlog("[WebRendererBridge] Initial host geometry unavailable screen=\(screenIdx)")
+            stop(screen: screenIdx)
+            return
+        }
         if !offscreen { installDockSafeAreaObserverIfNeeded() }
 
         let fileURL = baseURL.appendingPathComponent(indexFile)
@@ -3207,6 +3474,18 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
     }
 
     func pushAudioFrame(_ floats: [Float]) {
+        // 诊断哨兵：全 1.0 频谱帧触发页面事件日志回传（临时调试通道）。
+        if floats.allSatisfy({ $0 == 1.0 }) {
+            for (screen, state) in screenStates where state.isLoaded {
+                guard let webView = state.webView else { continue }
+                DispatchQueue.main.async { [weak webView] in
+                    webView?.evaluateJavaScript("JSON.stringify({log: window.__wxEventLog || [], pomo: (document.getElementById('gp-pomo-label') || {}).textContent, last: window.__wxLastMouseTarget, vp: [innerWidth, innerHeight, devicePixelRatio], ring: (function(){var r=document.getElementById('gp-pomo-ring').getBoundingClientRect();return [r.x,r.y,r.width,r.height];})(), corner: (function(){var r=document.querySelector('.corner-se').getBoundingClientRect();return [r.x,r.y,r.width,r.height];})(), zoom: getComputedStyle(document.documentElement).zoom, at779: (function(){var e=document.elementFromPoint(714,779);return e&&(e.id||e.className);})(), at862: (function(){var e=document.elementFromPoint(714,862);return e&&(e.id||e.className);})(), card: (function(){var r=document.getElementById('gp-pomo').getBoundingClientRect();return [r.x,r.y,r.width,r.height];})()})") { result, error in
+                        dlog("[WebRendererBridge] EVENTLOG screen=\(screen) result=\(String(describing: result)) error=\(String(describing: error))")
+                    }
+                }
+            }
+            return
+        }
         guard floats.count == 128 else { return }
         var sb = "if(window.__wxUpdateAudioBuf)window.__wxUpdateAudioBuf(["
         sb.reserveCapacity(1200)
@@ -3353,128 +3632,78 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         return true
     }
 
-    /// 热更新 Web 壁纸的裁切与可视框。WebView 保持原始屏幕 viewport，
-    /// 父容器负责可视框裁切，HTML 根节点负责整个 Web 页面的缩放与平移。
+    /// Host-only presentation updates still work while the page is paused.
     @discardableResult
     func applyCrop(
         crop: [Double]?,
         viewport: [Double]?,
+        cropTiled: Bool?,
         letterboxColorHex: String?,
         cropRevision: UInt64?,
         screen: Int = 0
     ) -> Bool {
         guard var state = screenStates[screen],
-              state.window != nil,
-              state.cropContainer != nil,
-              state.webView != nil else {
-            return false
-        }
+              let contentView = state.window?.contentView,
+              state.cropContainer != nil, state.webView != nil else { return false }
         if let cropRevision, cropRevision < state.lastCropRevision {
             dlog("[WebRendererBridge] Ignored stale crop screen=\(screen) revision=\(cropRevision) latest=\(state.lastCropRevision)")
             return true
         }
-        state.cropLayout = WebCropLayout.make(
-            crop: crop,
-            viewport: viewport,
+        let tiled = cropTiled ?? false
+        guard WebPresentationRect.validSource(crop),
+              WebPresentationRect.validViewport(viewport),
+              (!tiled || (crop != nil && viewport != nil)) else {
+            dlog("[WebRendererBridge] Rejected malformed crop payload screen=\(screen) revision=\(cropRevision ?? 0); preserving prior layout")
+            return false
+        }
+        let layout = WebCropLayout.make(
+            crop: crop, viewport: viewport, cropTiled: cropTiled,
             letterboxColorHex: letterboxColorHex
         )
-        if let cropRevision {
-            state.lastCropRevision = cropRevision
+        guard WebPresentationGeometry.make(
+            sourceSize: contentView.bounds.size, targetSize: contentView.bounds.size,
+            crop: layout.crop, viewport: layout.viewport, tiled: layout.tiled
+        ) != nil else {
+            dlog("[WebRendererBridge] Rejected crop geometry / tile budget screen=\(screen) revision=\(cropRevision ?? 0); preserving prior layout (maxAxis=256 maxTotal=65536)")
+            return false
         }
+        if bridgedMouseDownScreen == screen { cancelBridgedMouseDown() }
+        state.cropLayout = layout
+        if let cropRevision { state.lastCropRevision = cropRevision }
         screenStates[screen] = state
-        applyCropLayout(for: screen)
-        return true
+        return applyCropLayout(for: screen)
     }
 
-    private func webRootTransform(
-        targetSize: CGSize,
-        crop: WebCropRect,
-        viewport: WebCropRect
-    ) -> (scaleX: CGFloat, scaleY: CGFloat, translateX: CGFloat, translateY: CGFloat) {
-        let viewportWidth = viewport.w * targetSize.width
-        let viewportHeight = viewport.h * targetSize.height
-        let viewportX = viewport.x * targetSize.width
-        let viewportY = viewport.y * targetSize.height
-        let scaleX = viewportWidth / max(0.0001, targetSize.width * crop.w)
-        let scaleY = viewportHeight / max(0.0001, targetSize.height * crop.h)
-        let translateX = viewportX - crop.x * targetSize.width * scaleX
-        let translateY = viewportY - crop.y * targetSize.height * scaleY
-        return (scaleX, scaleY, translateX, translateY)
-    }
-
-    private func applyCropLayout(for screen: Int) {
+    @discardableResult
+    private func applyCropLayout(for screen: Int) -> Bool {
         guard let state = screenStates[screen],
-              let window = state.window,
-              let contentView = window.contentView,
+              let contentView = state.window?.contentView,
               let cropContainer = state.cropContainer,
-              let webView = state.webView else {
-            return
-        }
-
+              let webView = state.webView else { return false }
         let targetSize = contentView.bounds.size
-        let sourceSize = webView.bounds.size
-        guard targetSize.width > 0, targetSize.height > 0,
-              sourceSize.width > 0, sourceSize.height > 0 else {
-            return
-        }
-
         let layout = state.cropLayout
-        let viewport = layout.viewport
-        let crop = layout.crop
-        let cropText = String(format: "%.4f,%.4f,%.4f,%.4f", crop.x, crop.y, crop.w, crop.h)
-        let viewportText = String(format: "%.4f,%.4f,%.4f,%.4f", viewport.x, viewport.y, viewport.w, viewport.h)
-        dlog("[WebRendererBridge] crop geometry screen=\(screen) revision=\(state.lastCropRevision) root=html source=\(Int(sourceSize.width))x\(Int(sourceSize.height)) target=\(Int(targetSize.width))x\(Int(targetSize.height)) crop=\(cropText) viewport=\(viewportText)")
-        let viewportWidth = viewport.w * targetSize.width
-        let viewportHeight = viewport.h * targetSize.height
-        let viewportX = viewport.x * targetSize.width
-        // AppKit view 坐标原点在左下；Crop 参数 y 原点在左上。
-        let viewportY = (1 - viewport.y - viewport.h) * targetSize.height
-
+        // The whole screen's logical points define the Web document viewport.
+        // Never infer source dimensions from a video, image or canvas element.
+        guard let geometry = WebPresentationGeometry.make(
+            sourceSize: targetSize, targetSize: targetSize,
+            crop: layout.crop, viewport: layout.viewport, tiled: layout.tiled
+        ) else {
+            dlog("[WebRendererBridge] Rejected crop geometry / tile budget screen=\(screen); preserving prior host layout")
+            return false
+        }
+        let viewport = geometry.viewportFrame
         contentView.layer?.backgroundColor = layout.letterboxColor.cgColor
         cropContainer.frame = CGRect(
-            x: viewportX,
-            y: viewportY,
-            width: viewportWidth,
-            height: viewportHeight
+            x: viewport.minX, y: targetSize.height - viewport.maxY,
+            width: viewport.width, height: viewport.height
         )
-        cropContainer.layer?.masksToBounds = true
-
-        // Keep the WebView viewport at the screen size. The crop transform is
-        // applied to document.documentElement, so the entire Web page moves
-        // together and WebGL/fixed-position descendants keep their own layout.
-        webView.frame = CGRect(
-            x: -viewportX,
-            y: -viewportY,
-            width: targetSize.width,
-            height: targetSize.height
-        )
-
-        let transform = webRootTransform(
-            targetSize: targetSize,
-            crop: crop,
-            viewport: viewport
-        )
-        let config: [String: Any] = [
-            "scaleX": transform.scaleX,
-            "scaleY": transform.scaleY,
-            "translateX": transform.translateX,
-            "translateY": transform.translateY
-        ]
-        guard state.isLoaded else { return }
-        if let data = try? JSONSerialization.data(withJSONObject: config),
-           let json = String(data: data, encoding: .utf8) {
-            let script = "window.__wxApplyWebCrop && window.__wxApplyWebCrop(\(json));"
-            webView.evaluateJavaScript(script) { result, error in
-                if let error {
-                    dlog("[WebRendererBridge] root crop JS error screen=\(screen): \(error)")
-                } else if (result as? Bool) != true {
-                    dlog(
-                        "[WebRendererBridge] root crop JS rejected screen=\(screen) " +
-                        "result=\(String(describing: result))"
-                    )
-                }
-            }
-        }
+        let sourceFrame = CGRect(origin: .zero, size: targetSize)
+        if webView.frame != sourceFrame { webView.frame = sourceFrame }
+        cropContainer.apply(geometry)
+        let crop = layout.crop
+        let cropText = String(format: "%.4f,%.4f,%.4f,%.4f", crop.x, crop.y, crop.w, crop.h)
+        dlog("[WebRendererBridge] crop geometry screen=\(screen) revision=\(state.lastCropRevision) host=native source=\(Int(targetSize.width))x\(Int(targetSize.height)) crop=\(cropText) tiled=\(layout.tiled) copies=\(geometry.columns)x\(geometry.rows)")
+        return true
     }
 
     func stop(screen: Int = 0) {
@@ -3544,12 +3773,23 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                 }
                 // Unlike NSEvent's reconstructed CGEvent, this is the original
                 // system event: its target PID still identifies the real receiver.
+                // 隐藏桌面图标后空白桌面点击可能完全无接收窗，目标进程也不一定是
+                // Finder（27.x 实测）。放行无接收窗事件，除非目标是普通 App
+                // （其透明/无边框窗不报接收窗）；系统进程（Finder/Dock/
+                // WindowManager 等）即桌面本体，放行。
+                let targetPID = event.getIntegerValueField(.eventTargetUnixProcessID)
+                let targetIsRegularApp: Bool = {
+                    guard targetPID > 0,
+                          let app = NSRunningApplication(processIdentifier: pid_t(targetPID)) else { return false }
+                    return app.activationPolicy == .regular
+                }()
+                // 透明/无边框全屏窗（驱动 overlay、启动器面板等）不报接收窗，
+                // 目标进程也可能是普通 App；几何上指针不在任何普通 App 在屏窗口
+                // 上时仍视为桌面空白，否则这类覆盖层会永久挡住壁纸交互。
+                let geometricDesktop = !WebRendererBridge.windowlessPointHitsRegularApp(event.location)
                 guard event.getIntegerValueField(.mouseEventWindowUnderMousePointer) == 0,
                       event.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 0,
-                      let finderPID = NSRunningApplication.runningApplications(
-                        withBundleIdentifier: "com.apple.finder"
-                      ).first?.processIdentifier,
-                      event.getIntegerValueField(.eventTargetUnixProcessID) == Int64(finderPID),
+                      !targetIsRegularApp || geometricDesktop,
                       let mouseEvent = NSEvent(cgEvent: event) else {
                     return Unmanaged.passUnretained(event)
                 }
@@ -3561,7 +3801,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                 case .scrollWheel: name = "wheel"
                 default: return Unmanaged.passUnretained(event)
                 }
-                bridge.dispatchMouseEvent(mouseEvent, type: name, windowlessFinderTarget: true)
+                bridge.dispatchMouseEvent(mouseEvent, type: name, windowlessDesktopTarget: true)
                 return Unmanaged.passUnretained(event)
             }, userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
@@ -3581,6 +3821,8 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
     private var finderDesktopWindowIDs: Set<Int> = []
     /// 「隐藏桌面图标」期间，点击落在 WindowManager 的 Wallpaper 全屏层。
     private var wallpaperLayerDesktopWindowIDs: Set<Int> = []
+    /// 部分 macOS 版本桌面点击由 Dock 进程的全屏窗口接收（隐藏图标后实测）。
+    private var dockDesktopWindowIDs: Set<Int> = []
     private var bridgedMouseDownScreen: Int?
     private var loggedFinderHitTestFailure = false
     /// AX 未授权时的降级只报告一次，避免每次点击刷日志。
@@ -3612,7 +3854,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         let ax = AXIsProcessTrusted()
         lastAXTrustedForLog = ax
         lastMouseSummaryTime = CFAbsoluteTimeGetCurrent()
-        dlog("[WebRendererBridge] mouse bridge START screen=\(screen) accessibility=\(ax) FinderDesktopWindows=\(finderDesktopWindowIDs.sorted()) loadedScreens=\(loadedScreens.sorted())")
+        dlog("[WebRendererBridge] mouse bridge START screen=\(screen) accessibility=\(ax) FinderDesktopWindows=\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(wallpaperLayerDesktopWindowIDs.sorted()) dockDesktop=\(dockDesktopWindowIDs.sorted()) loadedScreens=\(loadedScreens.sorted())")
         let eventTypes: [(NSEvent.EventTypeMask, String)] = [
             (.leftMouseDown, "mousedown"), (.leftMouseUp, "mouseup"),
             (.mouseMoved, "mousemove"), (.scrollWheel, "wheel")
@@ -3622,10 +3864,13 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         for (eventType, type) in eventTypes {
             let gmon = NSEvent.addGlobalMonitorForEvents(matching: eventType, handler: { [weak self] event in
                 guard let self else { return }
-                // The raw tap exclusively owns windowless events. Letting this
-                // duplicate down through would cancel the already bridged press.
+                // The raw tap exclusively owns windowless desktop events (system
+                // receiver). Letting this duplicate down through would cancel the
+                // already bridged press. Windowless events aimed at regular apps
+                // are not tap-owned; they fall through and get dropped by the gate.
                 if self.windowlessDesktopEventTap != nil, event.windowNumber == 0,
-                   event.cgEvent?.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 0 {
+                   event.cgEvent?.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 0,
+                   !Self.isRegularAppTarget(event) {
                     return
                 }
                 self.dispatchMouseEvent(event, type: type)
@@ -3663,7 +3908,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         if mouseForwardedCounts.isEmpty && mouseDroppedCounts.isEmpty { return }
         let fwd = mouseForwardedCounts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
         let drop = mouseDroppedCounts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
-        dlog("[WebRendererBridge] mouse summary 10s fwd{\(fwd)} drop{\(drop)} ax=\(AXIsProcessTrusted()) finder=\(finderDesktopWindowIDs.sorted())")
+        dlog("[WebRendererBridge] mouse summary 10s fwd{\(fwd)} drop{\(drop)} ax=\(AXIsProcessTrusted()) finder=\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(wallpaperLayerDesktopWindowIDs.sorted()) dock=\(dockDesktopWindowIDs.sorted())")
         mouseForwardedCounts.removeAll()
         mouseDroppedCounts.removeAll()
     }
@@ -3680,6 +3925,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         globalMouseMonitors.removeAll()
         finderDesktopWindowIDs.removeAll()
         wallpaperLayerDesktopWindowIDs.removeAll()
+        dockDesktopWindowIDs.removeAll()
         lastGlobalMouseMoveTime = 0
         loggedFinderHitTestFailure = false
         loggedAccessibilityFallback = false
@@ -3693,6 +3939,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             as? [[String: Any]] ?? []
         var finderIDs: Set<Int> = []
         var wallpaperIDs: Set<Int> = []
+        var dockIDs: Set<Int> = []
         for info in windows {
             guard let pid = info[kCGWindowOwnerPID as String] as? Int,
                   let app = NSRunningApplication(processIdentifier: pid_t(pid)),
@@ -3710,9 +3957,23 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                info[kCGWindowLayer as String] as? Int ?? 0 < desktopIconLevel {
                 wallpaperIDs.insert(windowID)
             }
+            // 隐藏桌面图标后部分 macOS 版本由 Dock 进程的全屏窗口接收桌面点击
+            // （27.x 实测：Finder 无桌面窗、WindowManager Wallpaper 层不收事件）。
+            // 只认覆盖整屏的 Dock 窗口；普通 App 窗口不在此列，行为不变。
+            if app.bundleIdentifier == "com.apple.dock",
+               let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+               let bx = bounds["X"], let by = bounds["Y"],
+               let bw = bounds["Width"], let bh = bounds["Height"],
+               NSScreen.screens.contains(where: {
+                   abs($0.frame.minX - bx) < 1 && abs($0.frame.minY - by) < 1 &&
+                   abs($0.frame.width - bw) < 1 && abs($0.frame.height - bh) < 1
+               }) {
+                dockIDs.insert(windowID)
+            }
         }
         finderDesktopWindowIDs = finderIDs
         wallpaperLayerDesktopWindowIDs = wallpaperIDs
+        dockDesktopWindowIDs = dockIDs
     }
 
     private func isBlankFinderDesktop(at event: NSEvent) -> Bool {
@@ -3763,8 +4024,37 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         "AXImage", "AXTextField", "AXStaticText", "AXButton"
     ]
 
+    /// 事件的原始目标进程是否为普通 App。NSEvent 会把目标 PID 改写成本进程，
+    /// 故由调用方从原始 CGEvent 取 PID 传入；nil 表示无法判定。
+    private static func isRegularAppTarget(_ event: NSEvent) -> Bool {
+        guard let cg = event.cgEvent else { return false }
+        let pid = cg.getIntegerValueField(.eventTargetUnixProcessID)
+        guard pid > 0, let app = NSRunningApplication(processIdentifier: pid_t(pid)) else { return false }
+        return app.activationPolicy == .regular
+    }
+
+    /// 无接收窗事件的几何兜底：指针不在任何普通 App 的在屏窗口上，即视为桌面空白。
+    /// CGWindowList 顺序为前后序，首个命中即最上层；系统进程窗口（Dock 条、菜单栏、
+    /// 通知中心等）不算遮挡——它们要么自己接收事件（target != 0 走白名单），
+    /// 要么不拦截点击。App 的透明/无边框窗不报接收窗，靠这里排除。
+    private static func windowlessPointHitsRegularApp(_ point: CGPoint) -> Bool {
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        for info in windows {
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let pid = info[kCGWindowOwnerPID as String] as? Int,
+                  let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+                  app.activationPolicy == .regular,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let bx = bounds["X"], let by = bounds["Y"],
+                  let bw = bounds["Width"], let bh = bounds["Height"] else { continue }
+            if CGRect(x: bx, y: by, width: bw, height: bh).contains(point) { return true }
+        }
+        return false
+    }
+
     /// 返回 (命中, 原因, targetWindow)。原因供点击丢弃日志归因，调用方热路径外只打 click 类型。
-    private func eventTargetCheck(_ event: NSEvent, window: NSWindow, requireBlank: Bool, windowlessFinderTarget: Bool = false) -> (Bool, String, Int) {
+    private func eventTargetCheck(_ event: NSEvent, window: NSWindow, requireBlank: Bool, windowlessDesktopTarget: Bool = false, originalTargetPID: Int64? = nil) -> (Bool, String, Int) {
         let target = event.windowNumber != 0
             ? event.windowNumber
             : Int(event.cgEvent?.getIntegerValueField(
@@ -3774,30 +4064,40 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         if target == 0 {
             // NSEvent rewrites the original receiver PID to this observer's PID.
             // Only the listen-only raw event tap may attest this windowless path.
-            guard windowlessFinderTarget else { return (false, "windowless-not-finder", target) }
-            return (true, "finder-windowless-desktop", target)
+            guard windowlessDesktopTarget else { return (false, "windowless-not-desktop", target) }
+            if let pid = originalTargetPID, pid > 0,
+               let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+               app.activationPolicy == .regular,
+               Self.windowlessPointHitsRegularApp(event.cgEvent?.location ?? NSEvent.mouseLocation) {
+                return (false, "windowless-app-target", target)
+            }
+            return (true, "windowless-desktop", target)
         }
         if !finderDesktopWindowIDs.contains(target),
            !wallpaperLayerDesktopWindowIDs.contains(target),
+           !dockDesktopWindowIDs.contains(target),
            requireBlank {
             // Finder 可能在壁纸加载后重建桌面窗，或用户刚切换隐藏桌面图标。
             let beforeFinder = finderDesktopWindowIDs
             let beforeWallpaper = wallpaperLayerDesktopWindowIDs
+            let beforeDock = dockDesktopWindowIDs
             refreshFinderDesktopWindowIDs()
-            if finderDesktopWindowIDs != beforeFinder || wallpaperLayerDesktopWindowIDs != beforeWallpaper {
-                dlog("[WebRendererBridge] mouse desktop windows changed finder=\(beforeFinder.sorted())->\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(beforeWallpaper.sorted())->\(wallpaperLayerDesktopWindowIDs.sorted()) ax=\(AXIsProcessTrusted())")
+            if finderDesktopWindowIDs != beforeFinder || wallpaperLayerDesktopWindowIDs != beforeWallpaper || dockDesktopWindowIDs != beforeDock {
+                dlog("[WebRendererBridge] mouse desktop windows changed finder=\(beforeFinder.sorted())->\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(beforeWallpaper.sorted())->\(wallpaperLayerDesktopWindowIDs.sorted()) dock=\(beforeDock.sorted())->\(dockDesktopWindowIDs.sorted()) ax=\(AXIsProcessTrusted())")
             }
         }
         guard target > 0 else { return (false, "invalid-window", target) }
         let isFinderDesktop = finderDesktopWindowIDs.contains(target)
         let isWallpaperLayer = wallpaperLayerDesktopWindowIDs.contains(target)
-        guard isFinderDesktop || isWallpaperLayer else {
+        let isDockDesktop = dockDesktopWindowIDs.contains(target)
+        guard isFinderDesktop || isWallpaperLayer || isDockDesktop else {
             return (false, "target-not-finder-desktop", target)
         }
         // 隐藏桌面图标后 Finder 没有桌面窗口，点击落在 WindowManager 的
-        // Wallpaper 全屏层。该层不存在图标，空白检查没有意义，直接转发。
-        if isWallpaperLayer && !isFinderDesktop {
-            return (true, "wallpaper-layer-desktop", target)
+        // Wallpaper 全屏层或 Dock 全屏接收窗。这两层不存在桌面图标，
+        // 空白检查没有意义，直接转发。
+        if (isWallpaperLayer || isDockDesktop) && !isFinderDesktop {
+            return (true, isDockDesktop ? "dock-desktop" : "wallpaper-layer-desktop", target)
         }
         if !requireBlank { return (true, "finder-desktop", target) }
         // 目标已确认是 Finder 的桌面层窗口（此判定只依赖 CGWindowList，不看 AX）。
@@ -3830,7 +4130,16 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         screenStates[screen]?.webView?.evaluateJavaScript("window.__wxMouseBridge && window.__wxMouseBridge.cancel();")
     }
 
-    private func dispatchMouseEvent(_ event: NSEvent, type: String, windowlessFinderTarget: Bool = false) {
+    private func dispatchMouseEvent(_ event: NSEvent, type: String, windowlessDesktopTarget: Bool = false) {
+        let originalTargetPID = event.cgEvent?.getIntegerValueField(.eventTargetUnixProcessID)
+        // monitor 路径的无接收窗兜底：tap 只放行系统目标，这里补几何判定
+        // （指针不在任何普通 App 在屏窗口上＝桌面空白），tap 已放行的不重复判。
+        var windowlessAttest = windowlessDesktopTarget
+        if !windowlessAttest, event.windowNumber == 0,
+           event.cgEvent?.getIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent) == 0,
+           !Self.windowlessPointHitsRegularApp(event.cgEvent?.location ?? NSEvent.mouseLocation) {
+            windowlessAttest = true
+        }
         if type == "mousedown" { cancelBridgedMouseDown() }
         if type == "mousemove" {
             let now = CFAbsoluteTimeGetCurrent()
@@ -3882,7 +4191,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                 dropDetail = "bridgedDown=\(bridgedMouseDownScreen.map(String.init) ?? "nil") screen=\(screen)"
                 continue
             }
-            let (hit, reason, target) = eventTargetCheck(event, window: window, requireBlank: type != "mousemove", windowlessFinderTarget: windowlessFinderTarget)
+            let (hit, reason, target) = eventTargetCheck(event, window: window, requireBlank: type != "mousemove", windowlessDesktopTarget: windowlessAttest, originalTargetPID: originalTargetPID)
             dropTarget = target
             guard hit else {
                 dropReason = "target-not-desktop(\(reason))"
@@ -3891,43 +4200,18 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             }
             let relX = mouseLocation.x - window.frame.origin.x
             let relY = mouseLocation.y - window.frame.origin.y
-            let sourceX = relX
-            let sourceY = window.frame.height - relY
-            let layout = state.cropLayout
-            let viewport = layout.viewport
-            let crop = layout.crop
-            let targetWidth = window.frame.width
-            let targetHeight = window.frame.height
-            let viewportX = viewport.x * targetWidth
-            let viewportY = viewport.y * targetHeight
-            let viewportWidth = viewport.w * targetWidth
-            let viewportHeight = viewport.h * targetHeight
-            guard sourceX >= viewportX, sourceX <= viewportX + viewportWidth,
-                  sourceY >= viewportY, sourceY <= viewportY + viewportHeight else {
-                dropReason = "viewport-outside"
+            // Keep Finder / desktop hit-test gates above this mapping. The host
+            // geometry also rejects letterbox points before JavaScript dispatch.
+            guard let geometry = state.cropContainer?.geometry,
+                  let sourcePoint = geometry.sourcePoint(at: CGPoint(
+                    x: relX, y: window.frame.height - relY
+                  )) else {
+                dropReason = "presentation-outside"
                 dropDetail = "screen=\(screen)"
                 continue
             }
-            let transform = webRootTransform(
-                targetSize: CGSize(width: targetWidth, height: targetHeight),
-                crop: crop,
-                viewport: viewport
-            )
-            guard transform.scaleX > 0, transform.scaleY > 0 else {
-                dropReason = "bad-transform"
-                dropDetail = "screen=\(screen)"
-                continue
-            }
-            // Mouse coordinates are sent back through the inverse transform of
-            // document.documentElement, in the WebView's normal CSS viewport.
-            let webViewX = (sourceX - transform.translateX) / transform.scaleX
-            let webViewY = (sourceY - transform.translateY) / transform.scaleY
-            guard webViewX >= 0, webViewX <= webView.bounds.width,
-                  webViewY >= 0, webViewY <= webView.bounds.height else {
-                dropReason = "web-bounds-outside"
-                dropDetail = "screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) bounds=\(Int(webView.bounds.width))x\(Int(webView.bounds.height))"
-                continue
-            }
+            let webViewX = sourcePoint.x
+            let webViewY = sourcePoint.y
             let xStr = String(Double(webViewX))
             let yStr = String(Double(webViewY))
             var script = "if(window.__wxMouseBridge){window.__wxMouseBridge.dispatch('" + type + "'," + xStr + "," + yStr + ",0"
@@ -3941,11 +4225,17 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             script += ");}else{('missing-bridge');}"
             if isClick {
                 DispatchQueue.main.async { [weak webView] in
-                    webView?.evaluateJavaScript(script) { result, error in
+                    guard let webView else {
+                        dlog("[WebRendererBridge] mouse \(type) JS-DROPPED reason=webview-released screen=\(screen)")
+                        return
+                    }
+                    webView.evaluateJavaScript(script) { result, error in
                         if let error {
                             dlog("[WebRendererBridge] mouse \(type) JS error screen=\(screen): \(error)")
                         } else if (result as? String) == "missing-bridge" {
                             dlog("[WebRendererBridge] mouse \(type) DROPPED reason=js-bridge-missing screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY)))")
+                        } else {
+                            dlog("[WebRendererBridge] mouse \(type) JS-OK screen=\(screen) web=(\(Int(webViewX)),\(Int(webViewY))) result=\(String(describing: result))")
                         }
                     }
                 }
@@ -3955,8 +4245,10 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                         guard let self else { return }
                         if let error {
                             self.mouseDroppedCounts["js-error", default: 0] += 1
-                            // 错误文案只在汇总里带一次 tende，避免每帧刷。首错立即打一行方便归因。
-                            dlog("[WebRendererBridge] mouse \(type) JS error screen=\(screen): \(error)")
+                            // 错误文案只在首错打一行，避免 mousemove 每帧刷日志。
+                            if self.mouseDroppedCounts["js-error"] == 1 {
+                                dlog("[WebRendererBridge] mouse \(type) JS error screen=\(screen): \(error)")
+                            }
                         } else if (result as? String) == "missing-bridge" {
                             self.mouseDroppedCounts["js-bridge-missing", default: 0] += 1
                         }
@@ -4011,132 +4303,10 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
             let encoded = data.base64EncodedString()
             propsBlock = "try{\(applyUserPropertiesJSBody(b64EncodedJSON: encoded))}catch(e){}"
         }
-        // 不重写 html/body 的尺寸、边距或 overflow，避免改变 WebGL 壁纸自身的布局基准。
-        // crop 只通过 document.documentElement 的 transform 作用于整页。
+        // Presentation belongs to native ancestor layers. Leave the host
+        // document's layout, transforms, backgrounds and CSS dimensions alone.
         let source = """
         (function() {
-          try {
-            var root = document.documentElement;
-            if (root) {
-              var state = window.__wxWebCropState || {
-                active: false,
-                captured: false,
-                transform: '',
-                transformPriority: '',
-                transformOrigin: '',
-                transformOriginPriority: ''
-              };
-              window.__wxWebCropState = state;
-              window.__wxSyncWebCropBackground = function() {
-                try {
-                  var body = document.body;
-                  var rootStyle = window.getComputedStyle(root);
-                  var bodyStyle = body ? window.getComputedStyle(body) : null;
-                  var bodyHasImage = bodyStyle && bodyStyle.backgroundImage !== 'none';
-                  var bodyHasColor = bodyStyle
-                    && bodyStyle.backgroundColor !== 'transparent'
-                    && bodyStyle.backgroundColor !== 'rgba(0, 0, 0, 0)';
-                  var sourceStyle = bodyHasImage || bodyHasColor ? bodyStyle : rootStyle;
-                  if (!sourceStyle) return false;
-                  root.style.setProperty('--wx-crop-background-color', sourceStyle.backgroundColor);
-                  root.style.setProperty('--wx-crop-background-image', sourceStyle.backgroundImage);
-                  root.style.setProperty('--wx-crop-background-position', sourceStyle.backgroundPosition);
-                  root.style.setProperty('--wx-crop-background-size', sourceStyle.backgroundSize);
-                  root.style.setProperty('--wx-crop-background-repeat', sourceStyle.backgroundRepeat);
-                  root.style.setProperty('--wx-crop-background-origin', sourceStyle.backgroundOrigin);
-                  root.style.setProperty('--wx-crop-background-clip', sourceStyle.backgroundClip);
-                  root.style.setProperty('--wx-crop-background-blend-mode', sourceStyle.backgroundBlendMode);
-                  return true;
-                } catch (e) {
-                  return false;
-                }
-              };
-              if (!document.getElementById('__wx-web-crop-background-style')) {
-                var cropStyle = document.createElement('style');
-                cropStyle.id = '__wx-web-crop-background-style';
-                cropStyle.textContent =
-                  'html[data-wx-web-crop-active="true"] { isolation: isolate; }' +
-                  'html[data-wx-web-crop-active="true"]::before {' +
-                  'content:"";position:fixed;inset:0;width:100vw;height:100vh;' +
-                  'pointer-events:none;z-index:-2147483647;' +
-                  'background-color:var(--wx-crop-background-color,transparent);' +
-                  'background-image:var(--wx-crop-background-image,none);' +
-                  'background-position:var(--wx-crop-background-position,0% 0%);' +
-                  'background-size:var(--wx-crop-background-size,auto);' +
-                  'background-repeat:var(--wx-crop-background-repeat,repeat);' +
-                  'background-origin:var(--wx-crop-background-origin,padding-box);' +
-                  'background-clip:var(--wx-crop-background-clip,border-box);' +
-                  'background-blend-mode:var(--wx-crop-background-blend-mode,normal);' +
-                  'background-attachment:scroll;}';
-                (document.head || root).appendChild(cropStyle);
-              }
-              if (!window.__wxWebCropBackgroundObserver && typeof MutationObserver === 'function') {
-                window.__wxWebCropBackgroundObserver = new MutationObserver(function() {
-                  if (state.active && window.__wxSyncWebCropBackground) {
-                    window.__wxSyncWebCropBackground();
-                  }
-                });
-                if (document.body) {
-                  window.__wxWebCropBackgroundObserver.observe(
-                    document.body,
-                    { attributes: true, attributeFilter: ['style', 'class'] }
-                  );
-                }
-              }
-              window.__wxApplyWebCrop = function(config) {
-                try {
-                  if (!config || !isFinite(config.scaleX) || !isFinite(config.scaleY)
-                      || !isFinite(config.translateX) || !isFinite(config.translateY)) {
-                    return false;
-                  }
-                  var isIdentity = Math.abs(config.scaleX - 1) < 0.000001
-                    && Math.abs(config.scaleY - 1) < 0.000001
-                    && Math.abs(config.translateX) < 0.0001
-                    && Math.abs(config.translateY) < 0.0001;
-                  if (isIdentity) {
-                    if (state.active && state.captured) {
-                      if (state.transform) {
-                        root.style.setProperty('transform', state.transform, state.transformPriority);
-                      } else {
-                        root.style.removeProperty('transform');
-                      }
-                      if (state.transformOrigin) {
-                        root.style.setProperty('transform-origin', state.transformOrigin, state.transformOriginPriority);
-                      } else {
-                        root.style.removeProperty('transform-origin');
-                      }
-                    }
-                    root.removeAttribute('data-wx-web-crop-active');
-                    state.active = false;
-                    state.captured = false;
-                    return true;
-                  }
-                  if (!state.captured) {
-                    state.transform = root.style.getPropertyValue('transform');
-                    state.transformPriority = root.style.getPropertyPriority('transform');
-                    state.transformOrigin = root.style.getPropertyValue('transform-origin');
-                    state.transformOriginPriority = root.style.getPropertyPriority('transform-origin');
-                    state.captured = true;
-                  }
-                  if (window.__wxSyncWebCropBackground) {
-                    window.__wxSyncWebCropBackground();
-                  }
-                  root.setAttribute('data-wx-web-crop-active', 'true');
-                  root.style.setProperty('transform-origin', '0 0', 'important');
-                  root.style.setProperty(
-                    'transform',
-                    'translate3d(' + config.translateX + 'px,' + config.translateY + 'px,0) '
-                      + 'scale3d(' + config.scaleX + ',' + config.scaleY + ',1)',
-                    'important'
-                  );
-                  state.active = true;
-                  return true;
-                } catch (e) {
-                  return false;
-                }
-              };
-            }
-          } catch (e2) {}
           \(propsBlock)
           return true;
         })();
@@ -6260,6 +6430,7 @@ private final class DesktopWallpaperManager {
         renderScalePercent: Int = 100,
         initialCrop: [Double]? = nil,
         initialViewport: [Double]? = nil,
+        initialCropTiled: Bool? = nil,
         initialLetterboxColorHex: String? = nil,
         initialCropRevision: UInt64? = nil,
         completion: ((Bool) -> Void)? = nil
@@ -6268,6 +6439,24 @@ private final class DesktopWallpaperManager {
         let screenIdx = screen ?? 0
         dlog("[DesktopWallpaperManager] setWallpaper path=\(path) width=\(width) height=\(height) screen=\(screenIdx)")
 
+        // Reject an excessive initial replication request before stopping the
+        // current screen. A rejected set must retain the last valid wallpaper.
+        let tiled = initialCropTiled ?? false
+        guard WebPresentationRect.validSource(initialCrop),
+              WebPresentationRect.validViewport(initialViewport),
+              (!tiled || (initialCrop != nil && initialViewport != nil)),
+              WebPresentationGeometry.make(
+                sourceSize: CGSize(width: width, height: height),
+                targetSize: CGSize(width: width, height: height),
+                crop: WebPresentationRect.source(from: initialCrop),
+                viewport: WebPresentationRect.viewport(from: initialViewport),
+                tiled: tiled
+              ) != nil else {
+            lastErrorMessage = "Web 壁纸平铺数量超过限制或显示几何无效"
+            dlog("[DesktopWallpaperManager] Rejected initial crop geometry / tile budget screen=\(screenIdx); preserving prior wallpaper")
+            completion?(false)
+            return
+        }
         lastErrorMessage = nil
 
         // 提前检测并拦截不支持的类型
@@ -6318,6 +6507,7 @@ private final class DesktopWallpaperManager {
                 renderScalePercent: renderScalePercent,
                 initialCrop: initialCrop,
                 initialViewport: initialViewport,
+                initialCropTiled: initialCropTiled,
                 initialLetterboxColorHex: initialLetterboxColorHex,
                 initialCropRevision: initialCropRevision
             ) { [weak self] success in
@@ -6387,6 +6577,7 @@ private final class DesktopWallpaperManager {
     func applyWebWallpaperCrop(
         crop: [Double]?,
         viewport: [Double]?,
+        cropTiled: Bool?,
         letterboxColorHex: String?,
         cropRevision: UInt64?,
         screen: Int = 0
@@ -6395,6 +6586,7 @@ private final class DesktopWallpaperManager {
         return WebRendererBridge.shared.applyCrop(
             crop: crop,
             viewport: viewport,
+            cropTiled: cropTiled,
             letterboxColorHex: letterboxColorHex,
             cropRevision: cropRevision,
             screen: screen
@@ -6862,6 +7054,7 @@ private final class Daemon: NSObject, NSApplicationDelegate {
                             renderScalePercent: msg.renderScalePercent ?? 100,
                             initialCrop: msg.crop,
                             initialViewport: msg.viewport,
+                            initialCropTiled: msg.cropTiled,
                             initialLetterboxColorHex: msg.letterboxColorHex,
                             initialCropRevision: msg.cropRevision
                         ) { success in
@@ -6923,6 +7116,7 @@ private final class Daemon: NSObject, NSApplicationDelegate {
                     let applied = DesktopWallpaperManager.shared.applyWebWallpaperCrop(
                         crop: msg.crop,
                         viewport: msg.viewport,
+                        cropTiled: msg.cropTiled,
                         letterboxColorHex: msg.letterboxColorHex,
                         cropRevision: msg.cropRevision,
                         screen: msg.screen ?? 0
@@ -7117,6 +7311,7 @@ struct WallpaperEngineCLI {
                     renderScalePercent: renderScalePercent,
                     crop: initialCrop?.crop,
                     viewport: initialCrop?.viewport,
+                    cropTiled: initialCrop?.cropTiled,
                     letterboxColorHex: initialCrop?.letterboxColorHex,
                     cropRevision: initialCrop?.cropRevision
                 )

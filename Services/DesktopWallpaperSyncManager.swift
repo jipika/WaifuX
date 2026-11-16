@@ -18,6 +18,10 @@ final class DesktopWallpaperSyncManager {
 
     /// 每个屏幕最后通过 WaifuX 设置的静态壁纸 URL（key 为 screenID）
     private var lastSetImageURLByScreen: [String: URL] = [:]
+    private var staticSourceByFingerprint: [String: URL] = [:]
+    private var cropTasks: [String: Task<Void, Never>] = [:]
+    private var cropGenerations: [String: UUID] = [:]
+    private static let sourceStateKey = "desktop_wallpaper_static_sources_v1"
     /// 每个物理显示器指纹最后设置的静态壁纸 URL，用于外接屏重连后 screenID 变化时恢复。
     private var lastSetImageURLByFingerprint: [String: URL] = [:]
 
@@ -83,13 +87,22 @@ final class DesktopWallpaperSyncManager {
         )
 
         // 恢复持久化的指纹 -> 壁纸 URL 映射，供外接屏重连后判断是否曾由 App 设过壁纸
+        if let data = WaifuXPreferences.shared.data(forKey: Self.sourceStateKey),
+           let paths = try? JSONDecoder().decode([String: URL].self, from: data) {
+            staticSourceByFingerprint = paths
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(handleCropChanged(_:)),
+            name: DisplayCropSettingsStore.cropDidChangeNotification, object: nil)
+
         loadFingerprintState()
         loadOriginalFingerprintState()
         purgeLegacyRendererCaptureState()
     }
 
     func backgroundSnapshot() -> [String: Any] {
-        ["screens": lastSetImageURLByScreen.mapValues(\.absoluteString), "fingerprints": lastSetImageURLByFingerprint.mapValues(\.absoluteString)]
+        ["screens": Dictionary(uniqueKeysWithValues: NSScreen.screens.compactMap { screen in
+            imageURL(for: screen).map { (screen.wallpaperScreenIdentifier, $0.absoluteString) }
+        }), "fingerprints": lastSetImageURLByFingerprint.merging(staticSourceByFingerprint) { _, source in source }.mapValues(\.absoluteString)]
     }
 
     /// 在 WaifuX 首次改写某屏系统壁纸前，记录当时的系统桌面图。
@@ -166,7 +179,7 @@ final class DesktopWallpaperSyncManager {
     ///   - url: 壁纸图片 URL
     ///   - screen: 目标屏幕；nil 表示注册到所有当前屏幕
     ///   - options: 设置选项
-    func registerWallpaperSet(_ url: URL, for screen: NSScreen? = nil, options: [NSWorkspace.DesktopImageOptionKey: Any] = [:]) {
+    func registerWallpaperSet(_ url: URL, for screen: NSScreen? = nil, options: [NSWorkspace.DesktopImageOptionKey: Any] = [:], sourceURL: URL? = nil) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.register", ["url": url, "screen": screen, "options": Dictionary(uniqueKeysWithValues: options.map { ($0.key.rawValue, $0.value) })]); return }
         // 系统壁纸同步关闭时禁止注册，防止后续 Space 切换时绕开关闭状态重新写入系统壁纸。
         guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
@@ -192,6 +205,13 @@ final class DesktopWallpaperSyncManager {
             let previousURL = lastSetImageURLByScreen[screenID]
                 ?? lastSetImageURLByFingerprint[fingerprint]
 
+            cropTasks[screenID]?.cancel()
+            cropGenerations[screenID] = UUID()
+            if let sourceURL {
+                staticSourceByFingerprint[fingerprint] = sourceURL
+            } else if previousURL?.standardizedFileURL != url.standardizedFileURL {
+                staticSourceByFingerprint.removeValue(forKey: fingerprint)
+            }
             lastSetImageURLByScreen[screenID] = url
             lastSetImageURLByFingerprint[fingerprint] = url
             // A later bookkeeping call often repeats the same poster with no
@@ -219,6 +239,7 @@ final class DesktopWallpaperSyncManager {
     func imageURL(for screen: NSScreen) -> URL? {
         let screenID = screen.wallpaperScreenIdentifier
         let fingerprint = screen.wallpaperScreenFingerprint
+        if let source = WallpaperScreenIdentity.value(in: staticSourceByFingerprint, forFingerprint: fingerprint) { return source }
         return lastSetImageURLByScreen[screenID]
             ?? WallpaperScreenIdentity.value(
                 in: lastSetImageURLByFingerprint,
@@ -235,9 +256,16 @@ final class DesktopWallpaperSyncManager {
             let fingerprint = screen.wallpaperScreenFingerprint
             lastSetImageURLByScreen.removeValue(forKey: screenID)
             lastSetImageURLByFingerprint.removeValue(forKey: fingerprint)
+            staticSourceByFingerprint.removeValue(forKey: fingerprint)
+            cropTasks[screenID]?.cancel()
+            cropGenerations[screenID] = UUID()
             lastOptionsByScreen.removeValue(forKey: screenID)
             lastOptionsByFingerprint.removeValue(forKey: fingerprint)
         } else {
+            staticSourceByFingerprint.removeAll()
+            for task in cropTasks.values { task.cancel() }
+            cropTasks.removeAll()
+            cropGenerations.removeAll()
             lastSetImageURLByScreen.removeAll()
             lastSetImageURLByFingerprint.removeAll()
             lastOptionsByScreen.removeAll()
@@ -250,9 +278,66 @@ final class DesktopWallpaperSyncManager {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("desktop.clearIdentity", ["id": screenID, "fingerprint": fingerprint]); return }
         lastSetImageURLByScreen.removeValue(forKey: screenID)
         lastSetImageURLByFingerprint.removeValue(forKey: fingerprint)
+        staticSourceByFingerprint.removeValue(forKey: fingerprint)
+        cropTasks[screenID]?.cancel()
+        cropGenerations[screenID] = UUID()
         lastOptionsByScreen.removeValue(forKey: screenID)
         lastOptionsByFingerprint.removeValue(forKey: fingerprint)
         persistFingerprintState()
+    }
+
+    /// 竖图模糊填充开关变化后，按当前显示设置重渲染已注册的静态源；
+    /// 否则开关只影响下一次设置壁纸，桌面停留在旧的派生图上。
+    /// UI 进程只转发给 Helper：桌面写入与源登记都归 Helper 所有。
+    func refreshStaticSourcesForBlurFillPreference() {
+        if BackgroundRuntimeRole.isRemoteUI {
+            BackgroundRuntimeBridge.send("desktop.blurFillRefresh"); return
+        }
+        handleCropChanged(Notification(name: DisplayCropSettingsStore.cropDidChangeNotification,
+                                       object: nil, userInfo: ["screenID": "*"]))
+    }
+
+    /// Only an explicitly registered static source may rewrite system wallpaper.
+    /// Renderer posters never become sources for this path.
+    @objc private func handleCropChanged(_ note: Notification) {
+        guard BackgroundRuntimeRole.isHelper, BackgroundRuntimeRole.allowsDesktopRendering,
+              VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+              !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection,
+              let requested = note.userInfo?["screenID"] as? String else { return }
+        for screen in NSScreen.screens where requested == "*" || requested == screen.wallpaperScreenIdentifier {
+            let id = screen.wallpaperScreenIdentifier
+            let fingerprint = screen.wallpaperScreenFingerprint
+            guard let source = WallpaperScreenIdentity.value(in: staticSourceByFingerprint, forFingerprint: fingerprint),
+                  !VideoWallpaperManager.shared.hasActiveWallpaper(on: screen),
+                  !WallpaperEngineXBridge.shared.isManaging(screen: screen),
+                  !StaticImageWallpaperOverlayManager.shared.hasActiveWallpaper(on: [screen]) else { continue }
+            cropTasks[id]?.cancel()
+            let generation = UUID()
+            cropGenerations[id] = generation
+            let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+            cropTasks[id] = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                    guard let self else { return }
+                    let prepared = try await StaticWallpaperApplyService.preparedSystemWallpaper(from: source, for: screen)
+                    guard !Task.isCancelled, self.cropGenerations[id] == generation,
+                           NSScreen.screens.contains(where: { $0.wallpaperScreenIdentifier == id }),
+                          WallpaperScreenIdentity.value(in: self.staticSourceByFingerprint, forFingerprint: fingerprint) == source,
+                          DisplayCropSettingsStore.shared.settings(for: screen) == settings,
+                          VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+                          !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection,
+                          !VideoWallpaperManager.shared.hasActiveWallpaper(on: screen),
+                          !WallpaperEngineXBridge.shared.isManaging(screen: screen),
+                          !StaticImageWallpaperOverlayManager.shared.hasActiveWallpaper(on: [screen]) else { return }
+                    try NSWorkspace.shared.setDesktopImageURLForAllSpaces(prepared.url, for: screen, options: prepared.options)
+                    self.registerWallpaperSet(prepared.url, for: screen, options: prepared.options, sourceURL: source)
+                } catch is CancellationError {
+                    // A newer layout or source owns this display.
+                } catch {
+                    AppLogger.error(.wallpaper, "Static wallpaper layout update failed", metadata: ["screen": id, "error": error.localizedDescription])
+                }
+            }
+        }
     }
 
     /// 应用变为活跃时的备用同步入口（处理 activeSpaceDidChangeNotification 丢失的情况）
@@ -411,6 +496,9 @@ final class DesktopWallpaperSyncManager {
     }
 
     private func persistFingerprintState() {
+        if let data = try? JSONEncoder().encode(staticSourceByFingerprint) {
+            WaifuXPreferences.shared.set(data, forKey: Self.sourceStateKey)
+        }
         let fpDict = lastSetImageURLByFingerprint.mapValues { $0.absoluteString }
         if fpDict.isEmpty {
             WaifuXPreferences.shared.removeObject(forKey: Self.fingerprintStateKey)
@@ -594,14 +682,60 @@ final class DesktopWallpaperSyncManager {
                 continue
             }
 
-            // 否则同步该屏幕最后注册的静态壁纸
-            guard let url = lastSetImageURLByScreen[screenID]
+            // 否则同步该屏幕最后注册的静态壁纸。若有独立原图登记，必须从原图
+            // 按当前显示模式重新生成派生图，不能把旧 DisplayLayouts 结果直接回写。
+            guard let registeredURL = lastSetImageURLByScreen[screenID]
                     ?? WallpaperScreenIdentity.value(
                         in: lastSetImageURLByFingerprint,
                         forFingerprint: fingerprint
                     ) else {
                 continue
             }
+            if let sourceURL = WallpaperScreenIdentity.value(in: staticSourceByFingerprint, forFingerprint: fingerprint) {
+                let expectedSettings = DisplayCropSettingsStore.shared.settings(for: screen)
+                cropTasks[screenID]?.cancel()
+                let generation = UUID()
+                cropGenerations[screenID] = generation
+                cropTasks[screenID] = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    defer {
+                        if self.cropGenerations[screenID] == generation {
+                            self.cropTasks.removeValue(forKey: screenID)
+                        }
+                    }
+                    guard !Task.isCancelled,
+                          self.cropGenerations[screenID] == generation,
+                          self.staticSourceByFingerprint[fingerprint] == sourceURL,
+                          NSScreen.screens.contains(where: { $0.wallpaperScreenIdentifier == screenID }),
+                          VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+                          !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection,
+                          !VideoWallpaperManager.shared.hasActiveWallpaper(on: screen),
+                          !WallpaperEngineXBridge.shared.isManaging(screen: screen),
+                          !StaticImageWallpaperOverlayManager.shared.hasActiveWallpaper(on: [screen]) else { return }
+                    do {
+                        let prepared = try await StaticWallpaperApplyService.preparedSystemWallpaper(from: sourceURL, for: screen)
+                        guard !Task.isCancelled,
+                              self.cropGenerations[screenID] == generation,
+                              self.staticSourceByFingerprint[fingerprint] == sourceURL,
+                              NSScreen.screens.contains(where: { $0.wallpaperScreenIdentifier == screenID }),
+                              DisplayCropSettingsStore.shared.settings(for: screen) == expectedSettings,
+                              VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+                              !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection,
+                              !VideoWallpaperManager.shared.hasActiveWallpaper(on: screen),
+                              !WallpaperEngineXBridge.shared.isManaging(screen: screen),
+                              !StaticImageWallpaperOverlayManager.shared.hasActiveWallpaper(on: [screen]) else { return }
+                        try NSWorkspace.shared.setDesktopImageURLForAllSpaces(prepared.url, for: screen, options: prepared.options)
+                        self.registerWallpaperSet(prepared.url, for: screen, options: prepared.options, sourceURL: sourceURL)
+                    } catch is CancellationError {
+                    } catch {
+                        AppLogger.error(.wallpaper, "Static wallpaper re-prepare during sync failed", metadata: [
+                            "screen": screen.localizedName, "error": error.localizedDescription
+                        ])
+                    }
+                }
+                continue
+            }
+            let url = registeredURL
 
             // 跳过 wallpaper-wgpu 渲染的临时 capture 路径（应用重启后不存在）
             if url.path.contains("wallpaper-wgpu-capture") || url.path.contains("wallpaperengine-cli-capture") {
@@ -623,7 +757,8 @@ final class DesktopWallpaperSyncManager {
                         in: lastOptionsByFingerprint,
                         forFingerprint: fingerprint
                     )
-                    ?? [:]
+                    ?? (url.pathComponents.contains("DisplayLayouts") ? [
+                        .imageScaling: NSNumber(value: NSImageScaling.scaleAxesIndependently.rawValue), .allowClipping: false] : [:])
                 try workspace.setDesktopImageURLForAllSpaces(url, for: screen, options: options)
                 syncWrites += 1
                 let elapsedMS = Date().timeIntervalSince(writeStart) * 1000

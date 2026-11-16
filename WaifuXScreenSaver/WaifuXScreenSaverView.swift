@@ -38,9 +38,8 @@ final class WaifuXScreenSaverView: ScreenSaverView {
 
     /// 根层：承载 letterbox 底色并裁掉超出屏幕的媒体。
     private let rootLayer = CALayer()
-    /// 内容层：用 viewport mask 把媒体裁进可视框（比例预设不是屏幕比例时留黑边）。
+    /// 可视框：同时裁切单一媒体子树及平铺复制器。
     private let contentLayer = CALayer()
-    private let viewportMask = CALayer()
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
     private var playerLayer: AVPlayerLayer?
@@ -88,8 +87,6 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         contentLayer.masksToBounds = true
         contentLayer.frame = bounds
         rootLayer.addSublayer(contentLayer)
-
-        viewportMask.backgroundColor = CGColor(gray: 1, alpha: 1)
     }
 
     override var hasConfigureSheet: Bool { false }
@@ -278,7 +275,7 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         let playbackItem = player.currentItem ?? item
 
         let playerLayer = AVPlayerLayer(player: player)
-        playerLayer.videoGravity = .resizeAspectFill
+        playerLayer.videoGravity = .resize
         playerLayer.frame = bounds
         playerLayer.contentsScale = window?.backingScaleFactor ?? 1
         playerLayer.backgroundColor = CGColor(gray: 0, alpha: 0)
@@ -419,7 +416,7 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         }
         let layer = CALayer()
         layer.contents = cgImage
-        layer.contentsGravity = .resizeAspectFill
+        layer.contentsGravity = .resize
         layer.masksToBounds = true
         layer.frame = bounds
         contentLayer.addSublayer(layer)
@@ -437,7 +434,7 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         // 尺寸未知时按屏幕比例兜底，等 readiness 回调补上真实尺寸再重排。
         let wallpaperSize = mediaSize == .zero ? screenSize : mediaSize
         let layout = SaverCropEngine.compute(wallpaperSize: wallpaperSize, screenSize: screenSize, settings: crop)
-        apply(layout: layout)
+        guard apply(layout: layout) else { return }
         appliedCrop = crop
     }
 
@@ -463,21 +460,15 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         reloadConfiguration()
     }
 
-    private func apply(layout: SaverCropLayout) {
-        let geometry = SaverCropGeometry.layerGeometry(layout: layout, in: bounds)
-        rootLayer.backgroundColor = layout.letterboxColor
-        contentLayer.frame = bounds
-        // 只有可视框小于屏幕（比例预设 / 平移裁切）时才需要 mask；
-        // 全屏时摘掉 mask，省一层合成。
-        let coversScreen = geometry.viewportRect.insetBy(dx: -0.5, dy: -0.5).contains(bounds)
-        if coversScreen {
-            contentLayer.mask = nil
-        } else {
-            viewportMask.frame = geometry.viewportRect
-            contentLayer.mask = viewportMask
+    @discardableResult
+    private func apply(layout: SaverCropLayout) -> Bool {
+        rootLayer.bounds = bounds
+        let media: [CALayer] = [playerLayer, imageLayer].compactMap { $0 }
+        guard SaverCropLayers.apply(rootLayer: rootLayer, viewportLayer: contentLayer, mediaLayers: media, layout: layout) else {
+            return false
         }
-        playerLayer?.frame = geometry.mediaFrame
-        imageLayer?.frame = geometry.mediaFrame
+        playerLayer?.videoGravity = .resize
+        return true
     }
 
     private func applyVideoDynamicRange(to playerLayer: AVPlayerLayer, enabled: Bool) {
@@ -510,6 +501,7 @@ final class WaifuXScreenSaverView: ScreenSaverView {
         looper = nil
         imageLayer?.removeFromSuperlayer()
         imageLayer = nil
+        SaverCropLayers.removeTileWrappers(from: contentLayer)
         mediaSize = .zero
         appliedCrop = nil
         playbackStarted = false

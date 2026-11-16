@@ -949,6 +949,9 @@ final class BackgroundAgentRuntime {
         case "overlay.imageLetterbox":
             StaticImageWallpaperOverlayManager.shared.refreshAutoRemoveImageLetterbox()
             return [:]
+        case "desktop.blurFillRefresh":
+            DesktopWallpaperSyncManager.shared.refreshStaticSourcesForBlurFillPreference()
+            return [:]
         case "overlay.clear":
             StaticImageWallpaperOverlayManager.shared.clearState()
             return [:]

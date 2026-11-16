@@ -125,7 +125,7 @@ enum WallpaperSnapshotCropDrawing {
     @discardableResult
     static func draw(
         image: CGImage, in context: CGContext, targetSize: CGSize,
-        settings: ExtCropSettings, alreadyCropped: Bool = false
+        settings: ExtCropSettings, alreadyCropped: Bool = false, sourceSize: CGSize? = nil
     ) -> Bool {
         let canvas = CGRect(x: 0, y: 0, width: context.width, height: context.height)
         guard ExtDisplayGeometry.isValid(size: targetSize),
@@ -143,14 +143,24 @@ enum WallpaperSnapshotCropDrawing {
             return true
         }
         let effectiveSettings = settings.shouldApplyCrop ? settings : .default
+        let sourceSize = sourceSize ?? CGSize(width: image.width, height: image.height)
+        guard ExtCropEngine.isValidSourceSize(sourceSize) else { return false }
         let layout = ExtCropEngine.compute(
-            wallpaperSize: CGSize(width: image.width, height: image.height),
-            screenSize: targetSize, settings: effectiveSettings)
+            wallpaperSize: sourceSize, screenSize: targetSize, settings: effectiveSettings)
         let geometry = ExtCropGeometry.layerGeometry(layout: layout, in: canvas)
+        if layout.isTiled {
+            let frame = geometry.videoFrame.offsetBy(dx: -geometry.viewportRect.minX, dy: -geometry.viewportRect.minY)
+            guard ExtTilePlan.make(contentFrame: frame, viewportSize: geometry.viewportRect.size) != nil else {
+                NSLog("[WaifuX crop] snapshot tile layout rejected: exceeds %d copies or invalid geometry", ExtTilePlan.maximumCopies)
+                return false
+            }
+        }
         context.setFillColor(layout.letterboxColor)
         context.fill(canvas)
         context.clip(to: geometry.viewportRect)
-        context.draw(image, in: geometry.videoFrame)
+        // CoreGraphics repeats one image without allocating one bitmap per tile.
+        // Drawing the full source frame also preserves out-of-image letterbox areas.
+        context.draw(image, in: geometry.videoFrame, byTiling: layout.isTiled)
         return true
     }
 }

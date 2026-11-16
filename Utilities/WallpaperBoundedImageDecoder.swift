@@ -5,6 +5,9 @@ import ImageIO
 /// graphics context or image source escapes the worker.
 struct WallpaperDecodedImage: @unchecked Sendable {
     let image: CGImage
+    /// Original pixel dimensions after the same EXIF transform used by ImageIO's
+    /// thumbnail. Center/tile layout must not treat a bounded bitmap as the source.
+    let sourceSize: CGSize
     let attempts: Int
 }
 
@@ -74,6 +77,12 @@ enum WallpaperBoundedImageDecoder {
         ) else {
             return .failure(.init(stage: "geometry", detail: "invalid dimensions/depth"))
         }
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        // EXIF 5...8 transpose the axes. Preserve source pixels without another
+        // decode; the thumbnail below applies the matching orientation transform.
+        let swapsAxes = (5...8).contains(orientation)
+        let sourceSize = CGSize(width: swapsAxes ? height.doubleValue : width.doubleValue,
+                                height: swapsAxes ? width.doubleValue : height.doubleValue)
         var lastFailure = WallpaperImageDecodeFailure(stage: "decode", detail: "no image")
         for (index, dimension) in retryDimensions(initialDimension: max(layout.width, layout.height)).enumerated() {
             let attempt = index + 1
@@ -94,7 +103,7 @@ enum WallpaperBoundedImageDecoder {
                 ) else {
                     return .failure(.init(stage: "pixel-budget", detail: "attempt=\(attempt) image=\(image.width)x\(image.height) row=\(image.bytesPerRow)"))
                 }
-                return .success(WallpaperDecodedImage(image: image, attempts: attempt))
+                return .success(WallpaperDecodedImage(image: image, sourceSize: sourceSize, attempts: attempt))
             }
             switch result {
             case .success: return result

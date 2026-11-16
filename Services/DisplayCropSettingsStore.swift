@@ -215,8 +215,11 @@ final class DisplayCropSettingsStore: ObservableObject {
     // MARK: - Persistence (App 端)
 
     func reloadFromPreferences() {
+        let previous = settingsByScreen
         load()
         reconcileWithCurrentScreens()
+        guard previous != settingsByScreen, BackgroundRuntimeRole.isHelper else { return }
+        notifyChange(screenID: "*", interactive: false)
     }
 
     private func load() {

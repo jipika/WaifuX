@@ -1,5 +1,8 @@
 import AppKit
 import Foundation
+import CryptoKit
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Applies static wallpaper without constructing any browsing UI state.
 @MainActor
@@ -81,10 +84,6 @@ enum StaticWallpaperApplyService {
         guard !staticEntries.isEmpty else { return }
 
         let workspace = NSWorkspace.shared
-        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-            .allowClipping: true
-        ]
 
         for (screen, imageURL) in staticEntries {
             guard !isTerminating, !Task.isCancelled, systemWallpaperSyncTransitionGeneration == generation,
@@ -93,7 +92,16 @@ enum StaticWallpaperApplyService {
                 return
             }
 
-            let preparedURL = await overlay.preparedSystemWallpaperURL(for: imageURL)
+            let sourceURL = await originalStaticSourceURL(for: imageURL)
+            let prepared: SystemStaticWallpaperPresentation
+            do {
+                prepared = try await preparedSystemWallpaper(from: sourceURL, for: screen)
+            } catch {
+                AppLogger.error(.wallpaper, "Failed to prepare system static wallpaper", metadata: [
+                    "screen": screen.localizedName, "error": error.localizedDescription
+                ])
+                continue
+            }
             guard !isTerminating, !Task.isCancelled, systemWallpaperSyncTransitionGeneration == generation,
                   VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
                   !VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else {
@@ -101,14 +109,15 @@ enum StaticWallpaperApplyService {
             }
             do {
                 try workspace.setDesktopImageURLForAllSpaces(
-                    preparedURL,
+                    prepared.url,
                     for: screen,
-                    options: fillOptions
+                    options: prepared.options
                 )
                 DesktopWallpaperSyncManager.shared.registerWallpaperSet(
-                    preparedURL,
+                    prepared.url,
                     for: screen,
-                    options: fillOptions
+                    options: prepared.options,
+                    sourceURL: sourceURL
                 )
             } catch {
                 AppLogger.error(.wallpaper, "Failed to migrate static overlay into system wallpaper", metadata: [
@@ -174,11 +183,12 @@ enum StaticWallpaperApplyService {
         let preservesDynamicWallpaperUntilReady = VideoWallpaperManager.shared
             .hasNativeVideoWallpaper(on: screens)
             || screens.contains { WallpaperEngineXBridge.shared.isManaging(screen: $0) }
-        if !preservesDynamicWallpaperUntilReady {
-            for screen in screens {
-                WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper(for: screen)
-                VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: screen)
-            }
+        // The transition snapshot keeps the old frame visible while the static
+        // image is prepared. It must not keep the old renderer alive: a Web CLI
+        // window sits above the system desktop and otherwise hides the new image.
+        for screen in screens {
+            await WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaperForTransition(for: screen)
+            VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: screen)
         }
 
         // macOS 26+：仅当用户未启用动态锁屏时才清空锁屏扩展状态。
@@ -238,18 +248,12 @@ enum StaticWallpaperApplyService {
             return
         }
 
-        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-            .allowClipping: true
-        ]
         for screen in screens {
-            let resolvedImageURL = imageURLByScreen[screen.wallpaperScreenIdentifier] ?? imageURL
-            let systemWallpaperURL = await StaticImageWallpaperOverlayManager.shared.preparedSystemWallpaperURL(
-                for: resolvedImageURL
-            )
+            let prepared = try await preparedSystemWallpaper(from: imageURL, for: screen)
             guard isCurrent(transitionToken) else { throw CancellationError() }
-            try workspace.setDesktopImageURLForAllSpaces(systemWallpaperURL, for: screen, options: fillOptions)
-            DesktopWallpaperSyncManager.shared.registerWallpaperSet(systemWallpaperURL, for: screen)
+            try workspace.setDesktopImageURLForAllSpaces(prepared.url, for: screen, options: prepared.options)
+            DesktopWallpaperSyncManager.shared.registerWallpaperSet(
+                prepared.url, for: screen, options: prepared.options, sourceURL: imageURL)
         }
 
         // Only target screens retire their overlay; a subset apply must leave
@@ -307,14 +311,12 @@ enum StaticWallpaperApplyService {
                 .hasNativeVideoWallpaper(on: [targetScreen])
                 || WallpaperEngineXBridge.shared.isManaging(screen: targetScreen)
 
-            // 切到静态图前如果目标屏幕被 CLI 管理则停 CLI 引擎
-            if !preservesDynamicWallpaperUntilReady {
-                if WallpaperEngineXBridge.shared.isManaging(screen: targetScreen) {
-                    WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper(for: targetScreen)
-                }
-                // 只停目标屏幕的动态壁纸，避免影响其他屏幕
-                VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
-            }
+            // The transition snapshot preserves the old frame visually, but the
+            // old renderer must be torn down before the system desktop is set.
+            // Otherwise a Web CLI window remains above the new static wallpaper.
+            await WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaperForTransition(for: targetScreen)
+            // 只停目标屏幕的动态壁纸，避免影响其他屏幕
+            VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
             // macOS 26+：仅当用户未启用动态锁屏时才清空锁屏镜像帧源缓存。
             // 使用持久化设置 isLockScreenEnabled 而非 isLockScreenMirroringActive。
             let shouldClearExtension: Bool = {
@@ -365,16 +367,11 @@ enum StaticWallpaperApplyService {
                 return
             }
 
-            let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                .allowClipping: true
-            ]
-            let systemWallpaperURL = await StaticImageWallpaperOverlayManager.shared.preparedSystemWallpaperURL(
-                for: resolvedImageURL
-            )
+            let prepared = try await preparedSystemWallpaper(from: imageURL, for: targetScreen)
             guard isCurrent(transitionToken) else { throw CancellationError() }
-            try workspace.setDesktopImageURLForAllSpaces(systemWallpaperURL, for: targetScreen, options: fillOptions)
-            DesktopWallpaperSyncManager.shared.registerWallpaperSet(systemWallpaperURL, for: targetScreen)
+            try workspace.setDesktopImageURLForAllSpaces(prepared.url, for: targetScreen, options: prepared.options)
+            DesktopWallpaperSyncManager.shared.registerWallpaperSet(
+                prepared.url, for: targetScreen, options: prepared.options, sourceURL: imageURL)
 
             // 互斥：走系统壁纸时关闭并清除静态图 overlay 持久化状态
             StaticImageWallpaperOverlayManager.shared.clearState(for: targetScreen)
@@ -454,6 +451,41 @@ enum StaticWallpaperApplyService {
         }
     }
 
+    struct SystemStaticWallpaperPresentation {
+        let url: URL
+        let options: [NSWorkspace.DesktopImageOptionKey: Any]
+    }
+
+    static func originalStaticSourceURL(for url: URL) async -> URL {
+        await PortraitBlurFillWallpaperService.shared.originalSourceURL(
+            forDerivedWallpaperAt: url,
+            derivedWallpapersDirectory: DownloadPathManager.shared.derivedWallpapersFolderURL) ?? url
+    }
+
+    static func preparedSystemWallpaper(from imageURL: URL, for screen: NSScreen) async throws -> SystemStaticWallpaperPresentation {
+        let sourceURL = await originalStaticSourceURL(for: imageURL)
+        let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+        let effective = settings.isEnabled ? settings : .defaultSettings
+        let isDefault = effective.displayMode == .fill && effective.aspectPreset == .autoFill
+            && abs(effective.zoom - 1) < 0.000001 && effective.pan == CGPoint(x: 0.5, y: 0.5)
+        if isDefault {
+            let portraitURL = try await preparedStaticImageURL(from: sourceURL, for: screen)
+            let url = await StaticImageWallpaperOverlayManager.shared.preparedSystemWallpaperURL(for: portraitURL)
+            return SystemStaticWallpaperPresentation(url: url, options: [
+                .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue), .allowClipping: true])
+        }
+        let size = CGSize(width: screen.frame.width * screen.backingScaleFactor,
+                          height: screen.frame.height * screen.backingScaleFactor)
+        // Non-default modes also use the blur-filled image when the toggle is
+        // on, so the generated background is visible in every display mode.
+        let composedSource = try await preparedStaticImageURL(from: sourceURL, for: screen)
+        let cache = DownloadPathManager.shared.derivedWallpapersFolderURL.appendingPathComponent("DisplayLayouts", isDirectory: true)
+        let url = try await SystemStaticWallpaperCompositor.shared.render(sourceURL: composedSource, screenPixels: size,
+                                                                         settings: effective, directory: cache)
+        return SystemStaticWallpaperPresentation(url: url, options: [
+            .imageScaling: NSNumber(value: NSImageScaling.scaleAxesIndependently.rawValue), .allowClipping: false])
+    }
+
     /// 仅在设置打开时为竖图生成派生壁纸。结果按显示器像素尺寸独立映射，
     /// 同一原图在不同宽高比的显示器上不会相互覆盖。
     private static func preparedStaticImageURLs(
@@ -470,6 +502,9 @@ enum StaticWallpaperApplyService {
         var imageURLs: [String: URL] = [:]
         for screen in screens {
             try checkCanApply()
+            // Blur fill applies to every display mode when the user toggle is
+            // on; the generated image already matches the screen aspect, so
+            // fit/center/tile/stretch operate on it just like on any source.
             let pixelSize = CGSize(
                 width: max(1, (screen.frame.width * screen.backingScaleFactor).rounded()),
                 height: max(1, (screen.frame.height * screen.backingScaleFactor).rounded())
@@ -492,4 +527,72 @@ enum StaticWallpaperApplyService {
         return imageURLs[screen.wallpaperScreenIdentifier] ?? sourceURL
     }
 
+}
+
+/// A single decode/composition worker; it never contacts the desktop or preferences.
+private actor SystemStaticWallpaperCompositor {
+    static let shared = SystemStaticWallpaperCompositor()
+
+    func render(sourceURL: URL, screenPixels: CGSize, settings: DisplayCropSettings, directory: URL) throws -> URL {
+        try Task.checkCancellation()
+        guard screenPixels.width.isFinite, screenPixels.height.isFinite,
+              screenPixels.width > 0, screenPixels.height > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        let attributes = try FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let encoded = try JSONEncoder().encode(settings)
+        let stamp = "\(sourceURL.standardizedFileURL.path)|\(attributes[.size] ?? 0)|\(attributes[.modificationDate] ?? Date.distantPast)|\(screenPixels.width)x\(screenPixels.height)|v1|"
+        let digest = SHA256.hash(data: Data(stamp.utf8) + encoded).map { String(format: "%02x", $0) }.joined()
+        let output = directory.appendingPathComponent(digest).appendingPathExtension("jpg")
+        if FileManager.default.fileExists(atPath: output.path) { return output }
+        let decoded = try WallpaperBoundedImageDecoder.decode(url: sourceURL).get()
+        // The bounded bitmap is drawn into a frame computed in oriented source
+        // coordinates. That preserves original-pixel center/tile periods while
+        // keeping decode memory bounded.
+        let layout = CropLayoutEngine.compute(wallpaperSize: decoded.sourceSize, screenSize: screenPixels, settings: settings)
+        let ratio = min(1, min(8192 / max(screenPixels.width, screenPixels.height),
+                               sqrt(33_554_432 / (screenPixels.width * screenPixels.height))))
+        let width = max(1, Int((screenPixels.width * ratio).rounded(.down)))
+        let height = max(1, Int((screenPixels.height * ratio).rounded(.down)))
+        let viewport = CGRect(x: layout.viewportRect.x * Double(width),
+                              y: (1 - layout.viewportRect.y - layout.viewportRect.h) * Double(height),
+                              width: layout.viewportRect.w * Double(width), height: layout.viewportRect.h * Double(height))
+        let crop = layout.wallpaperCropRect
+        let mediaWidth = viewport.width / crop.w, mediaHeight = viewport.height / crop.h
+        var frame = CGRect(x: viewport.minX - crop.x * mediaWidth,
+                           y: viewport.minY - (1 - crop.y - crop.h) * mediaHeight,
+                           width: mediaWidth, height: mediaHeight)
+        guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+              frame.width > 0, frame.height > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        if layout.isTiled {
+            let x = frame.minX - viewport.minX
+            let y = frame.minY - viewport.minY
+            let firstX = x - ceil(x / frame.width) * frame.width
+            let firstY = y - ceil(y / frame.height) * frame.height
+            let copies = ceil((viewport.width - firstX) / frame.width) * ceil((viewport.height - firstY) / frame.height)
+            guard copies.isFinite, copies <= 65_536 else { throw CocoaError(.coderInvalidValue) }
+            frame.origin = CGPoint(x: viewport.minX + firstX, y: viewport.minY + firstY)
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        context.setFillColor(layout.letterboxColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.clip(to: viewport)
+        context.interpolationQuality = .high
+        context.draw(decoded.image, in: frame, byTiling: layout.isTiled)
+        try Task.checkCancellation()
+        guard let image = context.makeImage() else { throw CocoaError(.fileWriteUnknown) }
+        // Encode to memory and atomically publish only complete bytes.
+        let data = NSMutableData()
+        guard let encoder = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        CGImageDestinationAddImage(encoder, image, [kCGImageDestinationLossyCompressionQuality: 0.94] as CFDictionary)
+        guard CGImageDestinationFinalize(encoder) else { throw CocoaError(.fileWriteUnknown) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try (data as Data).write(to: output, options: .atomic)
+        return output
+    }
 }

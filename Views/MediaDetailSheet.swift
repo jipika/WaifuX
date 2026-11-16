@@ -1274,10 +1274,16 @@ struct MediaDetailSheet: View {
                         .frame(maxWidth: 980)
                         .detailGlassTitleChrome()
 
-                    HStack(spacing: 0) {
-                        metadataCapsules
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 0) {
+                            metadataCapsules
+                        }
+                        // ScrollView 内容默认 leading：把 HStack 撑到视口宽，
+                        // 内容窄时 .center 才生效居中，宽时溢出仍可横滑。
+                        .containerRelativeFrame(.horizontal)
+                        .frame(maxWidth: .infinity, alignment: .center)
                     }
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(maxWidth: 920)
 
                     buttonRowWithDividers
 
@@ -6332,6 +6338,40 @@ struct WebWallpaperPreviewView: NSViewRepresentable {
         forMainFrameOnly: false
     )
 
+    private static let spineLifecycleCompatScript = WKUserScript(
+        source: """
+        (function() {
+          var patched = new WeakSet();
+          function patchRuntime(runtime) {
+            if (!runtime || !runtime.SpinePlayer || !runtime.LoadingScreen) return;
+            var proto = runtime.LoadingScreen.prototype;
+            if (!proto || patched.has(proto) || typeof proto.dispose !== 'function') return;
+            var source = Function.prototype.toString.call(proto.dispose).replace(/\\s+/g, '');
+            if (source !== 'dispose(){this.logo.dispose();this.spinner.dispose();}'
+              && source !== 'function(){this.logo.dispose();this.spinner.dispose();}') return;
+            proto.dispose = function() {
+              if (this.logo) this.logo.dispose();
+              if (this.spinner) this.spinner.dispose();
+            };
+            patched.add(proto);
+          }
+          function install() {
+            patchRuntime(window.spine);
+            patchRuntime(window.spine40);
+            patchRuntime(window.spine41);
+          }
+          window.__wxInstallSpineLifecycleCompat = install;
+          document.addEventListener('load', function(event) {
+            if (event.target && event.target.tagName === 'SCRIPT') install();
+          }, true);
+          document.addEventListener('DOMContentLoaded', install, { once: true });
+          install();
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: false
+    )
+
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -6342,6 +6382,7 @@ struct WebWallpaperPreviewView: NSViewRepresentable {
         let ucc = WKUserContentController()
         ucc.addUserScript(Self.wallpaperEngineWebAPIShim)
         ucc.addUserScript(Self.localFileCompatScript)
+        ucc.addUserScript(Self.spineLifecycleCompatScript)
         config.userContentController = ucc
 
         let webView = WKWebView(frame: .zero, configuration: config)

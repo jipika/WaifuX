@@ -49,24 +49,32 @@ struct AuthorMediaSheet: View {
                 dividerLine
                     .padding(.horizontal, 20)
 
-                HStack {
+                HStack(spacing: 8) {
                     Text(t("authorWallpapers"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(LiquidGlassColors.textSecondary)
-                    Spacer()
-                    if isLoading {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
+
                     if !items.isEmpty {
                         Text("\(items.count)")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(LiquidGlassColors.textTertiary)
                     }
+
+                    Spacer(minLength: 8)
+
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    if !items.isEmpty {
+                        downloadActions
+                    }
                 }
+                .frame(minHeight: 32)
                 .padding(.horizontal, 20)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
 
                 itemGrid
                     .frame(maxHeight: .infinity)
@@ -120,11 +128,6 @@ struct AuthorMediaSheet: View {
                     .foregroundStyle(LiquidGlassColors.textTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            if !items.isEmpty {
-                // 下载操作固定贴面板右缘，把中间空间让给作者名
-                downloadActions
-            }
         }
     }
 
@@ -147,7 +150,7 @@ struct AuthorMediaSheet: View {
 
     @ViewBuilder
     private var downloadActions: some View {
-        VStack(spacing: 5) {
+        HStack(spacing: 6) {
             if let onDownloadLoaded {
                 AuthorDownloadIconButton(
                     systemImage: "square.stack.3d.down.forward",

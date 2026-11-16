@@ -1717,7 +1717,17 @@ extension WorkshopService {
             downloadOptions = [option]
         }
 
-        let trimmedAuthorName = wallpaper.author.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Steam 的部分列表节点已带“创作者： / By ”，展示层还会另加作者标签。
+        // 统一在模型转换处清理，避免详情页出现重复前缀。
+        var authorName = wallpaper.author.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["创作者：", "创作者:", "作者：", "作者:", "Author:", "By "] {
+            if authorName.hasPrefix(prefix) {
+                authorName = String(authorName.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
+        let trimmedAuthorName = authorName
         let hasAuthorName = !trimmedAuthorName.isEmpty && trimmedAuthorName != "Unknown"
         let hasSteamID = !wallpaper.author.steamID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 

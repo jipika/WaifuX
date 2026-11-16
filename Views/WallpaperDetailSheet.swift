@@ -701,28 +701,14 @@ struct WallpaperDetailSheet: View {
 
                 detailCategoryBadge
 
-                HStack {
-                    Spacer(minLength: 0)
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 0) {
-                            metadataCapsules
-                        }
-
-                        VStack(spacing: 8) {
-                            HStack(spacing: 0) {
-                                ForEach(Array(metadataItems.prefix(2).enumerated()), id: \.offset) { index, item in
-                                    authorAwareCapsule(label: item.label, value: item.value, isLast: index == metadataItems.prefix(2).count - 1)
-                                }
-                            }
-
-                            HStack(spacing: 0) {
-                                ForEach(Array(metadataItems.dropFirst(2).enumerated()), id: \.offset) { index, item in
-                                    authorAwareCapsule(label: item.label, value: item.value, isLast: index == metadataItems.dropFirst(2).count - 1)
-                                }
-                            }
-                        }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        metadataCapsules
                     }
-                    Spacer(minLength: 0)
+                    // ScrollView 内容默认 leading：把 HStack 撑到视口宽，
+                    // 内容窄时 .center 才生效居中，宽时溢出仍可横滑。
+                    .containerRelativeFrame(.horizontal)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .padding(.top, 8)
                 .glassContainer(spacing: 10)

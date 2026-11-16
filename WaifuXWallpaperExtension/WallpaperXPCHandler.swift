@@ -926,7 +926,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         CATransaction.setDisableActions(true)
         rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
         rootLayer.contents = image
-        applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID, imageURL: imageURL)
+        applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID, imageURL: imageURL,
+                        sourceSize: decoded.sourceSize)
         CATransaction.commit()
         if loaded.failure == nil {
             WallpaperState.shared.recordImageFrame(contextId: contextId, generation: generation, sourceURL: imageURL, expectedRootLayer: rootLayer)
@@ -955,14 +956,15 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     }
 
     /// 静态图与视频共用等比 layer 几何。contentsCenter 是九宫格拉伸区，不能当目标 viewport。
-    private static func applyStaticCrop(rootLayer: CALayer, image: CGImage, displayID: UInt32, imageURL: URL? = nil) {
+    private static func applyStaticCrop(rootLayer: CALayer, image: CGImage, displayID: UInt32,
+                                        imageURL: URL? = nil, sourceSize: CGSize? = nil) {
         let settings: ExtCropSettings
         if let imageURL, isPrecomposedImage(imageURL, displayID: displayID) {
             settings = .default
         } else {
             settings = ExtCropPrefs.settings(forDisplayID: displayID)
         }
-        if ExtCropLayers.setStaticImage(image, in: rootLayer, settings: settings) {
+        if ExtCropLayers.setStaticImage(image, in: rootLayer, settings: settings, sourceSize: sourceSize) {
             extLog("[StaticRenderer] layout displayID=\(displayID) image=\(image.width)x\(image.height) display=\(rootLayer.bounds.size) scale=\(rootLayer.contentsScale) preset=\(settings.aspectPreset.rawValue) zoom=\(settings.zoom)")
         }
     }
@@ -1030,7 +1032,8 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 CATransaction.setDisableActions(true)
                 rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
                 rootLayer.contents = image
-                applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID, imageURL: imageURL)
+                applyStaticCrop(rootLayer: rootLayer, image: image, displayID: displayID, imageURL: imageURL,
+                                sourceSize: decoded.sourceSize)
                 CATransaction.commit()
                 WallpaperState.shared.recordImageFrame(contextId: active.contextId,
                     generation: replacement.generation, sourceURL: imageURL, expectedRootLayer: rootLayer)

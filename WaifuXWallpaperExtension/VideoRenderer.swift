@@ -127,7 +127,7 @@ final class VideoRenderer: @unchecked Sendable {
                              "[VideoRenderer] video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(layout.scale)")
 
             let displayLayer = AVSampleBufferDisplayLayer()
-            displayLayer.videoGravity = .resizeAspectFill
+            displayLayer.videoGravity = .resize
             displayLayer.frame = layout.frame
             displayLayer.contentsScale = rootLayer.contentsScale
 
@@ -158,7 +158,7 @@ final class VideoRenderer: @unchecked Sendable {
         rootLayer.addSublayer(viewportLayer)
 
         backgroundFrameLayer.frame = rootLayer.bounds
-        backgroundFrameLayer.contentsGravity = .resizeAspectFill
+        backgroundFrameLayer.contentsGravity = .resize
         backgroundFrameLayer.contentsScale = rootLayer.contentsScale
         // 即时占位底图：generateBackgroundFrame 是异步的（AVAssetImageGenerator），
         // 期间如果 acquire 后立即被 recomputeAndApplyPolicy() 拉到 .paused（锁屏 /
@@ -179,14 +179,14 @@ final class VideoRenderer: @unchecked Sendable {
         viewportLayer.addSublayer(displayLayer)
 
         stillFrameLayer.frame = rootLayer.bounds
-        stillFrameLayer.contentsGravity = .resizeAspectFill
+        stillFrameLayer.contentsGravity = .resize
         stillFrameLayer.contentsScale = rootLayer.contentsScale
         stillFrameLayer.opacity = 0
         viewportLayer.addSublayer(stillFrameLayer)
 
         // 换源遮片永远在最上层：盖住上一张视频帧，直到新源真实出帧。
         replacementCoverLayer.frame = rootLayer.bounds
-        replacementCoverLayer.contentsGravity = .resizeAspectFill
+        replacementCoverLayer.contentsGravity = .resize
         replacementCoverLayer.contentsScale = rootLayer.contentsScale
         replacementCoverLayer.opacity = 0
         viewportLayer.addSublayer(replacementCoverLayer)
@@ -284,7 +284,7 @@ final class VideoRenderer: @unchecked Sendable {
         layoutVideoSize = videoSize
         let bounds = rootLayer.bounds
         let settings = ExtCropPrefs.settings(forDisplayID: displayID)
-        displayLayer.videoGravity = .resizeAspectFill
+        displayLayer.videoGravity = .resize
         let changed = ExtCropLayers.apply(
             rootLayer: rootLayer, viewportLayer: viewportLayer,
             contentLayers: [displayLayer, backgroundFrameLayer, stillFrameLayer, replacementCoverLayer],

@@ -84,6 +84,7 @@ private struct WebCropParameters: Codable {
     let letterboxColorHex: String?
     /// 每屏单调递增；daemon 用它丢弃乱序的拖拽更新。
     let cropRevision: UInt64
+    let cropTiled: Bool
 }
 
 /// Host → daemon：Web 壁纸可视区域。
@@ -93,6 +94,7 @@ private struct WebDaemonCropMessage: Codable {
     let viewport: [Double]?
     let letterboxColorHex: String?
     let cropRevision: UInt64
+    let cropTiled: Bool
     let screen: Int
     let expectsResponse: Bool
 }
@@ -162,6 +164,27 @@ private struct TerminationEvent: @unchecked Sendable {
 // macOS 26 已移除 CGSWindowByID，且 `--wallpaper`/`--background` 参数已自带后台壁纸渲染能力，
 // 因此不再使用 CGS API。窗口标签（Stationary/CanJoinAllSpaces）由二进制处理。
 
+/// Scene 窗口与裁剪使用不同单位；只在这里进行 points → pixels 转换。
+/// `--screen` 的原点和宽高均为 AppKit points，renderer 自行乘 backing scale。
+struct SceneRendererScreenGeometry: Equatable {
+    let windowFrame: CGRect
+    let backingScaleFactor: CGFloat
+
+    var screenArgument: String {
+        let x = Int(windowFrame.origin.x.rounded())
+        let y = Int(windowFrame.origin.y.rounded())
+        let width = Int(windowFrame.width.rounded())
+        let height = Int(windowFrame.height.rounded())
+        return "\(x),\(y),\(width),\(height),\(backingScaleFactor)"
+    }
+
+    /// CropLayoutEngine 使用物理像素，不能复用 CLI 的 point 尺寸。
+    var cropPixelSize: CGSize {
+        CGSize(width: (windowFrame.width * backingScaleFactor).rounded(),
+               height: (windowFrame.height * backingScaleFactor).rounded())
+    }
+}
+
 /// 单个屏幕的 wallpaper-wgpu 进程信息
 private struct ScreenProcessInfo {
     let pid: pid_t
@@ -178,10 +201,8 @@ private struct ScreenProcessInfo {
     /// `--wallpaper-control` JSON 文件路径（wgpu 每 200ms 轮询，热切换壁纸/更新属性）。
     /// 首次启动时传入此参数，后续切换壁纸只写此文件，不杀进程。
     let wallpaperControlURL: URL?
-    /// 进程启动时的屏幕尺寸（points）。热切换时与当前 NSScreen.frame 比对，
-    /// 若不一致（旋转/分辨率变化）则跳过热切换、走重启路径以更新 --screen 参数。
-    let launchedScreenWidth: Int
-    let launchedScreenHeight: Int
+    /// 保留建窗时的 point 原点、尺寸及 backing scale；任一项变化均不能复用旧窗口。
+    let launchedScreenGeometry: SceneRendererScreenGeometry
     /// 首帧等待预算基点：fresh launch = 渲染进程 spawn 完成时刻。
     /// Helper 冷启动首次解压内嵌 assets 发生在 spawn 之前（可能 5~8s），
     /// 首帧死线必须从 spawn 之后起算，否则重场景加载会被解压时间挤爆预算。
@@ -203,6 +224,9 @@ private struct RendererCropControlState: Codable {
     let crop: [Float]?
     /// 屏幕可视框（surface 空间归一化），框外为黑色 letterbox。
     let viewport: [Float]?
+    let presentation: Bool
+    let tiled: Bool
+    let letterbox_color: [Float]
 }
 
 /// 负责与 wallpaper-wgpu 渲染器通信的桥接层
@@ -1328,12 +1352,9 @@ final class WallpaperEngineXBridge: ObservableObject {
             // （setOpaque=true + alpha=1.0），不再使用 alpha=0.99999 半透明合成
             // （用户实测半透明常驻有性能开销）。代价是壁纸层会被系统挂起，
             // 菜单栏 backdrop 不再跟随场景壁纸重采样。
-            let f = screen.frame
-            let scale = screen.backingScaleFactor
-            let screenX = Int(f.origin.x.rounded())
-            let screenY = Int(f.origin.y.rounded())
-            let screenW = Int(f.width.rounded())
-            let screenH = Int(f.height.rounded())
+            let geometry = SceneRendererScreenGeometry(
+                windowFrame: screen.frame, backingScaleFactor: screen.backingScaleFactor)
+            let cropScreenSize = geometry.cropPixelSize
             let screenID = screen.wallpaperScreenIdentifier
 
             // ── 情况 A：已有活跃进程且非强制重启 → 写控制文件热切换（不杀进程） ──
@@ -1342,8 +1363,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                let wcURL = existingInfo.wallpaperControlURL,
                existingInfo.process.isRunning,
                kill(existingInfo.pid, 0) == 0,
-               screenW == existingInfo.launchedScreenWidth,
-               screenH == existingInfo.launchedScreenHeight,
+               geometry == existingInfo.launchedScreenGeometry,
                // 过渡图已写成系统桌面的屏必须拆掉旧窗口、让真实桌面露出给菜单栏采样，
                // 因此不走热切换，冷启动 --defer-show 新进程。
                !(sceneHandoff?.samplingScreenIDs.contains(screenID) ?? false),
@@ -1354,7 +1374,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                 // ── 调试：打印热切换完整参数 ──
                 print("[WallpaperEngineXBridge] 📋 HOT-SWITCH PARAMS:")
                 print("[WallpaperEngineXBridge] 📋   screenID=\(screenID) pid=\(existingInfo.pid)")
-                print("[WallpaperEngineXBridge] 📋   screen=\(screenX),\(screenY),\(screenW),\(screenH),\(Int(scale))")
+                print("[WallpaperEngineXBridge] 📋   screen(points)=\(geometry.screenArgument) cropPixels=\(cropScreenSize)")
                 print("[WallpaperEngineXBridge] 📋   setWallpaper=\(resolvedPath)")
                 print("[WallpaperEngineXBridge] 📋   assets=\(resolvedAssets)")
                 print("[WallpaperEngineXBridge] 📋   upscaling=\(WaifuXPreferences.shared.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
@@ -1393,7 +1413,9 @@ final class WallpaperEngineXBridge: ObservableObject {
                 if let ccURL = existingInfo.cropControlURL {
                     // 交接路径：先写与过渡图相同的初始裁剪，首帧与静态图同构，淡出无跳变。
                     let initial = sceneHandoff == nil ? nil : sceneInitialCropLayout(screen: screen, path: resolvedPath)
-                    writeCropControl(url: ccURL, crop: initial?.crop, viewport: initial?.viewport)
+                    writeCropControl(url: ccURL, crop: initial?.crop, viewport: initial?.viewport,
+                                     presentation: initial?.presentation ?? false, tiled: initial?.tiled ?? false,
+                                     colorHex: DisplayCropSettingsStore.shared.settings(for: screen).letterboxColorHex)
                 }
                 if let csURL = existingInfo.canvasSizeURL {
                     invalidateCanvasSizeFile(at: csURL)
@@ -1499,15 +1521,15 @@ final class WallpaperEngineXBridge: ObservableObject {
 
             // ── 情况 B：首次启动该屏幕 → 清理旧状态后启动新进程 ──
             if let existingInfo = screenProcesses[screenID],
-               (screenW != existingInfo.launchedScreenWidth || screenH != existingInfo.launchedScreenHeight) {
-                print("[WallpaperEngineXBridge] 屏幕 \(screenID) 尺寸已变化 (\(existingInfo.launchedScreenWidth)x\(existingInfo.launchedScreenHeight) → \(screenW)x\(screenH))，跳过热切换，重启进程")
+               geometry != existingInfo.launchedScreenGeometry {
+                print("[WallpaperEngineXBridge] 屏幕 \(screenID) 几何已变化 (\(existingInfo.launchedScreenGeometry.screenArgument) → \(geometry.screenArgument))，跳过热切换，重启进程")
             }
             print("[WallpaperEngineXBridge] 屏幕 \(screenID) 无活跃进程，准备首次启动")
 
             // ── 调试：打印首次启动完整参数 ──
             print("[WallpaperEngineXBridge] 📋 FRESH-LAUNCH PARAMS:")
             print("[WallpaperEngineXBridge] 📋   screenID=\(screenID)")
-            print("[WallpaperEngineXBridge] 📋   screen=\(screenX),\(screenY),\(screenW),\(screenH),\(Int(scale))")
+            print("[WallpaperEngineXBridge] 📋   screen(points)=\(geometry.screenArgument) cropPixels=\(cropScreenSize)")
             print("[WallpaperEngineXBridge] 📋   path=\(resolvedPath)")
             print("[WallpaperEngineXBridge] 📋   assets=\(resolvedAssets)")
             print("[WallpaperEngineXBridge] 📋   upscaling=\(WaifuXPreferences.shared.bool(forKey: "upscaling_enabled") ? "enabled" : "disabled")")
@@ -1544,7 +1566,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
 
             var perScreenArgs = baseArgs
-            perScreenArgs += ["--screen", "\(screenX),\(screenY),\(screenW),\(screenH),\(scale)"]
+            perScreenArgs += ["--screen", geometry.screenArgument]
 
             // 渲染帧率：完全由用户设置（--fps）决定，性能模式不再触碰帧率。
             // perf-mode 只管 effect RT 精度，档位由设置页「性能模式」控件选择
@@ -1566,7 +1588,7 @@ final class WallpaperEngineXBridge: ObservableObject {
 
             // 初始裁切。优先用画布/视频真实尺寸算居中 cover，避免渲染器默认 Cover 偏一侧。
             let cropSettings = DisplayCropSettingsStore.shared.settings(for: screen)
-            let initialLayout: (crop: UnitRect, viewport: UnitRect)? = {
+            let initialLayout: (crop: UnitRect, viewport: UnitRect, presentation: Bool, tiled: Bool)? = {
                 guard cropSettings.shouldApplyCrop else { return nil }
                 let wallpaperSize = cropWallpaperSize(
                     screen: screen,
@@ -1574,16 +1596,20 @@ final class WallpaperEngineXBridge: ObservableObject {
                     canvasSizeURL: canvasSizeURL,
                     allowCachedCanvas: false
                 )
-                if wallpaperSize == nil,
-                   cropSettings.aspectPreset == .autoFill
-                    || (cropSettings.aspectPreset == .custom && cropSettings.customAspect == nil) {
+                let missingCanvasForLegacyFill = wallpaperSize == nil
+                    && cropSettings.displayMode == .fill
+                    && cropSettings.zoom >= 1
+                    && (cropSettings.aspectPreset == .autoFill
+                        || (cropSettings.aspectPreset == .custom && cropSettings.customAspect == nil))
+                if missingCanvasForLegacyFill {
                     return nil
                 }
                 let layout = CropLayoutEngine.compute(
-                    wallpaperSize: wallpaperSize ?? CGSize(width: screenW, height: screenH),
-                    screenSize: CGSize(width: screenW, height: screenH),
+                    wallpaperSize: wallpaperSize ?? cropScreenSize,
+                    screenSize: cropScreenSize,
                     settings: cropSettings)
-                return (crop: layout.wallpaperCropRect, viewport: layout.viewportRect)
+                return (crop: layout.wallpaperCropRect, viewport: layout.viewportRect,
+                        presentation: cropSettings.displayMode != .fill || cropSettings.zoom < 1, tiled: layout.isTiled)
             }()
             if let l = initialLayout {
                 let cr = l.crop
@@ -1593,9 +1619,15 @@ final class WallpaperEngineXBridge: ObservableObject {
                 if !isFullVp {
                     perScreenArgs += ["--crop-viewport", "\(vp.x),\(vp.y),\(vp.w),\(vp.h)"]
                 }
+                if l.presentation {
+                    perScreenArgs += ["--crop-presentation", "--crop-background", Self.cropBackgroundArgument(cropSettings.letterboxColorHex)]
+                }
+                if l.tiled { perScreenArgs += ["--crop-tiled"] }
                 print("[WallpaperEngineXBridge] 初始 crop=\(cr.x),\(cr.y),\(cr.w),\(cr.h) viewport=\(vp.x),\(vp.y),\(vp.w),\(vp.h)")
             }
-            writeCropControl(url: cropControlURL, crop: initialLayout?.crop, viewport: initialLayout?.viewport)
+            writeCropControl(url: cropControlURL, crop: initialLayout?.crop, viewport: initialLayout?.viewport,
+                             presentation: initialLayout?.presentation ?? false, tiled: initialLayout?.tiled ?? false,
+                             colorHex: cropSettings.letterboxColorHex)
             perScreenArgs += ["--crop-control", cropControlURL.path]
             perScreenArgs += ["--canvas-size-file", canvasSizeURL.path]
 
@@ -1676,8 +1708,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                     cropControlURL: cropControlURL,
                     canvasSizeURL: canvasSizeURL,
                     wallpaperControlURL: wallpaperControlURL,
-                    launchedScreenWidth: screenW,
-                    launchedScreenHeight: screenH,
+                    launchedScreenGeometry: geometry,
                     sceneBudgetStartedAt: Date()
                 )
                 screenRenderStates[screenID] = ScreenRenderState(
@@ -2936,6 +2967,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             viewport: target.parameters.viewport,
             letterboxColorHex: target.parameters.letterboxColorHex,
             cropRevision: target.parameters.cropRevision,
+            cropTiled: target.parameters.cropTiled,
             screen: target.screenIndex,
             expectsResponse: expectsResponse
         )
@@ -2964,11 +2996,12 @@ final class WallpaperEngineXBridge: ObservableObject {
             crop: shouldApplyCrop
                 ? [layout.wallpaperCropRect.x, layout.wallpaperCropRect.y, layout.wallpaperCropRect.w, layout.wallpaperCropRect.h]
                 : nil,
-            viewport: shouldApplyCrop && !isFullViewport
+            viewport: shouldApplyCrop && (!isFullViewport || layout.isTiled)
                 ? [viewport.x, viewport.y, viewport.w, viewport.h]
                 : nil,
             letterboxColorHex: settings.letterboxColorHex,
-            cropRevision: revision
+            cropRevision: revision,
+            cropTiled: layout.isTiled
         )
         if revision <= 3 || revision % 15 == 0 {
             let cropDescription = parameters.crop?.map { String(format: "%.4f", $0) }.joined(separator: ",") ?? "nil"
@@ -3277,7 +3310,13 @@ final class WallpaperEngineXBridge: ObservableObject {
         )
         // 视频 / 静态图接管该屏：Scene 请求作废，过渡图（含失败回退静态图）收掉。
         releaseSceneHandoff(screenIDs: [screenID], reason: "crossTypeTransition")
-        guard isManaging(screen: targetScreen) else { return }
+        guard isManaging(screen: targetScreen) else {
+            // A stale daemon can outlive its host-side render state. If no
+            // online Web screen remains, retire that daemon before exposing
+            // the replacement static/system desktop.
+            await stopLegacyCLIDaemonIfIdle()
+            return
+        }
 
         let targetState = renderState(for: targetScreen)
         if targetState?.renderKind == .web || (targetState == nil && activeRenderKind == .web) {
@@ -3330,6 +3369,23 @@ final class WallpaperEngineXBridge: ObservableObject {
         updateControlStateFromScreenStates()
         ensureAudioRelayMatchesActiveWallpaper()
         persistState()
+        await stopLegacyCLIDaemonIfIdle()
+    }
+
+    /// Stops the Web daemon only after the final Web screen has been removed.
+    /// The daemon is intentionally shared across displays, so a per-screen
+    /// `stop-screen` is not enough when static wallpaper takes over the last one.
+    private func stopLegacyCLIDaemonIfIdle() async {
+        // A concurrent Web set owns the daemon lifecycle; killing it here could
+        // race the new `set` client. That flow reaps the old daemon itself.
+        guard !screenRenderStates.values.contains(where: { $0.renderKind == .web }),
+              !isSettingWallpaper else { return }
+        do {
+            _ = try await Self.runLegacyCLIClientCommand(["stop"])
+        } catch {
+            print("[WallpaperEngineXBridge] ⚠️ 停止空闲 Web daemon 失败: \(error.localizedDescription)")
+        }
+        await Self.killLegacyDaemonIfRunning(waitForExit: true)
     }
 
     /// 应用退出前调用：立即杀死所有渲染进程，不等待退出，避免阻塞主线程导致 App 卡死。
@@ -5024,12 +5080,24 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
     }
 
-    /// 把屏幕的最新裁切参数写入 `--crop-control` JSON 文件；wgpu 端 50ms 内拉取生效。
+    /// 把屏幕的最新裁切参数写入 `--crop-control` JSON 文件；wgpu 端约 200ms 拉取；暂停时在恢复后应用。
     /// crop=nil 表示移除裁切（即全图）；viewport=nil/全屏 = 无 letterbox。
-    private func writeCropControl(url: URL, crop: UnitRect?, viewport: UnitRect?) {
+    private func writeCropControl(url: URL, crop: UnitRect?, viewport: UnitRect?, presentation: Bool = false, tiled: Bool = false, colorHex: String = "000000") {
         let cropArr: [Float]? = crop.map { [Float($0.x), Float($0.y), Float($0.w), Float($0.h)] }
         let vpArr: [Float]? = viewport.map { [Float($0.x), Float($0.y), Float($0.w), Float($0.h)] }
-        let state = RendererCropControlState(crop: cropArr, viewport: vpArr)
+        let components = CropLayoutEngine.parseColorHex(colorHex).components ?? [0, 0, 0, 1]
+        let rgba: [Float]
+        if components.count >= 4 {
+            rgba = components.prefix(4).map { Float($0) }
+        } else if components.count == 2 {
+            rgba = [Float(components[0]), Float(components[0]), Float(components[0]), Float(components[1])]
+        } else if components.count == 1 {
+            rgba = [Float(components[0]), Float(components[0]), Float(components[0]), 1]
+        } else {
+            rgba = [0, 0, 0, 1]
+        }
+        let state = RendererCropControlState(crop: cropArr, viewport: vpArr, presentation: presentation, tiled: tiled,
+                                             letterbox_color: rgba)
         do {
             let data = try JSONEncoder().encode(state)
             try data.write(to: url, options: .atomic)
@@ -6856,9 +6924,10 @@ final class WallpaperEngineXBridge: ObservableObject {
     @MainActor
     private func handleCropDidChange(_ note: Notification) {
         guard !isSettingWallpaper else { return }
-        guard let screenID = note.userInfo?["screenID"] as? String,
-              let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else { return }
-        applyPersistedCrop(for: screen)
+        guard let screenID = note.userInfo?["screenID"] as? String else { return }
+        for screen in NSScreen.screens where screenID == "*" || screen.wallpaperScreenIdentifier == screenID {
+            applyPersistedCrop(for: screen)
+        }
     }
 
     /// 把当前屏已保存的可视区域写回正在跑的 Scene / Web 渲染器。
@@ -6878,8 +6947,8 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         let cropSettings = DisplayCropSettingsStore.shared.settings(for: screen)
         let f = screen.frame
-        let screenW = Int(f.width.rounded())
-        let screenH = Int(f.height.rounded())
+        let screenW = Int((f.width * screen.backingScaleFactor).rounded())
+        let screenH = Int((f.height * screen.backingScaleFactor).rounded())
         let freshSize = readCanvasSize(url: info?.canvasSizeURL)
         if let freshSize {
             lastCanvasSizeByScreenID[screenID] = freshSize
@@ -6895,6 +6964,7 @@ final class WallpaperEngineXBridge: ObservableObject {
         if cropSettings.shouldApplyCrop {
             let wallpaperSize = knownSize ?? CGSize(width: screenW, height: screenH)
             let isFillWithoutSize = knownSize == nil
+                && cropSettings.displayMode == .fill && cropSettings.zoom >= 1
                 && (cropSettings.aspectPreset == .autoFill
                     || (cropSettings.aspectPreset == .custom && cropSettings.customAspect == nil))
             if isFillWithoutSize {
@@ -6915,7 +6985,10 @@ final class WallpaperEngineXBridge: ObservableObject {
             nextCrop = nil
             nextViewport = nil
         }
-        writeCropControl(url: cropControlURL, crop: nextCrop, viewport: nextViewport)
+        writeCropControl(url: cropControlURL, crop: nextCrop, viewport: nextViewport,
+                         presentation: cropSettings.shouldApplyCrop && (cropSettings.displayMode != .fill || cropSettings.zoom < 1),
+                         tiled: false,
+                         colorHex: cropSettings.letterboxColorHex)
     }
 
     private func handleScreenParametersChanged() {
@@ -6987,10 +7060,9 @@ final class WallpaperEngineXBridge: ObservableObject {
                     let screenID = screen.wallpaperScreenIdentifier
                     let fingerprint = screen.wallpaperScreenFingerprint
                     let currentSig = ScreenConfigurationSignature(screen: screen)
-                    // 与 launchedScreenWidth/Height 基准一致（全屏窗口尺寸）。
-                    let wallpaperFrame = screen.frame
-                    let frameW = Int(wallpaperFrame.width.rounded())
-                    let frameH = Int(wallpaperFrame.height.rounded())
+                    // 与启动/热切换使用同一份 points + scale 几何身份。
+                    let geometry = SceneRendererScreenGeometry(
+                        windowFrame: screen.frame, backingScaleFactor: screen.backingScaleFactor)
 
                     let state = statesBeforeRestart[screenID]
                         ?? statesBeforeRestart.values.first { $0.screenFingerprint == fingerprint }
@@ -7005,7 +7077,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                         }
                         if let info = self.screenProcesses[screenID]
                             ?? self.screenProcesses.values.first(where: { $0.screenID == screenID }),
-                           info.launchedScreenWidth != frameW || info.launchedScreenHeight != frameH {
+                           info.launchedScreenGeometry != geometry {
                             return true
                         }
                     }
@@ -7019,8 +7091,7 @@ final class WallpaperEngineXBridge: ObservableObject {
                         ?? self.screenProcesses.first(where: {
                             self.screenRenderStates[$0.key]?.screenFingerprint == fingerprint
                         })?.value,
-                       info.launchedScreenWidth == frameW,
-                       info.launchedScreenHeight == frameH {
+                       info.launchedScreenGeometry == geometry {
                         return false
                     }
 
@@ -7250,15 +7321,18 @@ enum SceneHandoffScreenResult: Equatable {
 
 extension WallpaperEngineXBridge {
     /// 初始裁剪：与实时启动传给渲染器的 `--crop` / `--crop-viewport` 完全一致。
-    fileprivate func sceneInitialCropLayout(screen: NSScreen, path: String) -> (crop: UnitRect, viewport: UnitRect)? {
+    fileprivate func sceneInitialCropLayout(screen: NSScreen, path: String) -> (crop: UnitRect, viewport: UnitRect, presentation: Bool, tiled: Bool)? {
         let cropSettings = DisplayCropSettingsStore.shared.settings(for: screen)
         guard cropSettings.shouldApplyCrop else { return nil }
-        let w = Int(screen.frame.width.rounded())
-        let h = Int(screen.frame.height.rounded())
+        let w = Int((screen.frame.width * screen.backingScaleFactor).rounded())
+        let h = Int((screen.frame.height * screen.backingScaleFactor).rounded())
         let wallpaperSize = cropWallpaperSize(screen: screen, path: path, canvasSizeURL: nil, allowCachedCanvas: false)
-        if wallpaperSize == nil,
-           cropSettings.aspectPreset == .autoFill
-            || (cropSettings.aspectPreset == .custom && cropSettings.customAspect == nil) {
+        let missingCanvasForLegacyFill = wallpaperSize == nil
+            && cropSettings.displayMode == .fill
+            && cropSettings.zoom >= 1
+            && (cropSettings.aspectPreset == .autoFill
+                || (cropSettings.aspectPreset == .custom && cropSettings.customAspect == nil))
+        if missingCanvasForLegacyFill {
             return nil
         }
         let layout = CropLayoutEngine.compute(
@@ -7266,15 +7340,33 @@ extension WallpaperEngineXBridge {
             screenSize: CGSize(width: w, height: h),
             settings: cropSettings
         )
-        return (layout.wallpaperCropRect, layout.viewportRect)
+        return (layout.wallpaperCropRect, layout.viewportRect,
+                cropSettings.displayMode != .fill || cropSettings.zoom < 1, layout.isTiled)
     }
 
-    fileprivate static func cropArguments(_ layout: (crop: UnitRect, viewport: UnitRect)?) -> (args: [String], signature: String) {
+    private static func cropBackgroundArgument(_ colorHex: String) -> String {
+        let components = CropLayoutEngine.parseColorHex(colorHex).components ?? [0, 0, 0, 1]
+        let rgba: [CGFloat]
+        if components.count >= 4 {
+            rgba = Array(components.prefix(4))
+        } else if components.count == 2 {
+            rgba = [components[0], components[0], components[0], components[1]]
+        } else if components.count == 1 {
+            rgba = [components[0], components[0], components[0], 1]
+        } else {
+            rgba = [0, 0, 0, 1]
+        }
+        return rgba.map { String(format: "%.6f", Double($0)) }.joined(separator: ",")
+    }
+
+    fileprivate static func cropArguments(_ layout: (crop: UnitRect, viewport: UnitRect, presentation: Bool, tiled: Bool)?, colorHex: String = "000000") -> (args: [String], signature: String) {
         guard let layout else { return ([], "none") }
         let c = layout.crop, v = layout.viewport
         var args = ["--crop", "\(c.x),\(c.y),\(c.w),\(c.h)"]
         let fullVP = abs(v.x) < 1e-4 && abs(v.y) < 1e-4 && abs(v.w - 1) < 1e-4 && abs(v.h - 1) < 1e-4
         if !fullVP { args += ["--crop-viewport", "\(v.x),\(v.y),\(v.w),\(v.h)"] }
+        if layout.presentation { args += ["--crop-presentation", "--crop-background", cropBackgroundArgument(colorHex)] }
+        if layout.tiled { args += ["--crop-tiled"] }
         return (args, args.joined(separator: " "))
     }
 
@@ -7344,7 +7436,8 @@ extension WallpaperEngineXBridge {
 
         var targets: [SceneOfflineBakeService.TransitionPosterTarget] = []
         for screen in screens {
-            let crop = Self.cropArguments(sceneInitialCropLayout(screen: screen, path: resolvedPath))
+            let crop = Self.cropArguments(sceneInitialCropLayout(screen: screen, path: resolvedPath),
+                                          colorHex: DisplayCropSettingsStore.shared.settings(for: screen).letterboxColorHex)
             targets.append(.init(
                 screenID: screen.wallpaperScreenIdentifier,
                 pixelSize: WallpaperPosterGeometry.evenPixelSize(
@@ -7534,8 +7627,8 @@ extension WallpaperEngineXBridge {
                     results[screenID] = .failed(LocalizationService.shared.t("渲染进程已退出，但未收到退出状态")); continue
                 }
                 guard let screen = SceneTransitionPosterPresenter.liveScreen(id: screenID),
-                      Int(screen.frame.width.rounded()) == info.launchedScreenWidth,
-                      Int(screen.frame.height.rounded()) == info.launchedScreenHeight else {
+                      SceneRendererScreenGeometry(windowFrame: screen.frame,
+                                                  backingScaleFactor: screen.backingScaleFactor) == info.launchedScreenGeometry else {
                     results[screenID] = .failed(LocalizationService.shared.t("目标显示器已失效或几何已变化")); continue
                 }
                 let elapsed = Date().timeIntervalSince(budgetStarts[screenID] ?? tx.startedAt)

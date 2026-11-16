@@ -109,6 +109,7 @@ class SettingsViewModel: ObservableObject {
         didSet {
             guard !isBatchUpdating else { return }
             WaifuXPreferences.shared.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
+            DesktopWallpaperSyncManager.shared.refreshStaticSourcesForBlurFillPreference()
         }
     }
     /// Wallhaven 探索页默认隐藏竖图。
@@ -422,6 +423,7 @@ class SettingsViewModel: ObservableObject {
         WaifuXPreferences.shared.set(hideNotch, forKey: "hide_notch")
         WaifuXPreferences.shared.set(autoRemoveVideoLetterbox, forKey: "auto_remove_video_letterbox")
         WaifuXPreferences.shared.set(portraitBlurFillEnabled, forKey: "portrait_blur_fill_enabled")
+        DesktopWallpaperSyncManager.shared.refreshStaticSourcesForBlurFillPreference()
         WaifuXPreferences.shared.set(
             hidePortraitWallpapersByDefault,
             forKey: WallhavenBrowsePreferences.hidePortraitByDefaultKey

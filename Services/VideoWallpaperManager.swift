@@ -434,7 +434,7 @@ final class VideoWallpaperManager: ObservableObject {
         let frameInterpolationDecisionsByScreen: [String: VideoFrameInterpolationDecision]
         let frameInterpolatedPlaybackURLByScreen: [String: URL]
     }
-    /// 每屏视频真实尺寸缓存（naturalSize），供 crop 计算用。设置壁纸时填充。
+    /// 每屏视频真实像素尺寸缓存（naturalSize + preferredTransform），供 crop 计算用。设置壁纸时填充。
     private var videoSizes: [String: CGSize] = [:]
     /// 每屏视频源文件自带黑边的内容裁切框。只在全屏自动铺满模式下叠加。
     private var videoLetterboxContentCrops: [String: VideoLetterboxCrop] = [:]
@@ -3061,8 +3061,7 @@ final class VideoWallpaperManager: ObservableObject {
             Task { [weak self, videoURL = playbackURL, screenID, requestID] in
                 let asset = AVURLAsset(url: videoURL)
                 guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-                      let size = try? await track.load(.naturalSize),
-                      size.width > 0, size.height > 0 else { return }
+                      let size = await Self.orientedPixelSize(of: track) else { return }
                 await MainActor.run {
                     guard let self,
                           self.externalRenderingActive,
@@ -4477,55 +4476,50 @@ final class VideoWallpaperManager: ObservableObject {
         CATransaction.flush()
     }
 
-    /// 对指定屏应用当前可视区域 crop 配置。在设置壁纸、布局变化、crop 变更时调用。
-    /// 注：CropLayoutEngine 实际只用 screenSize（壁纸 crop 是归一化值，由 contentsRect 处理），
-    /// 因此无需异步等待视频 track 加载完成。
+    /// 对指定屏应用当前可视区域 crop 配置；源尺寸和屏幕尺寸均使用物理像素。
+    /// 视频尺寸异步就绪前使用屏幕像素尺寸，元数据加载后再重算。
     func applyCropToScreen(_ screen: NSScreen) {
         if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("video.crop", ["screen": screen]); return }
 
         let screenID = screen.wallpaperScreenIdentifier
+        let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+        let screenPixelSize = CGSize(
+            width: screen.frame.width * screen.backingScaleFactor,
+            height: screen.frame.height * screen.backingScaleFactor
+        )
+        let wallpaperSize = videoSizes[screenID] ?? screenPixelSize
+        // Non-fill modes use the original image, including any encoded borders.
+        let contentCrop = autoRemoveVideoLetterboxEnabled
+            && (!settings.shouldApplyCrop || settings.displayMode == .fill)
+            ? videoLetterboxContentCrops[screenID]?.cropRect : nil
+        let contentSize = contentCrop.map {
+            CGSize(width: max(1, wallpaperSize.width * $0.w),
+                   height: max(1, wallpaperSize.height * $0.h))
+        } ?? wallpaperSize
+        var layout = CropLayoutEngine.compute(
+            wallpaperSize: contentSize,
+            screenSize: screenPixelSize,
+            settings: settings
+        )
+        if let contentCrop {
+            let crop = layout.wallpaperCropRect
+            layout.wallpaperCropRect = UnitRect(
+                x: contentCrop.x + crop.x * contentCrop.w,
+                y: contentCrop.y + crop.y * contentCrop.h,
+                w: crop.w * contentCrop.w,
+                h: crop.h * contentCrop.h
+            )
+        }
         if externalRenderingActive {
+            guard WallpaperPresentationLayerTree.geometry(for: layout, in: CGRect(origin: .zero, size: screenPixelSize)) != nil else {
+                AppLogger.warn(.wallpaper, "External video layout rejected: tile copy budget exceeded")
+                return
+            }
             guard let screenIndex = externalScreenIndex(for: screen) else { return }
-            let settings = DisplayCropSettingsStore.shared.settings(for: screen)
-            let wallpaperSize = videoSizes[screenID] ?? screen.frame.size
-
-            let layout: CropLayout?
-            if settings.shouldApplyCrop {
-                layout = CropLayoutEngine.compute(
-                    wallpaperSize: wallpaperSize,
-                    screenSize: screen.frame.size,
-                    settings: settings
-                )
-            } else if autoRemoveVideoLetterboxEnabled,
-                      let contentCrop = videoLetterboxContentCrops[screenID] {
-                layout = CropLayout(
-                    wallpaperCropRect: contentCrop.cropRect,
-                    viewportRect: .full,
-                    letterboxColor: CGColor(gray: 0, alpha: 1)
-                )
-            } else {
-                layout = nil
-            }
-
-            let crop = layout.map {
-                CGRect(
-                    x: $0.wallpaperCropRect.x,
-                    y: $0.wallpaperCropRect.y,
-                    width: $0.wallpaperCropRect.w,
-                    height: $0.wallpaperCropRect.h
-                )
-            }
-            let viewport = layout.map {
-                CGRect(
-                    x: $0.viewportRect.x,
-                    y: $0.viewportRect.y,
-                    width: $0.viewportRect.w,
-                    height: $0.viewportRect.h
-                )
-            }
-            let letterboxColor: String? = layout == nil
-                ? settings.letterboxColorHex
-                : (settings.shouldApplyCrop ? settings.letterboxColorHex : "000000")
+            let crop = CGRect(x: layout.wallpaperCropRect.x, y: layout.wallpaperCropRect.y,
+                              width: layout.wallpaperCropRect.w, height: layout.wallpaperCropRect.h)
+            let viewport = CGRect(x: layout.viewportRect.x, y: layout.viewportRect.y,
+                                  width: layout.viewportRect.w, height: layout.viewportRect.h)
             let revision = (externalCropRevisionByScreenID[screenID] ?? 0) &+ 1
             externalCropRevisionByScreenID[screenID] = revision
             externalRenderer.sendCommandFireAndForget(
@@ -4533,8 +4527,9 @@ final class VideoWallpaperManager: ObservableObject {
                     screen: screenIndex,
                     crop: crop,
                     viewport: viewport,
-                    letterboxColor: letterboxColor,
-                    revision: revision
+                    letterboxColor: settings.shouldApplyCrop ? settings.letterboxColorHex : "000000",
+                    revision: revision,
+                    tiled: layout.isTiled
                 )
             )
             return
@@ -4543,31 +4538,9 @@ final class VideoWallpaperManager: ObservableObject {
         guard let window = windows[screenID],
               let containerView = window.contentView as? WallpaperVideoContainerView,
               players[screenID] != nil else { return }
-
-        let settings = DisplayCropSettingsStore.shared.settings(for: screen)
-        guard settings.shouldApplyCrop else {
-            window.backgroundColor = .black
-            if autoRemoveVideoLetterboxEnabled,
-               let contentCrop = videoLetterboxContentCrops[screenID] {
-                let layout = CropLayout(
-                    wallpaperCropRect: contentCrop.cropRect,
-                    viewportRect: .full,
-                    letterboxColor: CGColor(gray: 0, alpha: 1)
-                )
-                containerView.applyCropLayout(layout)
-            } else {
-                containerView.applyCropLayout(nil)
-            }
-            return
+        if containerView.applyCropLayout(layout) {
+            window.backgroundColor = NSColor(cgColor: layout.letterboxColor) ?? .black
         }
-        // wallpaperSize 用视频真实 naturalSize（取不到 fallback 屏尺寸，保证不崩）。
-        let wallpaperSize = videoSizes[screenID] ?? screen.frame.size
-        let layout = CropLayoutEngine.compute(
-            wallpaperSize: wallpaperSize,
-            screenSize: screen.frame.size,
-            settings: settings)
-        containerView.applyCropLayout(layout)
-        window.backgroundColor = NSColor(cgColor: layout.letterboxColor) ?? .black
     }
 
     func refreshAutoRemoveVideoLetterbox() {
@@ -4639,12 +4612,23 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     @objc private func handleCropDidChange(_ note: Notification) {
-        guard let screenID = note.userInfo?["screenID"] as? String,
-              let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) else { return }
-        applyCropToScreen(screen)
+        guard let requested = note.userInfo?["screenID"] as? String else { return }
+        for screen in NSScreen.screens where requested == "*" || screen.wallpaperScreenIdentifier == requested {
+            applyCropToScreen(screen)
+        }
     }
 
-    /// 供 overlay 预览取视频真实尺寸（naturalSize）。
+    /// AVFoundation naturalSize does not include the portrait/rotation transform.
+    private static func orientedPixelSize(of track: AVAssetTrack) async -> CGSize? {
+        guard let naturalSize = try? await track.load(.naturalSize),
+              let preferredTransform = try? await track.load(.preferredTransform) else { return nil }
+        let transformed = CGRect(origin: .zero, size: naturalSize).applying(preferredTransform)
+        let size = CGSize(width: abs(transformed.width), height: abs(transformed.height))
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return nil }
+        return size
+    }
+
+    /// 供 overlay 预览取视频经过 preferredTransform 后的真实像素尺寸。
     func videoSize(for screen: NSScreen) -> CGSize? {
         videoSizes[screen.wallpaperScreenIdentifier]
     }
@@ -4934,7 +4918,7 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             frameInterpolatedPlaybackURLByScreen.removeValue(forKey: screenID)
         }
-        containerView.playerLayer.videoGravity = .resizeAspectFill
+        containerView.playerLayer.videoGravity = .resize
         containerView.attachPlayer(components.player)
         applyCropToScreen(screen)
         applyPlayerAudioPolicy(components.player, muted: isMuted, volume: volumeByScreen[screenID] ?? volume)
@@ -8771,7 +8755,7 @@ final class VideoWallpaperManager: ObservableObject {
                     }
                     self.screenTransitionSourceRollbacks.removeValue(forKey: targetScreenID)
                     // crossfade 完成时已把 player 写进主层；这里再写一次保持非动画路径一致。
-                    containerView.playerLayer.videoGravity = .resizeAspectFill
+                    containerView.playerLayer.videoGravity = .resize
                     containerView.attachPlayer(components.player)
                     self.hidePosterImage(for: targetScreenID)
                     self.applyCropToScreen(targetScreen)
@@ -8945,7 +8929,7 @@ final class VideoWallpaperManager: ObservableObject {
                     containerView.cancelPlayerTransitionIfNeeded()
                     CATransaction.begin()
                     CATransaction.setDisableActions(true)
-                    containerView.playerLayer.videoGravity = .resizeAspectFill
+                    containerView.playerLayer.videoGravity = .resize
                     containerView.attachPlayer(components.player)
                     CATransaction.commit()
                     applyCropToScreen(targetScreen)
@@ -9346,8 +9330,7 @@ final class VideoWallpaperManager: ObservableObject {
         Task { [weak self] in
             let asset = AVURLAsset(url: videoURL)
             guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-                  let size = try? await track.load(.naturalSize),
-                  size.width > 0, size.height > 0 else { return }
+                  let size = await Self.orientedPixelSize(of: track) else { return }
             await MainActor.run {
                 guard let self, self.globalTransitionGeneration == generation else { return }
                 for screen in screens {
@@ -9613,7 +9596,7 @@ final class VideoWallpaperManager: ObservableObject {
                 }
                 players[screenID] = canonicalPlayer
                 loopers.removeValue(forKey: screenID)
-                containerView.playerLayer.videoGravity = .resizeAspectFill
+                containerView.playerLayer.videoGravity = .resize
                 containerView.attachPlayer(canonicalPlayer)
                 if let screen = NSScreen.screens.first(where: { $0.wallpaperScreenIdentifier == screenID }) {
                     applyCropToScreen(screen)
@@ -10216,7 +10199,7 @@ final class VideoWallpaperManager: ObservableObject {
         let isSharedWarmupFollower = !screenIDsReferencingPlayer(components.player).isEmpty
         assignPlayerComponents(components, to: screenID)
 
-        containerView.playerLayer.videoGravity = .resizeAspectFill
+        containerView.playerLayer.videoGravity = .resize
         if !isSharedWarmupFollower {
             containerView.attachPlayer(components.player)
         }
@@ -10225,8 +10208,7 @@ final class VideoWallpaperManager: ObservableObject {
         Task { [weak self, weak player = components.player, weak window, videoURL] in
             let asset = AVURLAsset(url: videoURL)
             guard let track = try? await asset.loadTracks(withMediaType: .video).first,
-                  let size = try? await track.load(.naturalSize),
-                  size.width > 0, size.height > 0 else { return }
+                  let size = await Self.orientedPixelSize(of: track) else { return }
             await MainActor.run {
                 guard let self, let player, let window,
                       self.players[screenID] === player,
@@ -11597,7 +11579,103 @@ private enum VideoLetterboxAnalyzer {
         )
     }
 }
+/// One stable presentation subtree. Replication copies compositing output, never players.
+/// Shared by native video and StaticCropImageView, which are in the same App/Helper targets.
+@MainActor
+final class WallpaperPresentationLayerTree {
+    static let maximumTileCopies = 65_536
+
+    struct Geometry {
+        var viewport: CGRect
+        var sourceFrame: CGRect
+        var columns: Int = 1
+        var rows: Int = 1
+        var isTiled: Bool = false
+    }
+
+    let rootLayer = CALayer()
+    let contentLayer = CALayer()
+    private let verticalReplicator = CAReplicatorLayer()
+    private let horizontalReplicator = CAReplicatorLayer()
+    private(set) var geometry: Geometry?
+
+    init() {
+        // Keep the layer identities during tile -> non-tile, player promotion and HDR handoff.
+        rootLayer.addSublayer(verticalReplicator)
+        verticalReplicator.addSublayer(horizontalReplicator)
+        horizontalReplicator.addSublayer(contentLayer)
+        verticalReplicator.instanceCount = 1
+        horizontalReplicator.instanceCount = 1
+        verticalReplicator.preservesDepth = true
+        horizontalReplicator.preservesDepth = true
+    }
+
+    /// Pure geometry validation runs before changing any layers, including the viewport mask.
+    static func geometry(for layout: CropLayout?, in bounds: CGRect) -> Geometry? {
+        guard bounds.width.isFinite, bounds.height.isFinite,
+              bounds.width > 0, bounds.height > 0 else { return nil }
+        guard let layout else { return Geometry(viewport: bounds, sourceFrame: bounds) }
+        let vp = layout.viewportRect
+        let crop = layout.wallpaperCropRect
+        guard [vp.x, vp.y, vp.w, vp.h, crop.x, crop.y, crop.w, crop.h].allSatisfy({ $0.isFinite }),
+              vp.w > 0, vp.h > 0, crop.w > 0, crop.h > 0 else { return nil }
+        let viewport = CGRect(
+            x: bounds.minX + vp.x * bounds.width,
+            y: bounds.minY + (1 - vp.y - vp.h) * bounds.height,
+            width: vp.w * bounds.width,
+            height: vp.h * bounds.height
+        )
+        let width = viewport.width / crop.w
+        let height = viewport.height / crop.h
+        var frame = CGRect(x: viewport.minX - crop.x * width,
+                           y: viewport.minY - (1 - crop.y - crop.h) * height,
+                           width: width, height: height)
+        guard [frame.minX, frame.minY, width, height].allSatisfy({ $0.isFinite }),
+              width > 0, height > 0 else { return nil }
+        guard layout.isTiled else { return Geometry(viewport: viewport, sourceFrame: frame) }
+        // Normalize the first instance to overlap the viewport's lower/left edge.
+        // The phase and tile size remain exactly the values computed from source UV.
+        let phaseX = (frame.minX - viewport.minX).truncatingRemainder(dividingBy: width)
+        let phaseY = (frame.minY - viewport.minY).truncatingRemainder(dividingBy: height)
+        let firstX = phaseX > 0 ? phaseX - width : phaseX
+        let firstY = phaseY > 0 ? phaseY - height : phaseY
+        let columns = ceil((viewport.width - firstX) / width)
+        let rows = ceil((viewport.height - firstY) / height)
+        let limit = Double(maximumTileCopies)
+        guard columns.isFinite, rows.isFinite, columns >= 1, rows >= 1,
+              columns <= limit, rows <= limit, columns * rows <= limit else { return nil }
+        frame.origin = CGPoint(x: viewport.minX + firstX, y: viewport.minY + firstY)
+        return Geometry(viewport: viewport, sourceFrame: frame,
+                        columns: Int(columns), rows: Int(rows), isTiled: true)
+    }
+
+    func apply(_ geometry: Geometry, in bounds: CGRect) {
+        self.geometry = geometry
+        rootLayer.frame = bounds
+        verticalReplicator.frame = bounds
+        horizontalReplicator.frame = bounds
+        contentLayer.frame = bounds
+        horizontalReplicator.instanceCount = geometry.columns
+        verticalReplicator.instanceCount = geometry.rows
+        horizontalReplicator.instanceTransform = geometry.isTiled
+            ? CATransform3DMakeTranslation(geometry.sourceFrame.width, 0, 0) : CATransform3DIdentity
+        verticalReplicator.instanceTransform = geometry.isTiled
+            ? CATransform3DMakeTranslation(0, geometry.sourceFrame.height, 0) : CATransform3DIdentity
+    }
+
+    /// CPU freeze images already contain the visible viewport, so they must bypass repetition.
+    func mountFreeze(_ freeze: CALayer, isViewportSnapshot: Bool) {
+        let parent = isViewportSnapshot ? rootLayer : contentLayer
+        if freeze.superlayer !== parent {
+            freeze.removeFromSuperlayer()
+            parent.insertSublayer(freeze, at: 0)
+        }
+    }
+}
+
 private final class WallpaperVideoContainerView: NSView {
+    private let presentationTree = WallpaperPresentationLayerTree()
+    private var currentCropLayout: CropLayout?
     private var storedPosterLayer: CALayer?
     private var grainOverlayView: NSView?
     private var transitionPlayerLayer: AVPlayerLayer?
@@ -11640,18 +11718,22 @@ private final class WallpaperVideoContainerView: NSView {
         let container = CALayer()
         container.masksToBounds = true
         layer = container
+        container.addSublayer(presentationTree.rootLayer)
+        if let geometry = WallpaperPresentationLayerTree.geometry(for: nil, in: bounds) {
+            presentationTree.apply(geometry, in: bounds)
+        }
 
         freezeFrameLayer.contentsGravity = .resizeAspectFill
         freezeFrameLayer.backgroundColor = CGColor(gray: 0, alpha: 1)
         freezeFrameLayer.frame = bounds
         freezeFrameLayer.isHidden = false
-        container.addSublayer(freezeFrameLayer)
+        presentationTree.contentLayer.addSublayer(freezeFrameLayer)
 
         avPlayerLayer.videoGravity = .resizeAspectFill
         avPlayerLayer.needsDisplayOnBoundsChange = true
         avPlayerLayer.backgroundColor = CGColor(gray: 0, alpha: 0)
         avPlayerLayer.frame = bounds
-        container.addSublayer(avPlayerLayer)
+        presentationTree.contentLayer.addSublayer(avPlayerLayer)
 
         startReadyForDisplayObservation()
     }
@@ -11759,6 +11841,16 @@ private final class WallpaperVideoContainerView: NSView {
             x: CGFloat(allocation.pixelWidth) / visibleViewport.width,
             y: -CGFloat(allocation.pixelHeight) / visibleViewport.height
         )
+        if let geometry = presentationTree.geometry, geometry.isTiled {
+            // Sample a single current frame, then draw its periodic texture into the
+            // bounded viewport bitmap. No AVPlayer or decoder is created for any cell.
+            guard let tileImage = tiledFreezeSourceImage(from: sourceLayer, frame: targetFrame,
+                                                        viewport: visibleViewport, scale: scale) else { return }
+            context.translateBy(x: -visibleViewport.minX, y: -visibleViewport.minY)
+            context.translateBy(x: 0, y: targetFrame.minY + targetFrame.maxY)
+            context.scaleBy(x: 1, y: -1)
+            context.draw(tileImage, in: targetFrame, byTiling: true)
+        } else {
         context.translateBy(
             x: targetFrame.minX - visibleViewport.minX - sourceLayer.bounds.minX,
             y: targetFrame.minY - visibleViewport.minY - sourceLayer.bounds.minY
@@ -11775,7 +11867,7 @@ private final class WallpaperVideoContainerView: NSView {
                   sourceBounds.width > 0, sourceBounds.height > 0 else { return }
             let fillScale = max(sourceBounds.width / imageSize.width, sourceBounds.height / imageSize.height)
             let drawSize = CGSize(width: imageSize.width * fillScale, height: imageSize.height * fillScale)
-            let drawRect = CGRect(
+            let drawRect = avPlayerLayer.videoGravity == .resize ? sourceBounds : CGRect(
                 x: sourceBounds.midX - drawSize.width / 2,
                 y: sourceBounds.midY - drawSize.height / 2,
                 width: drawSize.width,
@@ -11789,6 +11881,7 @@ private final class WallpaperVideoContainerView: NSView {
         } else {
             sourceLayer.render(in: context)
         }
+        }
         guard let cgImage = context.makeImage() else { return }
         // 全黑抓帧没有意义，丢掉以免用黑图盖住旧 freeze。
         if isMostlyBlack(cgImage) { return }
@@ -11798,9 +11891,35 @@ private final class WallpaperVideoContainerView: NSView {
         freezeFrameLayer.contents = cgImage
         freezeFrameUsesViewportSnapshot = true
         freezeFrameLayer.contentsScale = CGFloat(allocation.pixelWidth) / visibleViewport.width
-        freezeFrameLayer.contentsGravity = .resizeAspectFill
+        freezeFrameLayer.contentsGravity = .resize
+        presentationTree.mountFreeze(freezeFrameLayer, isViewportSnapshot: true)
         freezeFrameLayer.frame = visibleViewport
         CATransaction.commit()
+    }
+
+    private func tiledFreezeSourceImage(
+        from sourceLayer: CALayer, frame: CGRect, viewport: CGRect, scale: CGFloat
+    ) -> CGImage? {
+        if let contents = sourceLayer.contents,
+           CFGetTypeID(contents as AnyObject) == CGImage.typeID {
+            return contents as! CGImage
+        }
+        // A tile may be smaller than one point. Use at least two sampling points
+        // without changing its displayed dimensions, and retain the existing bitmap cap.
+        let sampleSize = CGSize(width: max(2, min(frame.width, viewport.width)),
+                                height: max(2, min(frame.height, viewport.height)))
+        guard let allocation = VideoFreezeFrameBudget.allocation(viewportSize: sampleSize, backingScale: scale),
+              sourceLayer.bounds.width > 0, sourceLayer.bounds.height > 0,
+              let context = CGContext(data: nil, width: allocation.pixelWidth, height: allocation.pixelHeight,
+                                      bitsPerComponent: 8, bytesPerRow: allocation.bytesPerRow,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.translateBy(x: 0, y: CGFloat(allocation.pixelHeight))
+        context.scaleBy(x: CGFloat(allocation.pixelWidth) / sourceLayer.bounds.width,
+                        y: -CGFloat(allocation.pixelHeight) / sourceLayer.bounds.height)
+        context.translateBy(x: -sourceLayer.bounds.minX, y: -sourceLayer.bounds.minY)
+        sourceLayer.render(in: context)
+        return context.makeImage()
     }
 
     private func isMostlyBlack(_ image: CGImage) -> Bool {
@@ -11834,81 +11953,63 @@ private final class WallpaperVideoContainerView: NSView {
         return Double(sum) / Double(sampleCount * 3) < 6
     }
 
-    /// 应用已算好的 CropLayout；nil 回现状 aspect-fill。
-    /// 实现：
-    /// 1. viewport（可视框）通过 avPlayerLayer.frame 限制到 viewport 区域；容器 backing layer
-    ///    masksToBounds=true 让 viewport 之外可见 view 背景（letterbox 由 window.backgroundColor 提供）。
-    /// 2. pan/zoom 通过把 avPlayerLayer.frame 在 viewport 内 放大并偏移 实现：
-    ///    layer.frame.size = viewport.size / wallpaperCropRect.size
-    ///    layer.frame.origin = viewport.origin - wallpaperCropRect.origin × layer.frame.size
-    ///    然后 backing layer masksToBounds 把溢出的部分裁掉。
-    ///    注意：CALayer y 向上、CropLayout y 向下，需做 y 翻转。
-    func applyCropLayout(_ layout: CropLayout?) {
+    /// Frames already encode fill/fit/stretch/center; .resize must not crop them again.
+    /// The fixed subtree also covers players/posters added during an active transition.
+    @discardableResult
+    func applyCropLayout(_ layout: CropLayout?) -> Bool {
         let viewBounds = bounds
-        guard let layout, viewBounds.width > 0, viewBounds.height > 0 else {
-            currentViewportRect = nil
-            currentLayerFrame = nil
-            currentWallpaperCropRect = nil
-            avPlayerLayer.videoGravity = .resizeAspectFill
-            avPlayerLayer.frame = viewBounds
-            freezeFrameLayer.frame = viewBounds
-            // 过渡层与主视频层同坐标系（父 layer），必须用 frame 而非 bounds。
-            transitionPlayerLayer?.frame = avPlayerLayer.frame
-            // 回退：mask 清除，poster/grain 恢复全 bounds
-            layer?.mask = nil
-            storedPosterLayer?.frame = viewBounds  // 无 crop 时 poster 也铺满
-            grainOverlayView?.autoresizingMask = [.width, .height]
-            grainOverlayView?.frame = viewBounds
-            return
+        guard let geometry = WallpaperPresentationLayerTree.geometry(for: layout, in: viewBounds) else {
+            AppLogger.warn(.wallpaper, "Native video layout rejected: invalid geometry or tile copy budget exceeded",
+                           metadata: ["maximumCopies": WallpaperPresentationLayerTree.maximumTileCopies])
+            return false
         }
-        // 视频不变形 → aspect-fill 到 layer bounds
-        avPlayerLayer.videoGravity = .resizeAspectFill
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let oldGeometry = presentationTree.geometry
+        let sourceGeometryChanged = oldGeometry?.sourceFrame != geometry.sourceFrame
+            || oldGeometry?.viewport != geometry.viewport || oldGeometry?.isTiled != geometry.isTiled
+        if sourceGeometryChanged, freezeFrameUsesViewportSnapshot {
+            // A viewport bitmap belongs to its old layout. A poster is source-space and
+            // remains reusable; otherwise recapture after applying the new geometry.
+            freezeFrameLayer.contents = storedPosterLayer?.contents
+            freezeFrameUsesViewportSnapshot = false
+        }
+        currentCropLayout = layout
+        currentViewportRect = layout == nil ? nil : geometry.viewport
+        currentWallpaperCropRect = layout?.wallpaperCropRect
+        currentLayerFrame = layout == nil ? nil : geometry.sourceFrame
+        presentationTree.apply(geometry, in: viewBounds)
+        let gravity: AVLayerVideoGravity = layout == nil ? .resizeAspectFill : .resize
+        avPlayerLayer.videoGravity = gravity
+        avPlayerLayer.frame = geometry.sourceFrame
+        transitionPlayerLayer?.videoGravity = gravity
+        transitionPlayerLayer?.frame = geometry.sourceFrame
+        storedPosterLayer?.contentsGravity = layout == nil ? .resizeAspectFill : .resize
+        storedPosterLayer?.frame = geometry.sourceFrame
+        presentationTree.mountFreeze(freezeFrameLayer, isViewportSnapshot: freezeFrameUsesViewportSnapshot)
+        freezeFrameLayer.contentsGravity = layout == nil && !freezeFrameUsesViewportSnapshot ? .resizeAspectFill : .resize
+        freezeFrameLayer.frame = freezeFrameUsesViewportSnapshot
+            ? geometry.viewport.intersection(viewBounds) : geometry.sourceFrame
 
-        // viewport 在 view 坐标系（y 向上）。CropLayout.viewportRect y 向下需翻转。
-        let vpW = layout.viewportRect.w * viewBounds.width
-        let vpH = layout.viewportRect.h * viewBounds.height
-        let vpX = layout.viewportRect.x * viewBounds.width
-        let vpY = (1.0 - layout.viewportRect.y - layout.viewportRect.h) * viewBounds.height
-        let viewport = CGRect(x: vpX, y: vpY, width: vpW, height: vpH)
-        currentViewportRect = viewport
-        currentWallpaperCropRect = layout.wallpaperCropRect
-
-        // layer frame：放大到 viewport.size / cropRect.size，再偏移使得 viewport 看到 cropRect
-        let crop = layout.wallpaperCropRect
-        let cropW = max(0.0001, crop.w)
-        let cropH = max(0.0001, crop.h)
-        let layerW = vpW / cropW
-        let layerH = vpH / cropH
-        // cropRect.y 向下 → 翻转：从 wallpaper 顶部移除 (1-y-h) 高度 ⇔ layer 上沿移动到 viewport 顶之上 crop.y × layerH
-        let layerX = vpX - crop.x * layerW
-        let layerY = vpY - (1.0 - crop.y - crop.h) * layerH
-        let computedLayerFrame = CGRect(x: layerX, y: layerY, width: layerW, height: layerH)
-        avPlayerLayer.frame = computedLayerFrame
-        freezeFrameLayer.frame = freezeFrameUsesViewportSnapshot ? viewport : computedLayerFrame
-        currentLayerFrame = computedLayerFrame
-        transitionPlayerLayer?.frame = avPlayerLayer.frame
-
-        // ⚠️ 关键：当 cropRect 不是正方形时（如 viewport 比例窗口），avPlayerLayer 在某个方向
-        // 被放大后会超出 viewport 边界。容器 backing layer 的 masksToBounds 只裁到 view bounds（全屏），
-        // 不会裁到 viewport，所以视频内容会"漏"进 letterbox 区域，盖掉 window.backgroundColor。
-        // 解决方案：给容器 layer 装一个 viewport 矩形的 mask，把所有子层裁到 viewport 内。
-        // viewport 等于 bounds（无 letterbox）时不装 mask，避免无谓开销。
-        let isFullViewport = abs(vpX) < 0.5 && abs(vpY) < 0.5
-            && abs(vpW - viewBounds.width) < 0.5 && abs(vpH - viewBounds.height) < 0.5
+        // Keep the mask on the backing layer: independent grain subviews are clipped too.
+        let viewport = geometry.viewport
+        let isFullViewport = abs(viewport.minX - viewBounds.minX) < 0.5
+            && abs(viewport.minY - viewBounds.minY) < 0.5
+            && abs(viewport.width - viewBounds.width) < 0.5
+            && abs(viewport.height - viewBounds.height) < 0.5
         if isFullViewport {
             layer?.mask = nil
         } else {
-            let mask = (layer?.mask as? CALayer) ?? CALayer()
+            let mask = layer?.mask ?? CALayer()
             mask.backgroundColor = CGColor(gray: 1, alpha: 1)
             mask.frame = viewport
             layer?.mask = mask
         }
-
-        // poster 是 sublayer，和 avPlayerLayer 同级，容器 mask 自动裁剪。
-        // poster frame 必须和 avPlayerLayer 完全一致（含 pan/zoom 偏移），这样被 mask 裁后才能显示相同区域。
-        storedPosterLayer?.frame = computedLayerFrame
-        grainOverlayView?.autoresizingMask = []
+        grainOverlayView?.autoresizingMask = layout == nil ? [.width, .height] : []
         grainOverlayView?.frame = viewport
+        CATransaction.commit()
+        if sourceGeometryChanged { captureFreezeFrameIfNeeded(force: true) }
+        return true
     }
 
     func cancelPlayerTransitionIfNeeded() {
@@ -11936,7 +12037,7 @@ private final class WallpaperVideoContainerView: NSView {
         incoming.frame = avPlayerLayer.frame
         // A literal zero opacity layer can be culled and never become readyForDisplay.
         incoming.opacity = 0.001
-        layer?.addSublayer(incoming)
+        presentationTree.contentLayer.addSublayer(incoming)
         transitionPlayerLayer = incoming
         return incoming
     }
@@ -12135,7 +12236,7 @@ private final class WallpaperVideoContainerView: NSView {
         // 与当前主层同 frame（含 crop/pan/zoom），避免 letterbox 区域闪黑。
         incoming.frame = avPlayerLayer.frame
         // 始终盖在 poster / 旧 player 之上，淡入过程可见；黑场中间帧已去掉。
-        layer?.addSublayer(incoming)
+        presentationTree.contentLayer.addSublayer(incoming)
         transitionPlayerLayer = incoming
 
         // App 非活跃时 CA 动画 completion 可能永不触发（自动切换常见场景）。
@@ -12208,12 +12309,12 @@ private final class WallpaperVideoContainerView: NSView {
 
         guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
         let posterLayer = CALayer()
-        posterLayer.contentsGravity = .resizeAspectFill
+        posterLayer.contentsGravity = currentCropLayout == nil ? .resizeAspectFill : .resize
         posterLayer.contents = cg
         // poster 必须和 avPlayerLayer 使用完全相同的 frame（含 pan/zoom 偏移），
         // 这样被容器 mask 裁剪后才能显示一致的区域
         posterLayer.frame = currentLayerFrame ?? bounds
-        layer?.addSublayer(posterLayer)
+        presentationTree.contentLayer.addSublayer(posterLayer)
         storedPosterLayer = posterLayer
 
         // 同步一份到底层 freeze：hidePoster 后若 AVPlayerLayer 仍空帧，不致露 window 黑底。
@@ -12222,7 +12323,8 @@ private final class WallpaperVideoContainerView: NSView {
             CATransaction.setDisableActions(true)
             freezeFrameLayer.contents = cg
             freezeFrameUsesViewportSnapshot = false
-            freezeFrameLayer.contentsGravity = .resizeAspectFill
+            freezeFrameLayer.contentsGravity = currentCropLayout == nil ? .resizeAspectFill : .resize
+            presentationTree.mountFreeze(freezeFrameLayer, isViewportSnapshot: false)
             freezeFrameLayer.frame = currentLayerFrame ?? bounds
             CATransaction.commit()
         }
@@ -12256,32 +12358,10 @@ private final class WallpaperVideoContainerView: NSView {
 
     override func layout() {
         super.layout()
-        // 无 crop（或回退状态）：avPlayerLayer 铺满 bounds；
-        // 有 crop：avPlayerLayer.frame 由 applyCropLayout 设定，layout 时不动它（外层会在
-        // bounds 变化后调用 applyCropToScreen 重新计算）。
-        if currentWallpaperCropRect == nil {
-            avPlayerLayer.frame = bounds
-            freezeFrameLayer.frame = bounds
-        } else {
-            freezeFrameLayer.frame = freezeFrameUsesViewportSnapshot
-                ? (currentViewportRect ?? bounds).intersection(bounds)
-                : (currentLayerFrame ?? avPlayerLayer.frame)
-        }
-        transitionPlayerLayer?.frame = avPlayerLayer.frame
-
-        // poster 是 sublayer，和 avPlayerLayer 同级，容器 mask 自动裁剪。
-        // poster frame 必须和 avPlayerLayer 一致（含 pan/zoom 偏移），不能用 viewport。
-        if let lf = currentLayerFrame {
-            storedPosterLayer?.frame = lf
-        } else {
-            storedPosterLayer?.frame = bounds
-        }
-        if let vp = currentViewportRect {
-            grainOverlayView?.frame = vp
-        } else {
-            grainOverlayView?.frame = bounds
-        }
+        // Recompute point geometry from the saved normalized layout after resize/backing changes.
+        applyCropLayout(currentCropLayout)
     }
+
 }
 
 /// 视频壁纸颗粒蒙层视图

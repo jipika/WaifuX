@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import Darwin
 
 /// 桌面可视区域调节 overlay：每屏一个全屏窗口，拖拽平移、滚轮缩放、ESC 退出。
 /// overlay 自带预览渲染，不依赖实际壁纸层；退出时 settings 已持久化，渲染器按持久化值刷新。
@@ -48,7 +49,8 @@ final class CropAdjustOverlayController {
 
     private func enter(for screen: NSScreen) {
         let screenID = screen.wallpaperScreenIdentifier
-        guard windowsByScreenID[screenID] == nil else { return }
+        guard windowsByScreenID[screenID] == nil,
+              DisplayCropSettingsStore.shared.settings(for: screen).displayMode.supportsAdjustment else { return }
 
         // contentRect + screen treats contentRect as relative to that screen.
         // Passing a global frame would double the external display origin.
@@ -114,7 +116,8 @@ final class CropAdjustOverlayController {
         }
         // Web 调节的是整个 screen-sized HTML 页面，不读取内部 video/canvas 尺寸。
         if WallpaperEngineXBridge.shared.isWebWallpaperOn(screen: screen) {
-            return screen.frame.size
+            return CGSize(width: screen.frame.width * screen.backingScaleFactor,
+                          height: screen.frame.height * screen.backingScaleFactor)
         }
         // 2) wgpu 动态壁纸：取 Bridge 的 canvas 尺寸文件
         if let size = WallpaperEngineXBridge.shared.canvasSize(for: screen) {
@@ -167,10 +170,12 @@ private final class CropAdjustOverlayView: NSView {
         layer?.sublayers?.forEach { $0.removeFromSuperlayer() }
 
         let settings = DisplayCropSettingsStore.shared.settings(for: screen)
-        let wallpaperSize = CropAdjustOverlayController.wallpaperSize(for: screen) ?? screen.frame.size
+        let pixelSize = CGSize(width: screen.frame.width * screen.backingScaleFactor,
+                               height: screen.frame.height * screen.backingScaleFactor)
+        let wallpaperSize = CropAdjustOverlayController.wallpaperSize(for: screen) ?? pixelSize
         let layout = CropLayoutEngine.compute(
             wallpaperSize: wallpaperSize,
-            screenSize: screen.frame.size,
+            screenSize: pixelSize,
             settings: settings)
 
         let bounds = self.bounds
@@ -205,7 +210,8 @@ private final class CropAdjustOverlayView: NSView {
 
         // 提示文字
         let text = CATextLayer()
-        text.string = LocalizationService.shared.t("拖动平移 · 滚轮缩放 · ESC 退出")
+        let zoom = settings.zoom.isFinite ? max(0.25, min(4, settings.zoom)) : 1
+        text.string = "\(LocalizationService.shared.t("拖动平移 · 滚轮缩放 · ESC 退出")) · \(Int((zoom * 100).rounded()))%"
         text.foregroundColor = NSColor.white.cgColor
         text.fontSize = 16
         text.alignmentMode = .center
@@ -235,14 +241,23 @@ private final class CropAdjustOverlayView: NSView {
         let dy = current.y - last.y
         lastDragLocation = current
 
-        // 画面跟手：拖右 → 壁纸右移 → 看到壁纸左侧 → pan.x 减小。
-        // 拖上（dy>0）→ 壁纸上移 → 看到壁纸下方 → pan.y 增大。
-        // 灵敏度：拖动半个屏宽 = pan 从 0 走到 1。
-        let sensitivity = max(1, bounds.width / 2)
-        // interactive=true：只本进程内即时刷新 + 写 App Group JSON，不广播 Darwin、不重启 wgpu
+        let settings = DisplayCropSettingsStore.shared.settings(for: screen)
+        guard settings.displayMode.supportsAdjustment else { return }
+        let pixels = CGSize(width: screen.frame.width * screen.backingScaleFactor,
+                            height: screen.frame.height * screen.backingScaleFactor)
+        let layout = CropLayoutEngine.compute(
+            wallpaperSize: CropAdjustOverlayController.wallpaperSize(for: screen) ?? pixels,
+            screenSize: pixels, settings: settings)
+        // Convert point deltas through the same source mapping used by rendering.
+        // A small image moves inside its blank space; a large image pans its crop.
+        func panDelta(_ delta: Double, _ viewport: Double, _ window: Double) -> Double {
+            guard viewport > 0, window > 0 else { return 0 }
+            let derivative = !layout.isTiled && window > 1 ? 1 - window : 1
+            return -delta * window / viewport / derivative
+        }
         DisplayCropSettingsStore.shared.update(for: screen, interactive: true) { s in
-            s.pan.x = max(0, min(1, s.pan.x - dx / sensitivity))
-            s.pan.y = max(0, min(1, s.pan.y + dy / sensitivity))
+            s.pan.x = max(0, min(1, s.pan.x + panDelta(dx, layout.viewportRect.w * bounds.width, layout.wallpaperCropRect.w)))
+            s.pan.y = max(0, min(1, s.pan.y + panDelta(-dy, layout.viewportRect.h * bounds.height, layout.wallpaperCropRect.h)))
         }
         renderPreview()
         onSettingsChanged?()
@@ -263,7 +278,9 @@ private final class CropAdjustOverlayView: NSView {
         guard delta != 0 else { return }
         // 滚轮也是 interactive，避免每个 tick 重启 wgpu
         DisplayCropSettingsStore.shared.update(for: screen, interactive: true) { s in
-            s.zoom = max(1.0, min(4.0, s.zoom * (1 + delta * 0.03)))
+            guard s.displayMode.supportsAdjustment else { return }
+            let exponent = Double(max(-10, min(10, delta * 0.03)))
+            s.zoom = max(0.25, min(4.0, s.zoom * Darwin.exp(exponent)))
         }
         renderPreview()
         onSettingsChanged?()
@@ -286,8 +303,9 @@ private final class CropAdjustOverlayView: NSView {
             return
         }
         DisplayCropSettingsStore.shared.update(for: screen, interactive: true) { s in
+            guard s.displayMode.supportsAdjustment else { return }
             let multiplier = max(0.01, 1 + magnification)
-            s.zoom = max(1.0, min(4.0, s.zoom * multiplier))
+            s.zoom = max(0.25, min(4.0, s.zoom * multiplier))
         }
         renderPreview()
         onSettingsChanged?()

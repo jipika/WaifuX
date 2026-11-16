@@ -213,6 +213,7 @@ private struct IPCMessage: Codable {
     var viewportH: Double?
     var letterboxColorHex: String?
     var cropRevision: UInt64?
+    var cropTiled: Bool?
     // showPoster
     var posterPath: String?
     // setGrainOverlay
@@ -1192,7 +1193,6 @@ private final class VideoRendererDaemon {
         }
         items[screen] = components.item
 
-        containerView.playerLayer.videoGravity = .resizeAspectFill
         if preserveExistingPipeline,
            let replacementSource,
            let oldPlayer = replacementSource.player {
@@ -2626,11 +2626,19 @@ private final class VideoRendererDaemon {
         guard let container = screenStates[screen]?.containerView else {
             return false
         }
-        if let revision = msg.cropRevision {
-            guard revision >= (screenStates[screen]?.lastCropRevision ?? 0) else {
-                return true
-            }
-            screenStates[screen]?.lastCropRevision = revision
+        if let revision = msg.cropRevision,
+           revision < (screenStates[screen]?.lastCropRevision ?? 0) {
+            return true
+        }
+        let sourceComponents = [msg.cropX, msg.cropY, msg.cropW, msg.cropH]
+        let viewportComponents = [msg.viewportX, msg.viewportY, msg.viewportW, msg.viewportH]
+        let completeSource = sourceComponents.allSatisfy { $0 != nil }
+        let completeViewport = viewportComponents.allSatisfy { $0 != nil }
+        let absentSource = sourceComponents.allSatisfy { $0 == nil }
+        let absentViewport = viewportComponents.allSatisfy { $0 == nil }
+        guard (completeSource && completeViewport) || (absentSource && absentViewport) else {
+            reportInvalidCrop(screen: screen)
+            return false
         }
 
         let crop: CGRect?
@@ -2652,13 +2660,32 @@ private final class VideoRendererDaemon {
         // pending handoff would reshape the outgoing freeze frame and flash
         // black letterbox around A.
         let incomingOnly = pendingReplacements[screen] != nil
-        container.applyCrop(
+        guard container.applyCrop(
             crop: crop,
             viewport: viewport,
             letterboxColorHex: msg.letterboxColorHex,
-            incomingLayerOnly: incomingOnly
-        )
+            incomingLayerOnly: incomingOnly,
+            tiled: msg.cropTiled ?? false
+        ) else {
+            reportInvalidCrop(screen: screen)
+            return false
+        }
+        if let revision = msg.cropRevision {
+            screenStates[screen]?.lastCropRevision = revision
+        }
         return true
+    }
+
+    private func reportInvalidCrop(screen: Int) {
+        let message = "Invalid crop: source must be finite/positive and bounded by 1e6; viewport must be inside the unit screen; tile instances must not exceed \(RendererCropGeometry.maximumTileInstances)"
+        AppLogger.error(.wallpaper, message)
+        sendEvent(
+            .error,
+            screen: screen,
+            screenID: screenStates[screen]?.screenID,
+            requestID: screenStates[screen]?.requestID,
+            message: message
+        )
     }
 
     // MARK: Poster（P2 完整实现）
@@ -2893,6 +2920,174 @@ private final class VideoWallpaperWindow: NSWindow {
     override var canBecomeMain: Bool { false }
 }
 
+// MARK: - Crop geometry (pure math; source and viewport use top-left origins)
+
+private enum RendererCropGeometry {
+    static let maximumSourceMagnitude: CGFloat = 1_000_000
+    static let maximumTileInstances = 65_536
+
+    struct Request {
+        let source: CGRect
+        let viewport: CGRect
+        let tiled: Bool
+    }
+
+    struct Layout {
+        let viewport: CGRect
+        let videoFrame: CGRect
+        let columns: Int
+        let rows: Int
+    }
+
+    static func validSource(_ rect: CGRect) -> Bool {
+        let values = [rect.origin.x, rect.origin.y, rect.size.width, rect.size.height]
+        return values.allSatisfy { $0.isFinite && abs($0) <= maximumSourceMagnitude }
+            && rect.size.width > 0 && rect.size.height > 0
+    }
+
+    static func validViewport(_ rect: CGRect) -> Bool {
+        let values = [rect.origin.x, rect.origin.y, rect.width, rect.height]
+        return values.allSatisfy { $0.isFinite }
+            && rect.width > 0 && rect.height > 0
+            && rect.origin.x >= 0 && rect.origin.y >= 0
+            && rect.maxX <= 1 && rect.maxY <= 1
+    }
+
+    static func layout(_ request: Request, in bounds: CGRect) -> Layout? {
+        guard validSource(request.source), validViewport(request.viewport),
+              [bounds.origin.x, bounds.origin.y, bounds.width, bounds.height].allSatisfy({ $0.isFinite }),
+              bounds.width > 0, bounds.height > 0 else { return nil }
+        let source = request.source
+        let unitViewport = request.viewport
+        let viewport = CGRect(
+            x: bounds.minX + unitViewport.minX * bounds.width,
+            y: bounds.minY + (1 - unitViewport.maxY) * bounds.height,
+            width: unitViewport.width * bounds.width,
+            height: unitViewport.height * bounds.height
+        )
+        let width = viewport.width / source.width
+        let height = viewport.height / source.height
+        var frame = CGRect(
+            x: viewport.minX - source.minX * width,
+            y: viewport.minY - (1 - source.maxY) * height,
+            width: width,
+            height: height
+        )
+        guard [viewport.minX, viewport.minY, viewport.width, viewport.height,
+               frame.origin.x, frame.origin.y, width, height].allSatisfy({ $0.isFinite }),
+              width > 0, height > 0 else { return nil }
+
+        var columns = 1
+        var rows = 1
+        if request.tiled {
+            // Reduce the phase before converting counts to Int. The first tile
+            // begins at/before the viewport edge; replicas only move right/up.
+            let phaseX = (frame.minX - viewport.minX).truncatingRemainder(dividingBy: width)
+            let phaseY = (frame.minY - viewport.minY).truncatingRemainder(dividingBy: height)
+            frame.origin.x = viewport.minX + (phaseX > 0 ? phaseX - width : phaseX)
+            frame.origin.y = viewport.minY + (phaseY > 0 ? phaseY - height : phaseY)
+            let columnCount = ceil((viewport.maxX - frame.minX) / width)
+            let rowCount = ceil((viewport.maxY - frame.minY) / height)
+            guard columnCount.isFinite, rowCount.isFinite,
+                  columnCount >= 1, rowCount >= 1,
+                  columnCount <= CGFloat(maximumTileInstances),
+                  rowCount <= CGFloat(maximumTileInstances),
+                  columnCount * rowCount <= CGFloat(maximumTileInstances) else { return nil }
+            columns = Int(columnCount)
+            rows = Int(rowCount)
+        }
+        return Layout(viewport: viewport, videoFrame: frame, columns: columns, rows: rows)
+    }
+}
+
+/// Owns only presentation layers. Two replicators repeat the same decoded
+/// player output and fallback layers; no additional player/decoder is created.
+private final class RendererPresentationGroup {
+    let root = CALayer()
+    private let content = CALayer()
+    private var horizontal: CAReplicatorLayer?
+    private var vertical: CAReplicatorLayer?
+    var request: RendererCropGeometry.Request?
+    var backgroundColor = CGColor(gray: 0, alpha: 1)
+    private(set) var layout: RendererCropGeometry.Layout?
+
+    init() {
+        root.masksToBounds = true
+        root.addSublayer(content)
+    }
+
+    func add(_ layer: CALayer) {
+        content.addSublayer(layer)
+    }
+
+    func apply(in bounds: CGRect) {
+        root.frame = bounds
+        let localBounds = CGRect(origin: .zero, size: bounds.size)
+        let geometry = request.flatMap { RendererCropGeometry.layout($0, in: localBounds) }
+        guard request == nil || geometry != nil else {
+            dlog("[VideoRenderer] rejected crop geometry; preserving previous presentation")
+            return
+        }
+        layout = geometry
+        let viewport = geometry?.viewport ?? localBounds
+        let frame = geometry?.videoFrame ?? localBounds
+        let tiled = request?.tiled == true && geometry != nil
+
+        if tiled {
+            if horizontal == nil || vertical == nil {
+                clearReplicators()
+                let rows = CAReplicatorLayer()
+                let columns = CAReplicatorLayer()
+                root.addSublayer(rows)
+                rows.addSublayer(columns)
+                columns.addSublayer(content)
+                vertical = rows
+                horizontal = columns
+            }
+            vertical?.frame = localBounds
+            horizontal?.frame = localBounds
+            vertical?.instanceCount = geometry?.rows ?? 1
+            horizontal?.instanceCount = geometry?.columns ?? 1
+            vertical?.instanceTransform = CATransform3DMakeTranslation(0, frame.height, 0)
+            horizontal?.instanceTransform = CATransform3DMakeTranslation(frame.width, 0, 0)
+        } else {
+            clearReplicators()
+        }
+        content.frame = localBounds
+        for layer in content.sublayers ?? [] {
+            layer.frame = frame
+            // Explicit source geometry supplies all aspect handling, including
+            // non-uniform stretch. AVPlayerLayer must not aspect-fill again.
+            (layer as? AVPlayerLayer)?.videoGravity = request == nil ? .resizeAspectFill : .resize
+            layer.contentsGravity = request == nil ? .resizeAspectFill : .resize
+        }
+        if geometry == nil {
+            root.mask = nil
+        } else {
+            let mask = root.mask ?? CALayer()
+            mask.backgroundColor = CGColor(gray: 1, alpha: 1)
+            mask.frame = viewport
+            root.mask = mask
+        }
+    }
+
+    private func clearReplicators() {
+        guard horizontal != nil || vertical != nil else { return }
+        content.removeFromSuperlayer()
+        horizontal?.removeFromSuperlayer()
+        vertical?.removeFromSuperlayer()
+        horizontal = nil
+        vertical = nil
+        root.addSublayer(content)
+    }
+
+    func remove() {
+        clearReplicators()
+        root.mask = nil
+        root.removeFromSuperlayer()
+    }
+}
+
 // MARK: - 视频容器视图
 
 /// The renderer-side equivalent of WallpaperVideoContainerView.
@@ -2912,6 +3107,9 @@ private final class VideoContainerView: NSView {
     /// masked the root layer, which made crop margins transparent and exposed
     /// the system wallpaper underneath.
     private let videoContentLayer = CALayer()
+    private var presentationGroup = RendererPresentationGroup()
+    private var transitionPresentationGroup: RendererPresentationGroup?
+    private var pendingIncomingCrop: (request: RendererCropGeometry.Request?, color: CGColor)?
     private var transitionPlayerLayer: AVPlayerLayer?
     private let freezeFrameLayer = CALayer()
     private var posterLayer: CALayer?
@@ -2937,18 +3135,20 @@ private final class VideoContainerView: NSView {
         videoContentLayer.frame = bounds
         videoContentLayer.masksToBounds = true
         container.addSublayer(videoContentLayer)
+        videoContentLayer.addSublayer(presentationGroup.root)
 
         freezeFrameLayer.contentsGravity = .resizeAspectFill
         freezeFrameLayer.backgroundColor = CGColor(gray: 0, alpha: 1)
         freezeFrameLayer.frame = bounds
         freezeFrameLayer.isHidden = false
-        videoContentLayer.addSublayer(freezeFrameLayer)
+        presentationGroup.add(freezeFrameLayer)
 
         playerLayer.needsDisplayOnBoundsChange = true
         playerLayer.frame = bounds
         playerLayer.videoGravity = .resizeAspectFill
         playerLayer.backgroundColor = CGColor(gray: 0, alpha: 0)
-        videoContentLayer.addSublayer(playerLayer)
+        presentationGroup.add(playerLayer)
+        presentationGroup.apply(in: bounds)
 
         startReadyForDisplayObservation()
     }
@@ -2964,20 +3164,15 @@ private final class VideoContainerView: NSView {
 
     override func layout() {
         super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         videoContentLayer.frame = bounds
-        let videoFrame = currentLayerFrame ?? bounds
-        if currentViewportRect == nil {
-            playerLayer.frame = bounds
-        } else {
-            playerLayer.frame = videoFrame
-        }
-        freezeFrameLayer.frame = videoFrame
-        posterLayer?.frame = videoFrame
-        transitionPlayerLayer?.frame = videoFrame
+        presentationGroup.apply(in: bounds)
+        transitionPresentationGroup?.apply(in: bounds)
+        currentViewportRect = presentationGroup.layout?.viewport
+        currentLayerFrame = presentationGroup.layout?.videoFrame
         grainOverlayView?.frame = currentViewportRect ?? bounds
-        if let currentViewportRect {
-            videoContentLayer.mask?.frame = currentViewportRect
-        }
+        CATransaction.commit()
     }
 
     func attachPlayer(_ player: AVQueuePlayer?) {
@@ -2992,14 +3187,24 @@ private final class VideoContainerView: NSView {
 
     @discardableResult
     func preparePlayerForCrossfade(_ player: AVQueuePlayer) -> AVPlayerLayer {
+        let pendingCrop = pendingIncomingCrop
         discardPreparedPlayerTransition()
         let incoming = AVPlayerLayer(player: player)
-        incoming.videoGravity = playerLayer.videoGravity
         incoming.needsDisplayOnBoundsChange = true
-        incoming.frame = playerLayer.frame
         incoming.opacity = 0.001
-        videoContentLayer.addSublayer(incoming)
+        let group = RendererPresentationGroup()
+        if let pendingCrop {
+            group.request = pendingCrop.request
+            group.backgroundColor = pendingCrop.color
+        } else {
+            group.request = presentationGroup.request
+            group.backgroundColor = presentationGroup.backgroundColor
+        }
+        group.add(incoming)
+        videoContentLayer.addSublayer(group.root)
         transitionPlayerLayer = incoming
+        transitionPresentationGroup = group
+        group.apply(in: bounds)
         return incoming
     }
 
@@ -3007,6 +3212,9 @@ private final class VideoContainerView: NSView {
         transitionPlayerLayer?.player = nil
         transitionPlayerLayer?.removeFromSuperlayer()
         transitionPlayerLayer = nil
+        transitionPresentationGroup?.remove()
+        transitionPresentationGroup = nil
+        pendingIncomingCrop = nil
     }
 
     func crossfadePreparedPlayer(
@@ -3048,6 +3256,25 @@ private final class VideoContainerView: NSView {
             }
             outgoing.player = nil
             outgoing.removeFromSuperlayer()
+            if let group = self.transitionPresentationGroup {
+                // Move retained fallbacks before removing the old wrapper tree.
+                // The replacement owns its own geometry until this commit.
+                self.freezeFrameLayer.removeFromSuperlayer()
+                self.posterLayer?.removeFromSuperlayer()
+                incoming.removeFromSuperlayer()
+                group.add(self.freezeFrameLayer)
+                group.add(incoming)
+                if let poster = self.posterLayer { group.add(poster) }
+                self.presentationGroup.remove()
+                self.presentationGroup = group
+                self.transitionPresentationGroup = nil
+                self.pendingIncomingCrop = nil
+                group.apply(in: self.bounds)
+                self.currentViewportRect = group.layout?.viewport
+                self.currentLayerFrame = group.layout?.videoFrame
+                self.layer?.backgroundColor = group.backgroundColor
+                self.grainOverlayView?.frame = self.currentViewportRect ?? self.bounds
+            }
             self.startReadyForDisplayObservation()
             self.refreshFreezeFrameVisibility()
             CATransaction.commit()
@@ -3206,7 +3433,7 @@ private final class VideoContainerView: NSView {
                     CATransaction.setDisableActions(true)
                     freezeFrameLayer.contents = image
                     freezeFrameLayer.contentsScale = sourceLayer.contentsScale > 0 ? sourceLayer.contentsScale : scale
-                    freezeFrameLayer.contentsGravity = sourceLayer.contentsGravity
+                    freezeFrameLayer.contentsGravity = presentationGroup.request == nil ? .resizeAspectFill : .resize
                     freezeFrameLayer.frame = currentLayerFrame ?? bounds
                     CATransaction.commit()
                     vlog("freeze: contentsDirect OK")
@@ -3262,7 +3489,7 @@ private final class VideoContainerView: NSView {
         CATransaction.setDisableActions(true)
         freezeFrameLayer.contents = image
         freezeFrameLayer.contentsScale = scale
-        freezeFrameLayer.contentsGravity = .resizeAspectFill
+        freezeFrameLayer.contentsGravity = presentationGroup.request == nil ? .resizeAspectFill : .resize
         freezeFrameLayer.frame = currentLayerFrame ?? bounds
         CATransaction.commit()
         vlog("freeze: renderPath OK")
@@ -3322,8 +3549,9 @@ private final class VideoContainerView: NSView {
         poster.contents = cgImage
         poster.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         poster.frame = currentLayerFrame ?? bounds
-        videoContentLayer.addSublayer(poster)
+        presentationGroup.add(poster)
         posterLayer = poster
+        presentationGroup.apply(in: bounds)
 
         // Keep the last valid static image under the live player as a second
         // fallback. Always replace a leftover freeze from an older clip so
@@ -3331,7 +3559,7 @@ private final class VideoContainerView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         freezeFrameLayer.contents = cgImage
-        freezeFrameLayer.contentsGravity = .resizeAspectFill
+        freezeFrameLayer.contentsGravity = presentationGroup.request == nil ? .resizeAspectFill : .resize
         freezeFrameLayer.frame = currentLayerFrame ?? bounds
         freezeFrameLayer.isHidden = true
         CATransaction.commit()
@@ -3373,92 +3601,48 @@ private final class VideoContainerView: NSView {
 
     // MARK: Crop
 
-    /// Applies normalized crop and viewport rectangles to both the live video
-    /// and its fallback layers. The container mask clips the result so
-    /// letterbox pixels remain the configured background color.
+    /// Source rectangles may extend outside the unit image for fit/center/tile.
+    /// Viewports remain strictly inside the unit screen. Invalid input leaves
+    /// the last valid presentation intact and is reported to the IPC caller.
+    @discardableResult
     func applyCrop(
         crop: CGRect?,
         viewport: CGRect?,
         letterboxColorHex: String?,
-        incomingLayerOnly: Bool = false
-    ) {
-        guard let crop, let viewport,
-              bounds.width > 0, bounds.height > 0,
-              crop.width > 0, crop.height > 0,
-              viewport.width > 0, viewport.height > 0 else {
-            if incomingLayerOnly {
-                transitionPlayerLayer?.frame = bounds
-                return
-            }
-            currentViewportRect = nil
-            currentLayerFrame = nil
-            videoContentLayer.mask = nil
-            layer?.backgroundColor = parseColor(letterboxColorHex) ?? CGColor(gray: 0, alpha: 1)
-            playerLayer.videoGravity = .resizeAspectFill
-            playerLayer.frame = bounds
-            freezeFrameLayer.frame = bounds
-            posterLayer?.frame = bounds
-            transitionPlayerLayer?.frame = bounds
-            grainOverlayView?.autoresizingMask = [.width, .height]
-            grainOverlayView?.frame = bounds
-            return
-        }
-
-        let clampedViewport = CGRect(
-            x: max(0, min(1, viewport.origin.x)),
-            y: max(0, min(1, viewport.origin.y)),
-            width: max(0.0001, min(1, viewport.width)),
-            height: max(0.0001, min(1, viewport.height))
-        )
-        let clampedCrop = CGRect(
-            x: max(0, min(1, crop.origin.x)),
-            y: max(0, min(1, crop.origin.y)),
-            width: max(0.0001, min(1 - crop.origin.x, crop.width)),
-            height: max(0.0001, min(1 - crop.origin.y, crop.height))
-        )
-
-        let viewportRect = CGRect(
-            x: clampedViewport.minX * bounds.width,
-            y: (1 - clampedViewport.maxY) * bounds.height,
-            width: clampedViewport.width * bounds.width,
-            height: clampedViewport.height * bounds.height
-        )
-        let videoWidth = viewportRect.width / clampedCrop.width
-        let videoHeight = viewportRect.height / clampedCrop.height
-        let videoFrame = CGRect(
-            x: viewportRect.minX - clampedCrop.minX * videoWidth,
-            y: viewportRect.minY - (1 - clampedCrop.maxY) * videoHeight,
-            width: videoWidth,
-            height: videoHeight
-        )
-
-        if incomingLayerOnly {
-            transitionPlayerLayer?.frame = videoFrame
-            return
-        }
-        currentViewportRect = viewportRect
-        currentLayerFrame = videoFrame
-        playerLayer.videoGravity = .resizeAspectFill
-        playerLayer.frame = videoFrame
-        freezeFrameLayer.frame = videoFrame
-        posterLayer?.frame = videoFrame
-        transitionPlayerLayer?.frame = videoFrame
-        grainOverlayView?.autoresizingMask = []
-        grainOverlayView?.frame = viewportRect
-        layer?.backgroundColor = parseColor(letterboxColorHex) ?? CGColor(gray: 0, alpha: 1)
-
-        let fullViewport = abs(viewportRect.minX) < 0.5
-            && abs(viewportRect.minY) < 0.5
-            && abs(viewportRect.width - bounds.width) < 0.5
-            && abs(viewportRect.height - bounds.height) < 0.5
-        if fullViewport {
-            videoContentLayer.mask = nil
+        incomingLayerOnly: Bool = false,
+        tiled: Bool = false
+    ) -> Bool {
+        let request: RendererCropGeometry.Request?
+        if let crop, let viewport {
+            let candidate = RendererCropGeometry.Request(source: crop, viewport: viewport, tiled: tiled)
+            guard RendererCropGeometry.layout(candidate, in: bounds) != nil else { return false }
+            request = candidate
         } else {
-            let mask = videoContentLayer.mask ?? CALayer()
-            mask.backgroundColor = CGColor(gray: 1, alpha: 1)
-            mask.frame = viewportRect
-            videoContentLayer.mask = mask
+            // A fully absent pair is the legacy automatic aspect-fill mode.
+            // Partial rectangles and tile-without-geometry are malformed.
+            guard crop == nil, viewport == nil, !tiled else { return false }
+            request = nil
         }
+        let color = parseColor(letterboxColorHex) ?? CGColor(gray: 0, alpha: 1)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        if incomingLayerOnly {
+            pendingIncomingCrop = (request: request, color: color)
+            transitionPresentationGroup?.request = request
+            transitionPresentationGroup?.backgroundColor = color
+            transitionPresentationGroup?.apply(in: bounds)
+            return true
+        }
+        presentationGroup.request = request
+        presentationGroup.backgroundColor = color
+        presentationGroup.apply(in: bounds)
+        currentViewportRect = presentationGroup.layout?.viewport
+        currentLayerFrame = presentationGroup.layout?.videoFrame
+        grainOverlayView?.autoresizingMask = request == nil ? [.width, .height] : []
+        grainOverlayView?.frame = currentViewportRect ?? bounds
+        layer?.backgroundColor = color
+        return true
     }
 
     private func parseColor(_ hex: String?) -> CGColor? {

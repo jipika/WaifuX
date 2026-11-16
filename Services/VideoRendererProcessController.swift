@@ -564,7 +564,7 @@ final class VideoRendererProcessController {
         case setVolume(screen: Int?, volume: Double)
         case setMuted(Bool)
         case setRate(screen: Int?, rate: Double)
-        case setCrop(screen: Int, crop: CGRect?, viewport: CGRect?, letterboxColor: String?, revision: UInt64?)
+        case setCrop(screen: Int, crop: CGRect?, viewport: CGRect?, letterboxColor: String?, revision: UInt64?, tiled: Bool)
         case updatePoster(screen: Int, path: String?)
         case showPoster(screen: Int, path: String)
         case hidePoster(screen: Int)
@@ -620,7 +620,7 @@ final class VideoRendererProcessController {
     /// 发送命令但不等待响应（fire-and-forget，用于高频命令）
     func sendCommandFireAndForget(_ cmd: Command) {
         guard isRunning else { return }
-        if case .setCrop(let screen, _, _, _, _) = cmd {
+        if case .setCrop(let screen, _, _, _, _, _) = cmd {
             pendingCropCommands[screen] = cmd
             guard !cropFlushScheduled else { return }
             cropFlushScheduled = true
@@ -965,6 +965,7 @@ final class VideoRendererProcessController {
         var viewportH: Double?
         var letterboxColorHex: String?
         var cropRevision: UInt64?
+        var cropTiled: Bool?
         var posterPath: String?
         var grainIntensity: Double?
         var activeScreenIDs: [String]?
@@ -1012,6 +1013,7 @@ final class VideoRendererProcessController {
             viewportH: nil,
             letterboxColorHex: nil,
             cropRevision: nil,
+            cropTiled: nil,
             posterPath: nil,
             grainIntensity: nil,
             activeScreenIDs: nil,
@@ -1122,7 +1124,7 @@ final class VideoRendererProcessController {
             msg.screenID = screen.flatMap(stableScreenID(for:))
             msg.rate = rate
 
-        case .setCrop(let screen, let crop, let viewport, let letterboxColor, let revision):
+        case .setCrop(let screen, let crop, let viewport, let letterboxColor, let revision, let tiled):
             msg.command = "setCrop"
             msg.screen = screen
             msg.screenID = stableScreenID(for: screen)
@@ -1140,6 +1142,7 @@ final class VideoRendererProcessController {
             }
             msg.letterboxColorHex = letterboxColor
             msg.cropRevision = revision
+            msg.cropTiled = tiled
 
         case .updatePoster(let screen, let path):
             msg.command = "updatePoster"

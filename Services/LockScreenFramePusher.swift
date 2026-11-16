@@ -394,70 +394,30 @@ extension LockScreenFramePusher {
                 dstContext = ctx
             }
 
-            // 缩放绘制 — 按 CropLayout：letterbox 填色 + viewport 内 aspect-fill 裁切框。
-            // shouldApplyCrop=false 时回现状 aspect-fill（与扩展端 VideoRenderer 行为一致）。
+            // Source UV is allowed outside the image: leave background for fit/center,
+            // or repeat a single decoded frame for tile. Never crop it before mapping.
             dstContext.interpolationQuality = .medium
             let settings = DisplayCropSettingsStore.sharedSettings(forDisplayID: displayID)
-            if settings.shouldApplyCrop {
-                let layout = CropLayoutEngine.compute(
-                    wallpaperSize: CGSize(width: srcWidth, height: srcHeight),
-                    screenSize: CGSize(width: dstWidth, height: dstHeight),
-                    settings: settings)
+            let layout = CropLayoutEngine.compute(
+                wallpaperSize: CGSize(width: srcWidth, height: srcHeight),
+                screenSize: CGSize(width: dstWidth, height: dstHeight), settings: settings)
+            let viewport = CGRect(x: layout.viewportRect.x * Double(dstWidth),
+                                  y: (1 - layout.viewportRect.y - layout.viewportRect.h) * Double(dstHeight),
+                                  width: layout.viewportRect.w * Double(dstWidth),
+                                  height: layout.viewportRect.h * Double(dstHeight))
+            let crop = layout.wallpaperCropRect
+            let width = viewport.width / max(0.0001, crop.w)
+            let height = viewport.height / max(0.0001, crop.h)
+            let mediaFrame = CGRect(x: viewport.minX - crop.x * width,
+                                    y: viewport.minY - (1 - crop.y - crop.h) * height,
+                                    width: width, height: height)
+            dstContext.saveGState()
+            dstContext.setFillColor(layout.letterboxColor)
+            dstContext.fill(CGRect(x: 0, y: 0, width: dstWidth, height: dstHeight))
+            dstContext.clip(to: viewport)
+            dstContext.draw(srcImage, in: mediaFrame, byTiling: layout.isTiled)
+            dstContext.restoreGState()
 
-                // 1. 整个目标填 letterbox 色
-                dstContext.setFillColor(layout.letterboxColor)
-                dstContext.fill(CGRect(x: 0, y: 0, width: dstWidth, height: dstHeight))
-
-                // 2. viewport 像素矩形（CGContext 默认 y 向下，与 CropLayout 一致）
-                let vpX = layout.viewportRect.x * Double(dstWidth)
-                let vpY = layout.viewportRect.y * Double(dstHeight)
-                let vpW = layout.viewportRect.w * Double(dstWidth)
-                let vpH = layout.viewportRect.h * Double(dstHeight)
-
-                // 3. 源裁切框像素
-                let cropX = Int(layout.wallpaperCropRect.x * Double(srcWidth))
-                let cropY = Int(layout.wallpaperCropRect.y * Double(srcHeight))
-                let cropW = max(1, Int(layout.wallpaperCropRect.w * Double(srcWidth)))
-                let cropH = max(1, Int(layout.wallpaperCropRect.h * Double(srcHeight)))
-
-                // 4. 在 viewport 内 aspect-fill 绘制裁切后的源
-                let srcAspect = Double(cropW) / Double(cropH)
-                let vpAspect = vpW / max(1, vpH)
-                let drawW: Double, drawH: Double, drawX: Double, drawY: Double
-                if srcAspect > vpAspect {
-                    drawH = vpH
-                    drawW = vpH * srcAspect
-                    drawX = vpX + (vpW - drawW) / 2
-                    drawY = vpY
-                } else {
-                    drawW = vpW
-                    drawH = vpW / srcAspect
-                    drawX = vpX
-                    drawY = vpY + (vpH - drawH) / 2
-                }
-                if let cropped = srcImage.cropping(to: CGRect(x: cropX, y: cropY, width: cropW, height: cropH)) {
-                    dstContext.draw(cropped, in: CGRect(x: drawX, y: drawY, width: drawW, height: drawH))
-                } else {
-                    dstContext.draw(srcImage, in: CGRect(x: drawX, y: drawY, width: drawW, height: drawH))
-                }
-            } else {
-                // 现状 aspect-fill：保持宽高比，填满目标，裁剪溢出
-                let srcAspect = Double(srcWidth) / Double(srcHeight)
-                let dstAspect = Double(dstWidth) / Double(dstHeight)
-                let drawRect: CGRect
-                if srcAspect > dstAspect {
-                    // 源更宽 → 按高度填满，宽度裁剪左右
-                    let drawWidth = Int(Double(dstHeight) * srcAspect)
-                    let drawX = (dstWidth - drawWidth) / 2
-                    drawRect = CGRect(x: drawX, y: 0, width: drawWidth, height: dstHeight)
-                } else {
-                    // 源更高或相等 → 按宽度填满，高度裁剪上下
-                    let drawHeight = Int(Double(dstWidth) / srcAspect)
-                    let drawY = (dstHeight - drawHeight) / 2
-                    drawRect = CGRect(x: 0, y: drawY, width: dstWidth, height: drawHeight)
-                }
-                dstContext.draw(srcImage, in: drawRect)
-            }
         }
     }
 }

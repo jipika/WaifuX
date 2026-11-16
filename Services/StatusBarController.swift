@@ -819,6 +819,7 @@ final class StatusBarController: NSObject {
 
             let screenMenuItem = NSMenuItem(title: screenName, action: nil, keyEquivalent: "")
             let screenSubMenu = NSMenu(title: screenName)
+            screenSubMenu.autoenablesItems = false
             screenMenuItem.submenu = screenSubMenu
             let schedulerConfig = isGlobalDisplaySyncEnabled
                 ? WallpaperSchedulerService.shared.globalDisplayConfig
@@ -937,6 +938,35 @@ final class StatusBarController: NSObject {
 
             screenSubMenu.addItem(.separator())
 
+            let currentSettings = DisplayCropSettingsStore.shared.settings(for: screen)
+            let displayItem = NSMenuItem(title: t("statusbar.wallpaperDisplayMode"), action: nil, keyEquivalent: "")
+            let displayMenu = NSMenu(title: displayItem.title)
+            for mode in WallpaperDisplayMode.allCases {
+                let item = NSMenuItem(title: t("statusbar.displayMode.\(mode.rawValue)"),
+                                      action: #selector(setWallpaperDisplayMode(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = WallpaperDisplayModePayload(screen: screen, mode: mode)
+                item.state = currentSettings.displayMode == mode ? .on : .off
+                displayMenu.addItem(item)
+            }
+            displayItem.submenu = displayMenu
+            screenSubMenu.addItem(displayItem)
+
+            let zoom = currentSettings.zoom.isFinite ? max(0.25, min(4, currentSettings.zoom)) : 1
+            let zoomItem = NSMenuItem(title: "\(t("statusbar.wallpaperZoom"))（\(Int((zoom * 100).rounded()))%）",
+                                      action: nil, keyEquivalent: "")
+            let zoomMenu = NSMenu(title: t("statusbar.wallpaperZoom"))
+            for percent in [25, 50, 75, 100, 125, 150, 200, 300, 400] {
+                let item = NSMenuItem(title: "\(percent)%", action: #selector(setWallpaperZoom(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = WallpaperZoomPayload(screen: screen, zoom: Double(percent) / 100)
+                item.state = abs(zoom * 100 - Double(percent)) < 0.5 ? .on : .off
+                zoomMenu.addItem(item)
+            }
+            zoomItem.submenu = zoomMenu
+            zoomItem.isEnabled = currentSettings.displayMode.supportsAdjustment
+            screenSubMenu.addItem(zoomItem)
+
             // 可视区域调节…
             let isAdjusting = CropAdjustOverlayController.shared.isActive(for: screen)
             let cropAdjustItem = NSMenuItem(
@@ -945,12 +975,12 @@ final class StatusBarController: NSObject {
                 keyEquivalent: "")
             cropAdjustItem.target = self
             cropAdjustItem.representedObject = screen
+            cropAdjustItem.isEnabled = currentSettings.displayMode.supportsAdjustment
             screenSubMenu.addItem(cropAdjustItem)
 
             // 比例子菜单
             let aspectItem = NSMenuItem(title: t("statusbar.cropAspect"), action: nil, keyEquivalent: "")
             let aspectMenu = NSMenu(title: t("statusbar.cropAspect"))
-            let currentSettings = DisplayCropSettingsStore.shared.settings(for: screen)
             for preset in AspectPreset.allCases {
                 let title = preset == .autoFill ? t("statusbar.cropAspectAutoFill")
                     : preset == .custom ? t("statusbar.cropAspectCustom")
@@ -1034,6 +1064,38 @@ final class StatusBarController: NSObject {
     private struct CropAspectPayload {
         let screen: NSScreen
         let preset: AspectPreset
+    }
+
+    private struct WallpaperDisplayModePayload {
+        let screen: NSScreen
+        let mode: WallpaperDisplayMode
+    }
+
+    private struct WallpaperZoomPayload {
+        let screen: NSScreen
+        let zoom: Double
+    }
+
+    @objc private func setWallpaperDisplayMode(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? WallpaperDisplayModePayload else { return }
+        CropAdjustOverlayController.shared.dismissIfActive()
+        DisplayCropSettingsStore.shared.update(for: payload.screen) { settings in
+            settings.displayMode = payload.mode
+            settings.isEnabled = true
+            settings.pan = CGPoint(x: 0.5, y: 0.5)
+            settings.zoom = 1
+        }
+        refreshMenuState()
+    }
+
+    @objc private func setWallpaperZoom(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? WallpaperZoomPayload else { return }
+        DisplayCropSettingsStore.shared.update(for: payload.screen) { settings in
+            guard settings.displayMode.supportsAdjustment else { return }
+            settings.isEnabled = true
+            settings.zoom = max(0.25, min(4, payload.zoom))
+        }
+        refreshMenuState()
     }
 
     @objc private func toggleCropAdjustment(_ sender: NSMenuItem) {

@@ -85,8 +85,9 @@ private func buildSnapshot(_ request: SnapshotRequest) async -> SnapshotResult {
     guard !Task.isCancelled, request.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }) else { return empty }
     for revision in request.sources.images {
         guard !Task.isCancelled else { return empty }
-        if let image = loadBudgetedSnapshotImage(revision.url),
-           let snapshot = renderSnapshotToIOSurface(image: image, request: request) { return SnapshotResult(snapshot, request: request) }
+        if let decoded = loadBudgetedSnapshotDecodedImage(revision.url),
+           let snapshot = renderSnapshotToIOSurface(image: decoded.image, request: request,
+                                                    sourceSize: decoded.sourceSize) { return SnapshotResult(snapshot, request: request) }
     }
     guard !Task.isCancelled else { return empty }
     // A raw live surface bypasses target/crop geometry and can represent older
@@ -128,8 +129,12 @@ private func buildSnapshot(_ request: SnapshotRequest) async -> SnapshotResult {
 }
 
 func loadBudgetedSnapshotImage(_ url: URL) -> CGImage? {
+    loadBudgetedSnapshotDecodedImage(url)?.image
+}
+
+private func loadBudgetedSnapshotDecodedImage(_ url: URL) -> WallpaperDecodedImage? {
     guard case .success(let decoded) = WallpaperBoundedImageDecoder.decode(url: url) else { return nil }
-    return decoded.image
+    return decoded
 }
 
 private func currentPrefsPaths(in container: URL, displayID: UInt32?) -> (image: String?, video: String?) {
@@ -155,7 +160,8 @@ private func currentPrefsPaths(in container: URL, displayID: UInt32?) -> (image:
 }
 
 private func renderSnapshotToIOSurface(
-    image: CGImage, request: SnapshotRequest, targetSize: CGSize? = nil, alreadyCropped: Bool = false
+    image: CGImage, request: SnapshotRequest, targetSize: CGSize? = nil, alreadyCropped: Bool = false,
+    sourceSize: CGSize? = nil
 ) -> AnyObject? {
     let canvasSize = targetSize ?? request.targetGeometry?.size ?? CGSize(width: image.width, height: image.height)
     guard !Task.isCancelled, request.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }),
@@ -197,7 +203,8 @@ private func renderSnapshotToIOSurface(
     }
     let drewImage = WallpaperSnapshotCropDrawing.draw(
         image: image, in: ctx, targetSize: canvasSize,
-        settings: request.cropPreferences.settings(forDisplayID: request.targetDisplayID), alreadyCropped: alreadyCropped)
+        settings: request.cropPreferences.settings(forDisplayID: request.targetDisplayID), alreadyCropped: alreadyCropped,
+        sourceSize: sourceSize)
     surface.unlock(options: [], seed: nil)
 
     guard drewImage, !Task.isCancelled, request.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }),

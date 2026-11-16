@@ -31,7 +31,12 @@ enum ExtAspectPreset: String, Codable, CaseIterable {
     }
 }
 
+enum ExtDisplayMode: String, Codable, CaseIterable {
+    case fill, fit
+}
+
 struct ExtCropSettings: Codable {
+    var displayMode: ExtDisplayMode = .fill
     var aspectPreset: ExtAspectPreset = .autoFill
     var customAspect: Double? = nil
     /// 与 App 端 DisplayCropSettings.pan 同名同型（CGPoint → JSON [x,y]），保证跨进程解码一致。
@@ -40,6 +45,35 @@ struct ExtCropSettings: Codable {
     var zoom: Double = 1.0
     var letterboxColorHex: String = "000000"
     var isEnabled: Bool = true
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case displayMode, aspectPreset, customAspect, pan, zoom, letterboxColorHex, isEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let rawMode = try? values.decode(String.self, forKey: .displayMode)
+        displayMode = rawMode.flatMap(ExtDisplayMode.init(rawValue:)) ?? .fill
+        aspectPreset = try values.decodeIfPresent(ExtAspectPreset.self, forKey: .aspectPreset) ?? .autoFill
+        customAspect = try values.decodeIfPresent(Double.self, forKey: .customAspect)
+        pan = try values.decodeIfPresent(CGPoint.self, forKey: .pan) ?? CGPoint(x: 0.5, y: 0.5)
+        zoom = try values.decodeIfPresent(Double.self, forKey: .zoom) ?? 1
+        letterboxColorHex = try values.decodeIfPresent(String.self, forKey: .letterboxColorHex) ?? "000000"
+        isEnabled = try values.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(displayMode.rawValue, forKey: .displayMode)
+        try values.encode(aspectPreset, forKey: .aspectPreset)
+        try values.encodeIfPresent(customAspect, forKey: .customAspect)
+        try values.encode(pan, forKey: .pan)
+        try values.encode(zoom, forKey: .zoom)
+        try values.encode(letterboxColorHex, forKey: .letterboxColorHex)
+        try values.encode(isEnabled, forKey: .isEnabled)
+    }
 
     var effectiveAspect: Double? {
         switch aspectPreset {
@@ -61,27 +95,37 @@ struct ExtCropLayout {
     var wallpaperCropRect: ExtUnitRect
     var viewportRect: ExtUnitRect
     var letterboxColor: CGColor
+    var isTiled: Bool = false
 }
 
 /// CALayer 坐标系中的裁切结果。
-/// `videoFrame` 可以超出 viewportRect，由独立 viewport layer 裁掉溢出部分；
-/// 因此视频层始终按原始比例渲染，不依赖 contentsRect 做非等比拉伸。
+/// `videoFrame` 可以超出 viewportRect，由独立 viewport layer 裁掉溢出部分。
+/// 非 stretch 模式的 frame 保持原始比例；stretch 把全图映射到 viewport。
 struct ExtLayerCropGeometry {
     var viewportRect: CGRect
     var videoFrame: CGRect
 }
 
 enum ExtCropEngine {
+    static func isValidSourceSize(_ size: CGSize) -> Bool {
+        size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
+            && size.width <= 1_000_000 && size.height <= 1_000_000
+    }
+
     static func compute(
         wallpaperSize: CGSize,
         screenSize: CGSize,
         settings: ExtCropSettings
     ) -> ExtCropLayout {
+        let settings = settings.isEnabled ? settings : .default
         let letterboxColor = parseColorHex(settings.letterboxColorHex)
-        guard settings.shouldApplyCrop else {
+        guard wallpaperSize.width.isFinite, wallpaperSize.height.isFinite,
+              screenSize.width.isFinite, screenSize.height.isFinite,
+              wallpaperSize.width > 0, wallpaperSize.height > 0,
+              screenSize.width > 0, screenSize.height > 0 else {
             return ExtCropLayout(wallpaperCropRect: .full, viewportRect: .full, letterboxColor: letterboxColor)
         }
-        let screenAspect = screenSize.height > 0 ? screenSize.width / screenSize.height : 1.0
+        let screenAspect = screenSize.width / screenSize.height
         let targetAspect = settings.effectiveAspect ?? screenAspect
         let viewport: ExtUnitRect
         if targetAspect > screenAspect {
@@ -91,32 +135,33 @@ enum ExtCropEngine {
             let w = targetAspect / screenAspect
             viewport = ExtUnitRect(x: (1 - w) / 2, y: 0, w: w, h: 1)
         }
-        // Use pixel geometry here, not the normalized viewport ratio.
-        // For an auto-fill viewport, viewport.w / viewport.h is always 1 even
-        // when the display is 16:10. Treating it as the target aspect stretches
-        // a 16:9 frame across the lock screen instead of cropping it.
+        // screenSize is physical pixels.
         let vpW = viewport.w * screenSize.width
         let vpH = viewport.h * screenSize.height
         let wpW = wallpaperSize.width
         let wpH = wallpaperSize.height
-        let coverScale = max(
-            wpW > 0 ? vpW / wpW : 1.0,
-            wpH > 0 ? vpH / wpH : 1.0
-        )
-        let zoom = max(1.0, min(4.0, settings.zoom))
-        let scale = coverScale * zoom
+        let zoom = settings.zoom.isFinite ? max(0.25, min(4.0, settings.zoom)) : 1.0
+        let baseScale: Double
+        switch settings.displayMode {
+        case .fill: baseScale = max(vpW / wpW, vpH / wpH)
+        case .fit: baseScale = min(vpW / wpW, vpH / wpH)
+        }
+        let scale = baseScale * zoom
         let displayWidth = wpW * scale
         let displayHeight = wpH * scale
-        let winW = displayWidth > 0 ? vpW / displayWidth : 1.0
-        let winH = displayHeight > 0 ? vpH / displayHeight : 1.0
-        let panX = max(0, min(1, settings.pan.x))
-        let panY = max(0, min(1, settings.pan.y))
-        let originX = max(0, min(1 - winW, panX - winW / 2))
-        let originY = max(0, min(1 - winH, panY - winH / 2))
+        let winW = vpW / displayWidth
+        let winH = vpH / displayHeight
+        let panX = settings.pan.x.isFinite ? max(0, min(1, settings.pan.x)) : 0.5
+        let panY = settings.pan.y.isFinite ? max(0, min(1, settings.pan.y)) : 0.5
+        func origin(window: Double, pan: Double) -> Double {
+            if window <= 1 { return max(0, min(1 - window, pan - window / 2)) }
+            return (1 - window) * pan
+        }
         return ExtCropLayout(
-            wallpaperCropRect: ExtUnitRect(x: originX, y: originY, w: winW, h: winH),
+            wallpaperCropRect: ExtUnitRect(x: origin(window: winW, pan: panX), y: origin(window: winH, pan: panY), w: winW, h: winH),
             viewportRect: viewport,
-            letterboxColor: letterboxColor)
+            letterboxColor: letterboxColor,
+            isTiled: false)
     }
 
     static func parseColorHex(_ hex: String) -> CGColor {
@@ -144,8 +189,8 @@ enum ExtCropGeometry {
             height: viewport.h * bounds.height
         )
 
-        let cropWidth = max(crop.w, 0.0001)
-        let cropHeight = max(crop.h, 0.0001)
+        let cropWidth = crop.w.isFinite && crop.w > 0 ? crop.w : 1
+        let cropHeight = crop.h.isFinite && crop.h > 0 ? crop.h : 1
         let videoWidth = viewportRect.width / cropWidth
         let videoHeight = viewportRect.height / cropHeight
         let videoFrame = CGRect(
@@ -161,56 +206,153 @@ enum ExtCropGeometry {
     }
 }
 
-/// 图片、视频及暂停帧共用同一套 layer 布局；不通过 contentsRect/contentsCenter 拉伸内容。
+/// A bounded repeat plan shared by CALayer and CPU snapshots. Its origin is
+/// the first tile intersecting the viewport, so no offscreen copies are needed.
+struct ExtTilePlan {
+    static let maximumCopies = 65_536
+    let frame: CGRect
+    let columns: Int
+    let rows: Int
+
+    static func make(contentFrame: CGRect, viewportSize: CGSize) -> ExtTilePlan? {
+        guard contentFrame.width.isFinite, contentFrame.height.isFinite,
+              contentFrame.minX.isFinite, contentFrame.minY.isFinite,
+              viewportSize.width.isFinite, viewportSize.height.isFinite,
+              contentFrame.width > 0, contentFrame.height > 0,
+              viewportSize.width > 0, viewportSize.height > 0 else { return nil }
+        let x = contentFrame.minX - ceil(contentFrame.minX / contentFrame.width) * contentFrame.width
+        let y = contentFrame.minY - ceil(contentFrame.minY / contentFrame.height) * contentFrame.height
+        let columns = ceil((viewportSize.width - x) / contentFrame.width)
+        let rows = ceil((viewportSize.height - y) / contentFrame.height)
+        guard columns.isFinite, rows.isFinite, columns >= 1, rows >= 1,
+              columns <= CGFloat(maximumCopies), rows <= CGFloat(maximumCopies),
+              columns * rows <= CGFloat(maximumCopies) else { return nil }
+        return ExtTilePlan(frame: CGRect(origin: CGPoint(x: x, y: y), size: contentFrame.size),
+                           columns: Int(columns), rows: Int(rows))
+    }
+}
+
+/// 图片、视频及暂停帧共用同一套 frame 布局；contentsRect/contentsCenter 始终为全图。
 /// 只操作调用方传入的 layer，不创建窗口、播放器或 IOSurface。调用方须在主线程使用。
 enum ExtCropLayers {
     private static let staticViewportName = "waifux.static.viewport"
+    private static let staticContentName = "waifux.static.content"
+    private static let tileWrapperName = "waifux.crop.tiles"
+    private static let tileColumnsName = "waifux.crop.tile-columns"
+    private static let tileMediaName = "waifux.crop.tile-media"
+
+    private final class StaticContentLayer: CALayer {
+        var sourceSize: CGSize = .zero
+    }
 
     @discardableResult
     static func apply(
         rootLayer: CALayer, viewportLayer: CALayer, contentLayers: [CALayer],
         sourceSize: CGSize, settings: ExtCropSettings
     ) -> Bool {
-        guard ExtDisplayGeometry.isValid(size: sourceSize),
+        guard ExtCropEngine.isValidSourceSize(sourceSize),
               ExtDisplayGeometry.isValid(size: rootLayer.bounds.size) else { return false }
         // 关闭自定义裁剪仍要保持图片比例，使用默认 auto-fill 几何。
         let effectiveSettings = settings.shouldApplyCrop ? settings : .default
+        let contentsScale = rootLayer.contentsScale.isFinite && rootLayer.contentsScale > 0 ? rootLayer.contentsScale : 1
+        let screenSize = CGSize(width: rootLayer.bounds.width * contentsScale, height: rootLayer.bounds.height * contentsScale)
+        guard ExtDisplayGeometry.isValid(size: screenSize) else { return false }
         let layout = ExtCropEngine.compute(
-            wallpaperSize: sourceSize, screenSize: rootLayer.bounds.size, settings: effectiveSettings)
+            wallpaperSize: sourceSize, screenSize: screenSize, settings: effectiveSettings)
         let geometry = ExtCropGeometry.layerGeometry(
             layout: layout, in: CGRect(origin: .zero, size: rootLayer.bounds.size))
+        guard isValidGeometry(geometry) else {
+            NSLog("[WaifuX crop] layout rejected: non-finite or non-positive geometry")
+            return false
+        }
         let viewportFrame = geometry.viewportRect.offsetBy(dx: rootLayer.bounds.minX, dy: rootLayer.bounds.minY)
         let contentFrame = geometry.videoFrame.offsetBy(
             dx: -geometry.viewportRect.minX, dy: -geometry.viewportRect.minY)
+        let tilePlan = layout.isTiled ? ExtTilePlan.make(contentFrame: contentFrame, viewportSize: geometry.viewportRect.size) : nil
+        if layout.isTiled && tilePlan == nil {
+            NSLog("[WaifuX crop] tile layout rejected: exceeds %d copies or invalid geometry", ExtTilePlan.maximumCopies)
+            return false
+        }
         let fullRect = CGRect(x: 0, y: 0, width: 1, height: 1)
-        let changed = viewportLayer.frame != viewportFrame
+        var changed = viewportLayer.frame != viewportFrame
             || rootLayer.backgroundColor != layout.letterboxColor
-            || contentLayers.contains { $0.frame != contentFrame || $0.contentsScale != rootLayer.contentsScale }
+            || contentLayers.contains { $0.contentsScale != contentsScale || $0.contentsGravity != .resize }
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         rootLayer.masksToBounds = true
-        rootLayer.contentsGravity = .resizeAspectFill
+        rootLayer.contentsGravity = .resize
         rootLayer.contentsRect = fullRect
         rootLayer.contentsCenter = fullRect
         rootLayer.backgroundColor = layout.letterboxColor
         viewportLayer.frame = viewportFrame
         viewportLayer.bounds = CGRect(origin: .zero, size: geometry.viewportRect.size)
-        viewportLayer.contentsScale = rootLayer.contentsScale
+        viewportLayer.contentsScale = contentsScale
         viewportLayer.masksToBounds = true
+        let mediaParent: CALayer
+        let mediaFrame: CGRect
+        if let tilePlan {
+            let rows = (viewportLayer.sublayers?.first { $0.name == tileWrapperName } as? CAReplicatorLayer) ?? CAReplicatorLayer()
+            let columns = (rows.sublayers?.first { $0.name == tileColumnsName } as? CAReplicatorLayer) ?? CAReplicatorLayer()
+            let media = columns.sublayers?.first { $0.name == tileMediaName } ?? CALayer()
+            changed = changed || rows.superlayer == nil || rows.instanceCount != tilePlan.rows
+                || columns.instanceCount != tilePlan.columns || media.frame != tilePlan.frame
+            rows.name = tileWrapperName
+            columns.name = tileColumnsName
+            media.name = tileMediaName
+            if rows.superlayer !== viewportLayer { viewportLayer.addSublayer(rows) }
+            if columns.superlayer !== rows { rows.addSublayer(columns) }
+            if media.superlayer !== columns { columns.addSublayer(media) }
+            rows.frame = viewportLayer.bounds
+            columns.frame = viewportLayer.bounds
+            rows.instanceCount = tilePlan.rows
+            columns.instanceCount = tilePlan.columns
+            rows.instanceTransform = CATransform3DMakeTranslation(0, contentFrame.height, 0)
+            columns.instanceTransform = CATransform3DMakeTranslation(contentFrame.width, 0, 0)
+            rows.instanceDelay = 0
+            columns.instanceDelay = 0
+            rows.contentsScale = contentsScale
+            columns.contentsScale = contentsScale
+            media.contentsScale = contentsScale
+            media.frame = tilePlan.frame
+            media.masksToBounds = true
+            mediaParent = media
+            mediaFrame = CGRect(origin: .zero, size: contentFrame.size)
+        } else {
+            mediaParent = viewportLayer
+            mediaFrame = contentFrame
+        }
         for layer in contentLayers {
-            layer.frame = contentFrame
-            layer.contentsGravity = .resizeAspectFill
+            changed = changed || layer.superlayer !== mediaParent || layer.frame != mediaFrame
+            if layer.superlayer !== mediaParent { mediaParent.addSublayer(layer) }
+            layer.frame = mediaFrame
+            // The geometry already supplies proportional frames for every mode
+            // except stretch; resize also permits stretch to map the full image.
+            layer.contentsGravity = .resize
             layer.contentsRect = fullRect
             layer.contentsCenter = fullRect
-            layer.contentsScale = rootLayer.contentsScale
+            layer.contentsScale = contentsScale
+        }
+        if !layout.isTiled {
+            let wrappers = viewportLayer.sublayers?.filter { $0.name == tileWrapperName } ?? []
+            changed = changed || !wrappers.isEmpty
+            wrappers.forEach { $0.removeFromSuperlayer() }
         }
         CATransaction.commit()
         return changed
     }
 
+    private static func isValidGeometry(_ geometry: ExtLayerCropGeometry) -> Bool {
+        [geometry.viewportRect.minX, geometry.viewportRect.minY,
+         geometry.viewportRect.width, geometry.viewportRect.height,
+         geometry.videoFrame.minX, geometry.videoFrame.minY,
+         geometry.videoFrame.width, geometry.videoFrame.height].allSatisfy(\.isFinite)
+            && geometry.viewportRect.width > 0 && geometry.viewportRect.height > 0
+            && geometry.videoFrame.width > 0 && geometry.videoFrame.height > 0
+    }
+
     static func staticImage(in rootLayer: CALayer) -> CGImage? {
-        guard let content = staticViewport(in: rootLayer)?.sublayers?.first else { return nil }
+        guard let viewport = staticViewport(in: rootLayer), let content = staticContent(in: viewport) else { return nil }
         return imageContents(in: content)
     }
 
@@ -223,22 +365,49 @@ enum ExtCropLayers {
     }
 
     @discardableResult
-    static func setStaticImage(_ image: CGImage, in rootLayer: CALayer, settings: ExtCropSettings) -> Bool {
+    static func setStaticImage(
+        _ image: CGImage, in rootLayer: CALayer, settings: ExtCropSettings, sourceSize: CGSize? = nil
+    ) -> Bool {
         let viewport = staticViewport(in: rootLayer) ?? CALayer()
-        let content = viewport.sublayers?.first ?? CALayer()
+        let content = (staticContent(in: viewport) as? StaticContentLayer) ?? StaticContentLayer()
+        let retainedSize = imageContents(in: content) === image ? content.sourceSize : .zero
+        let sourceSize = sourceSize ?? (ExtCropEngine.isValidSourceSize(retainedSize) ? retainedSize : CGSize(width: image.width, height: image.height))
+        // Validate the complete geometry before replacing either image or hierarchy.
+        let scale = rootLayer.contentsScale.isFinite && rootLayer.contentsScale > 0 ? rootLayer.contentsScale : 1
+        let effectiveSettings = settings.shouldApplyCrop ? settings : .default
+        let layout = ExtCropEngine.compute(
+            wallpaperSize: sourceSize,
+            screenSize: CGSize(width: rootLayer.bounds.width * scale, height: rootLayer.bounds.height * scale),
+            settings: effectiveSettings
+        )
+        let geometry = ExtCropGeometry.layerGeometry(layout: layout, in: CGRect(origin: .zero, size: rootLayer.bounds.size))
+        guard isValidGeometry(geometry) else {
+            NSLog("[WaifuX crop] static layout rejected: non-finite or non-positive geometry")
+            return false
+        }
+        if layout.isTiled {
+            let frame = geometry.videoFrame.offsetBy(dx: -geometry.viewportRect.minX, dy: -geometry.viewportRect.minY)
+            guard ExtTilePlan.make(contentFrame: frame, viewportSize: geometry.viewportRect.size) != nil else {
+                NSLog("[WaifuX crop] static tile layout rejected: exceeds %d copies or invalid geometry", ExtTilePlan.maximumCopies)
+                return false
+            }
+        }
         let isNew = viewport.superlayer == nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         viewport.name = staticViewportName
+        content.name = staticContentName
         if content.superlayer == nil { viewport.addSublayer(content) }
         if isNew { rootLayer.addSublayer(viewport) }
+        let imageChanged = imageContents(in: content) !== image
+        content.sourceSize = sourceSize
         content.contents = image
         rootLayer.contents = nil
         let changed = apply(
             rootLayer: rootLayer, viewportLayer: viewport, contentLayers: [content],
-            sourceSize: CGSize(width: image.width, height: image.height), settings: settings)
+            sourceSize: sourceSize, settings: settings)
         CATransaction.commit()
-        return isNew || changed
+        return isNew || imageChanged || changed
     }
 
     static func removeStaticImage(from rootLayer: CALayer) {
@@ -247,6 +416,14 @@ enum ExtCropLayers {
 
     private static func staticViewport(in rootLayer: CALayer) -> CALayer? {
         rootLayer.sublayers?.first { $0.name == staticViewportName }
+    }
+
+    private static func staticContent(in layer: CALayer) -> CALayer? {
+        if layer.name == staticContentName { return layer }
+        for child in layer.sublayers ?? [] {
+            if let content = staticContent(in: child) { return content }
+        }
+        return nil
     }
 }
 
