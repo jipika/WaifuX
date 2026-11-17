@@ -215,9 +215,17 @@ def main() -> int:
 
     if universal_dmg.is_file():
         sig_uni, size_uni = sign_if_possible(universal_dmg)
+        # 描述必须与架构 channel item 用同一份 changelog：老 universal 客户端
+        # （未声明 allowedChannels）只能看见 default item，写死一句话会让
+        # 它们的更新弹窗永远没有更新日志。universal 说明作为副标题保留。
+        universal_desc = (
+            f"<p>WaifuX {version}（universal 版本，同时适用于 Apple Silicon 与 Intel）</p>"
+            if desc == f"<p>WaifuX {version}</p>"
+            else desc + f"<p><small>universal 版本，同时适用于 Apple Silicon 与 Intel。</small></p>"
+        )
         default_item = build_item(
             version=version, pub_date=pub_date,
-            desc=f"<p>WaifuX {version}（universal 版本，同时适用于 Apple Silicon 与 Intel）</p>",
+            desc=universal_desc,
             dmg_name="WaifuX.dmg", size=size_uni, sig=sig_uni,
         )
         # 固化为 release 资产，供「某次未构建 universal」时降级读取
