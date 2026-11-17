@@ -55,8 +55,6 @@ struct MenuBarQuickSwitcherView: View {
     // MARK: - 播放控制条状态
     @State private var isVolumeExpanded = false
     @State private var isRateExpanded = false
-    @State private var volumeValue: Double = 1.0
-    @State private var rateValue: Double = 1.0
 
     private var videoTaskID: String {
         "\(viewModel.isPreviewActive)|\(viewModel.activationGeneration)|\(viewModel.selectedItem?.id ?? "")|\(viewModel.selectedItem?.videoPreviewURL?.absoluteString ?? "")"
@@ -553,7 +551,7 @@ struct MenuBarQuickSwitcherView: View {
     private func sliderWellContent(_ kind: ExpanderKind) -> some View {
         VStack(spacing: 3) {
             if kind == .rate {
-                Text(Self.rateLabel(rateValue))
+                Text(Self.rateLabel(viewModel.playbackRate ?? 1.0))
                     .font(.system(size: 9, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Color.primary.opacity(0.6))
                     .frame(height: 11)
@@ -563,11 +561,8 @@ struct MenuBarQuickSwitcherView: View {
                 if kind == .rate {
                     GlassVerticalSlider(
                         value: Binding(
-                            get: { rateValue },
-                            set: { newValue in
-                                rateValue = newValue
-                                viewModel.setPlaybackRate(newValue)
-                            }
+                            get: { viewModel.playbackRate ?? 1.0 },
+                            set: { viewModel.setPlaybackRate($0) }
                         ),
                         range: VideoWallpaperManager.minPlaybackRate...VideoWallpaperManager.maxPlaybackRate,
                         tickValue: 1.0
@@ -575,11 +570,8 @@ struct MenuBarQuickSwitcherView: View {
                 } else {
                     GlassVerticalSlider(
                         value: Binding(
-                            get: { volumeValue },
-                            set: { newValue in
-                                volumeValue = newValue
-                                viewModel.setPlaybackVolume(newValue)
-                            }
+                            get: { viewModel.playbackVolume },
+                            set: { viewModel.setPlaybackVolume($0) }
                         )
                     )
                 }
@@ -619,7 +611,7 @@ struct MenuBarQuickSwitcherView: View {
     private func rowIcon(_ kind: ExpanderKind) -> String {
         switch kind {
         case .volume:
-            return volumeValue <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill"
+            return viewModel.playbackVolume <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill"
         case .rate:
             return "speedometer"
         }
@@ -696,15 +688,9 @@ struct MenuBarQuickSwitcherView: View {
         }
     }
 
-    /// 从服务读回当前每屏状态（暂停态切换 / 音量被别处改过时保持 UI 一致）。
-    /// 先让 ViewModel 立即重算并发布快照，再回读——只改本地 @State 不发布时，
-    /// 暂停图标会停在按下前的样子。
+    /// 立即重算并发布每屏状态；图标、音量和速率都直接读取同一份快照。
     private func refreshPlaybackControls() {
         viewModel.refreshPlaybackSnapshot()
-        volumeValue = viewModel.playbackVolume
-        if let rate = viewModel.playbackRate {
-            rateValue = rate
-        }
     }
 
     private static func rateLabel(_ rate: Double) -> String {

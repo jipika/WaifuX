@@ -12,6 +12,9 @@ enum KonachanRequestConfiguration {
     /// API、详情页与登录统一使用支持 Safe / Questionable / Explicit 的 .com。
     static let siteURL = URL(string: "https://konachan.com")!
     static let loginURL = siteURL.appendingPathComponent("user/login")
+    /// 人机验证入口：直接打开与失败请求同一条 API 路径，
+    /// 这样按路径下发的 WAF 规则才会在弹窗里被触发。
+    static let verificationURL = URL(string: "https://konachan.com/post.json?limit=1&page=1")!
     // 保留旧 .net 会话和图片的兼容支持。
     static let safeSiteURL = URL(string: "https://konachan.net")!
     static let cookieDomains = ["konachan.net", "konachan.com"]
@@ -121,6 +124,53 @@ final class KonachanAuthService: ObservableObject {
             matchingDomains: KonachanRequestConfiguration.cookieDomains
         )
         await checkLoginState()
+    }
+
+    /// 弹窗轮询用：WebView 里出现新的 `cf_clearance` 时立刻写入共享 Cookie 存储。
+    /// - Returns: 是否已拿到可用的人机验证 Cookie。
+    func adoptClearanceCookieFromWebStore() async -> Bool {
+        let verificationHost = KonachanRequestConfiguration.siteURL.host?.lowercased() ?? "konachan.com"
+        let webCookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        let clearanceCookies = webCookies.filter {
+            $0.name.caseInsensitiveCompare("cf_clearance") == .orderedSame
+                && $0.domain.lowercased().contains(verificationHost)
+        }
+        guard !clearanceCookies.isEmpty else { return false }
+
+        let storage = HTTPCookieStorage.shared
+        for cookie in clearanceCookies {
+            storage.setCookie(cookie)
+        }
+        updateSessionState(from: (storage.cookies ?? []).filter {
+            KonachanRequestConfiguration.matchesCookieDomain($0.domain)
+        })
+        return true
+    }
+
+    /// 打开挑战页之前删掉旧的 `cf_clearance`。
+    ///
+    /// Cloudflare 的 Cookie 与出口 IP、User-Agent 绑定：换节点后旧值仍然存在但已失效，
+    /// 若不清理，弹窗会把「存在 Cookie」误判成「验证完成」，而接口请求继续 403。
+    func clearCloudflareClearance() async {
+        let storage = HTTPCookieStorage.shared
+        for cookie in storage.cookies ?? []
+        where KonachanRequestConfiguration.matchesCookieDomain(cookie.domain)
+            && cookie.name.caseInsensitiveCompare("cf_clearance") == .orderedSame {
+            storage.deleteCookie(cookie)
+        }
+
+        let cookieStore = WKWebsiteDataStore.default().httpCookieStore
+        for cookie in await cookieStore.allCookies()
+        where KonachanRequestConfiguration.matchesCookieDomain(cookie.domain)
+            && cookie.name.caseInsensitiveCompare("cf_clearance") == .orderedSame {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                cookieStore.delete(cookie) {
+                    continuation.resume()
+                }
+            }
+        }
+
+        hasCloudflareClearance = false
     }
 
     /// 清除 KonaChan 账号、Cloudflare Cookie 与 WebView 站点数据。

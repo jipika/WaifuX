@@ -14,10 +14,20 @@ struct KonachanSettingsTab: View {
                     subtitle: authService.statusSubtitle,
                     showDivider: authService.hasUsableSession
                 ) {
-                    Button(authService.hasUsableSession ? t("重新登录 / 验证") : t("登录 / 验证")) {
-                        showLoginSheet = true
+                    HStack(spacing: 8) {
+                        Button(t("人机验证")) {
+                            KonachanVerificationPresenter.shared.present(trigger: .manual) {
+                                Task { await authService.saveWebSession() }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        Button(authService.hasUsableSession ? t("重新登录 / 验证") : t("登录 / 验证")) {
+                            showLoginSheet = true
+                        }
+                        .controlSize(.small)
                     }
-                    .controlSize(.small)
                 }
 
                 if authService.hasUsableSession {

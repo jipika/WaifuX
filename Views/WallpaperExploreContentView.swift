@@ -388,8 +388,28 @@ struct WallpaperExploreContentView: View {
         .onChange(of: viewModel.sortingOption) { _, _ in handleSortingChange() }
         .onChange(of: fourKSorting) { _, _ in handle4KSortingChange() }
         .onChange(of: konachanSorting) { _, _ in handleKonachanSortingChange() }
+        .onChange(of: viewModel.errorKind) { _, kind in
+            handleErrorKindChange(kind)
+        }
         .onChange(of: viewModel.wallpapers) { _, _ in
             handleWallpapersChanged()
+        }
+    }
+
+    /// Cloudflare 拦住 Konachan 时自动拉起人机验证弹窗。
+    ///
+    /// 只在用户正看着 Konachan 探索页、且 App 在前台时触发；同一进程内重复失败由
+    /// presenter 去重，不会反复打断用户。关闭弹窗后可用面板上的「人机验证」再来一次。
+    private func handleErrorKindChange(_ kind: ExploreErrorKind) {
+        guard kind == .blocked,
+              sourceManager.activeSource == .konachan,
+              viewModel.errorMessage != nil,
+              isVisible,
+              NSApp.isActive
+        else { return }
+
+        KonachanVerificationPresenter.shared.present(trigger: .intercepted) { [self] in
+            reloadData()
         }
     }
 
@@ -1434,11 +1454,19 @@ struct WallpaperExploreContentView: View {
                     : viewModel.errorKind.errorDisplayType
                 let noResultsStyle = viewModel.errorKind == .noResults
                     || viewModel.errorKind == .chineseUnsupported
+                // Konachan 被 Cloudflare 拦截时，直接在当前面板放一个人机验证入口，
+                // 不用再让用户自己摸到「设置 → Konachan」。
+                let needsKonachanVerification = viewModel.errorKind == .blocked
+                    && sourceManager.activeSource == .konachan
                 ErrorStateView(
                     type: displayType,
                     title: noResultsStyle ? t("explore.search.noResults.title") : nil,
                     message: errorMessage,
-                    retryAction: reloadData
+                    retryAction: reloadData,
+                    secondaryTitle: needsKonachanVerification ? t("人机验证") : nil,
+                    secondaryAction: needsKonachanVerification
+                        ? { KonachanVerificationPresenter.shared.present(trigger: .manual) { reloadData() } }
+                        : nil
                 )
             } else {
                 ErrorStateView(

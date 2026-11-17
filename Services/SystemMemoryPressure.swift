@@ -36,6 +36,11 @@ final class ForegroundPrefetchManager {
         })
 
         activePrefetchers[token] = prefetcher
+        // Kingfisher 默认每批并发 5 路下载/处理。库页 ±5 张附近封面里可能全是大 GIF，
+        // 预取只负责闲时暖缓存，固定降为 1 路，给可见卡片让出 CPU、IO 与处理队列。
+        if namespace?.hasPrefix("library.") == true {
+            prefetcher.maxConcurrentDownloads = 1
+        }
         if let namespace {
             namespaces[namespace, default: []].insert(token)
         }

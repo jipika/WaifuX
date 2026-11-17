@@ -104,6 +104,9 @@ struct ErrorStateView: View {
     var message: String? = nil
     var retryAction: (() -> Void)? = nil
     var retryTitle: String = t("retry")
+    /// 次级操作（例如「人机验证」）；与重试按钮并排显示
+    var secondaryTitle: String? = nil
+    var secondaryAction: (() -> Void)? = nil
     
     @State private var isHovered = false
     @State private var isRetrying = false
@@ -146,34 +149,55 @@ struct ErrorStateView: View {
                     .padding(.horizontal, 16)
             }
 
-            // 重试按钮
-            if retryAction != nil {
-                Button {
-                    performRetry()
-                } label: {
-                    HStack(spacing: 8) {
-                        if isRetrying {
-                            ProgressView()
-                                .controlSize(.small)
-                                .scaleEffect(0.8)
-                        }
-                        Text(retryTitle)
-                            .font(.system(size: 14, weight: .semibold))
+            // 操作按钮组
+            HStack(spacing: 10) {
+                if let secondaryAction, let secondaryTitle {
+                    Button(action: secondaryAction) {
+                        Text(secondaryTitle)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 9)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.primary.opacity(0.08))
+                            )
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+                            )
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(buttonColor)
-                    )
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-                .disabled(isRetrying)
-                .scaleEffect(isHovered ? 1.02 : 1.0)
-                .onHover { hovering in
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        isHovered = hovering && !isRetrying
+
+                if retryAction != nil {
+                    Button {
+                        performRetry()
+                    } label: {
+                        HStack(spacing: 8) {
+                            if isRetrying {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.8)
+                            }
+                            Text(retryTitle)
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(buttonColor)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isRetrying)
+                    .scaleEffect(isHovered ? 1.02 : 1.0)
+                    .onHover { hovering in
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            isHovered = hovering && !isRetrying
+                        }
                     }
                 }
             }

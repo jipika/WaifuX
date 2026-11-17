@@ -377,6 +377,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         var canGoPrevious = false
         var canGoNext = false
         var volume: Double = 1.0
+        var isMuted = true
         var rate: Double?
         var showsVolumeControl = false
 
@@ -733,8 +734,8 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
     /// 该屏当前是否暂停（视频按屏查；WE 只有全局暂停态）。
     var isPlaybackPaused: Bool { playbackSnapshot.isPaused }
 
-    /// 该屏音量（视频按屏独立；WE 走 VideoWallpaperManager 的每屏音量）。
-    var playbackVolume: Double { playbackSnapshot.volume }
+    /// 面板显示实际可听音量；静音时归零，但保留快照中的每屏音量设置。
+    var playbackVolume: Double { playbackSnapshot.isMuted ? 0 : playbackSnapshot.volume }
 
     /// 该屏播放速度（只对本机视频有效；WE/静态壁纸返回 nil → 面板隐藏）。
     var playbackRate: Double? { playbackSnapshot.rate }
@@ -772,6 +773,7 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
             snapshot.showsVolumeControl = snapshot.hasLivePlayback
         }
         snapshot.volume = videoManager.volume(for: screen)
+        snapshot.isMuted = videoManager.isMuted
         if videoManager.assignedVideoURL(for: screen) != nil {
             snapshot.rate = videoManager.playbackRate(for: screen)
         } else {
@@ -992,19 +994,28 @@ final class MenuBarQuickSwitcherViewModel: ObservableObject {
         VideoWallpaperManager.shared.forceCommitDesktopPresentation(on: [screen])
     }
 
-    /// 只调该屏音量，不碰其它屏和全局静音（与右键菜单音量滑块同语义）。
+    /// 调整该屏音量；拉到非零时解除全局静音，保留其它屏的音量设置。
     func setPlaybackVolume(_ volume: Double) {
         guard let screen = playbackTargetScreen else { return }
         let clamped = min(1.0, max(0.0, volume))
-        VideoWallpaperManager.shared.setVolume(clamped, for: screen)
-        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
-            WallpaperEngineXBridge.shared.setVolume(clamped, for: screen)
+        let videoManager = VideoWallpaperManager.shared
+        let bridge = WallpaperEngineXBridge.shared
+        let shouldUnmute = clamped > 0 && videoManager.isMuted
+        // 先写新音量再恢复声音，避免短暂按旧音量播放。
+        videoManager.setVolume(clamped, for: screen)
+        if shouldUnmute {
+            videoManager.setMuted(false)
         }
+        if bridge.isControllingExternalEngine {
+            bridge.setVolume(clamped, for: screen, unmute: shouldUnmute)
+        }
+        refreshPlaybackSnapshot()
     }
 
     func setPlaybackRate(_ rate: Double) {
         guard let screen = playbackTargetScreen else { return }
         VideoWallpaperManager.shared.setPlaybackRate(rate, for: screen)
+        refreshPlaybackSnapshot()
     }
 
     private static func cgDisplayID(for screen: NSScreen) -> UInt32? {

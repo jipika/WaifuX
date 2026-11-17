@@ -2683,12 +2683,18 @@ final class WallpaperEngineXBridge: ObservableObject {
         }
     }
 
-    func setVolume(_ volume: Double, for targetScreen: NSScreen? = nil) {
-        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.volume", ["volume": volume, "screen": targetScreen]); return }
+    func setVolume(_ volume: Double, for targetScreen: NSScreen? = nil, unmute: Bool = false) {
+        if BackgroundRuntimeRole.isRemoteUI { BackgroundRuntimeBridge.send("engine.volume", ["volume": volume, "screen": targetScreen, "unmute": unmute]); return }
 
-        updateRendererAudioControls(volume: volume, targetScreen: targetScreen)
+        if unmute {
+            // 调用方已存好每屏音量；全局解除静音时按各屏原值恢复，不覆盖其它屏。
+            updateRendererAudioControls(muted: false)
+        } else {
+            updateRendererAudioControls(volume: volume, targetScreen: targetScreen)
+        }
         if isCurrentWallpaperWeb {
-            sendAudioControlToWebDaemon(muted: nil, volume: volume)
+            // 用同一条 IPC 恢复声音并设置音量，避免分开发送被乱序处理或回写旧全局音量。
+            sendAudioControlToWebDaemon(muted: unmute ? false : nil, volume: volume)
         }
     }
 

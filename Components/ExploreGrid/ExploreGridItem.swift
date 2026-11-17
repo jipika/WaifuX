@@ -57,6 +57,38 @@ final class ExploreGridItemRootView: NSView {
     }
 }
 
+/// 限制同一时刻的 GIF 中间帧解码数量。ImageIO 为取中间帧会合成前置帧，
+/// 网格 + 预取同时请求时很容易让 Kingfisher 的处理队列挤满 CPU 与内存。
+/// 队列满时让调用方退回首帧降采样，而不是继续堆一批等待中的大 GIF。
+private enum GIFMiddleFrameDecodeLimiter {
+    static let maxConcurrentDecodes = 1
+    static let maxWaitingCount = 4
+    private static let semaphore = DispatchSemaphore(value: maxConcurrentDecodes)
+    private static let lock = NSLock()
+    /// 仅由 `lock` 保护，和本文件快照缓存使用同一 Swift 6 显式锁语义。
+    nonisolated(unsafe) private static var waitingCount = 0
+
+    /// 主线程返回 false，让处理器走 Kingfisher 普通首帧降采样；后台可短等槽位。
+    static func perform<T>(_ operation: () -> T?) -> T? {
+        let isMainThread = Thread.isMainThread
+        lock.lock()
+        if isMainThread || waitingCount >= maxWaitingCount {
+            lock.unlock()
+            return nil
+        }
+        waitingCount += 1
+        lock.unlock()
+
+        let acquired = semaphore.wait(timeout: .now() + 0.25) == .success
+        lock.lock()
+        waitingCount -= 1
+        lock.unlock()
+        guard acquired else { return nil }
+        defer { semaphore.signal() }
+        return operation()
+    }
+}
+
 /// GIF 静态封面处理器：数据确为多帧 GIF 时取**中间帧**做静态封面
 /// （大量动图前几帧是黑色淡入，直接显示首帧会常驻一块黑图），
 /// 其余格式回落到 DownsamplingImageProcessor 同款逻辑。
@@ -91,19 +123,21 @@ struct GIFAwareMiddleFrameImageProcessor: ImageProcessor {
     /// 取第 count/2 帧的缩略图。GIF 帧间的 delta 合成由 ImageIO 内部完成
     /// （与 startAnimatingIfAnimated 的逐帧采样同一路径，已在库页验证无残影）。
     static func middleFrameImage(from data: Data, maxPixelSize: CGFloat) -> NSImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-        let count = CGImageSourceGetCount(source)
-        guard count > 1 else { return nil }
-        let index = count / 2
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize),
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else {
-            return nil
+        return GIFMiddleFrameDecodeLimiter.perform {
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+            let count = CGImageSourceGetCount(source)
+            guard count > 1 else { return nil }
+            let index = count / 2
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize),
+                kCGImageSourceCreateThumbnailWithTransform: true
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else {
+                return nil
+            }
+            return NSImage(cgImage: cgImage, size: .zero)
         }
-        return NSImage(cgImage: cgImage, size: .zero)
     }
 }
 

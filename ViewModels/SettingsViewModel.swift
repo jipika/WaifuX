@@ -10,6 +10,7 @@ class SettingsViewModel: ObservableObject {
     // 会触发 _CFXPreferences 递归栈溢出（EXC_BAD_ACCESS SIGSEGV）。
     // 改用 @Published + 手动 UserDefaults 同步 + restoreSavedSettings() 延迟恢复。
     private var systemWallpaperSyncTransitionGeneration: UInt64 = 0
+    private var wallpaperCacheAccessProbeGeneration: UInt64 = 0
 
     @Published var saveToDownloads = true {
         didSet { guard !isReloadingImportedSettings else { return }; WaifuXPreferences.shared.set(saveToDownloads, forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) }
@@ -292,12 +293,19 @@ class SettingsViewModel: ObservableObject {
     /// 没有这行提示，用户永远看不到「为什么磁盘一直在涨」。
     @Published var wallpaperCacheInaccessibleRootCount = 0
 
-    /// 同步探测：每个缓存根只做一次目录级 readdir（不递归、不看文件内容）。
-    /// 实测代价：无权限时 25.8ms、有权限时 35.4ms（launchd 与 Terminal 两种上下文各跑一次），
-    /// 所以放在设置页 onAppear 里不绕后台线程——顺带说明：Swift 6 下把 self 带进
-    /// `Task.detached` 会直接报 sending 数据竞争诊断，这里也没必要为了 30ms 去跟它较劲。
+    /// 后台探测：目录级 readdir 在慢盘 / TCC 漏斗里可能秒级阻塞，不能放在
+    /// 设置行 `onAppear` 的主线程上。世代号保证连续出现时只采用最后一次结果。
     func refreshWallpaperCacheAccessStatus() {
-        wallpaperCacheInaccessibleRootCount = WallpaperSystemCacheJanitor.inaccessibleRootsNow().count
+        wallpaperCacheAccessProbeGeneration &+= 1
+        let generation = wallpaperCacheAccessProbeGeneration
+        Task(priority: .utility) {
+            let count = await Task.detached(priority: .utility) {
+                WallpaperSystemCacheJanitor.inaccessibleRootsNow().count
+            }.value
+            guard !Task.isCancelled,
+                  generation == wallpaperCacheAccessProbeGeneration else { return }
+            wallpaperCacheInaccessibleRootCount = count
+        }
     }
 
     /// 壁纸扩展守护（keeper）开关。默认开启：App 退出后由 LaunchAgent 常驻守卫，

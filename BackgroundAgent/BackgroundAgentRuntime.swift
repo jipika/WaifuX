@@ -136,6 +136,7 @@ final class BackgroundAgentRuntime {
         if let startupTask { await startupTask.value; return }
         idleExitTask?.cancel()
         startupTask = Task {
+            let libraryRestoreStart = ProcessInfo.processInfo.systemUptime
             isReady = true
             ThemeManager.shared.restoreSavedSettings()
             await applyNetworkPreferences()
@@ -164,6 +165,11 @@ final class BackgroundAgentRuntime {
             // 三套库状态齐了：从这里开始 `library.snapshot` 可以提前应答，
             // 不必等 startRuntime 尾部（渲染器/屏保恢复要几十秒，UI 白等）。
             libraryRecordsAreRestored = true
+            AppLogger.info(.startup, "[LibraryLoad] Helper 库记录恢复完成", metadata: [
+                "restoreMS": Int((ProcessInfo.processInfo.systemUptime - libraryRestoreStart) * 1000),
+                "wallpaperRecords": WallpaperLibraryService.shared.downloadRecords.count,
+                "mediaRecords": MediaLibraryService.shared.downloadRecords.count,
+            ])
             MenuBarQuickWallpaperRepository.shared.start()
             libraryRecoveryTask = Task(priority: .utility) {
                 await DirectoryMigrationService.shared.recoverIncompleteMigrationIfNeeded()
@@ -728,7 +734,7 @@ final class BackgroundAgentRuntime {
             WallpaperEngineXBridge.shared.setMuted(a.bool("muted"))
             return [:]
         case "engine.volume":
-            try WallpaperEngineXBridge.shared.setVolume(a.double("volume"), for: try a.optionalScreen("screen"))
+            try WallpaperEngineXBridge.shared.setVolume(a.double("volume"), for: try a.optionalScreen("screen"), unmute: a.bool("unmute"))
             return [:]
         case "engine.designReload":
             WallpaperEngineXBridge.shared.reloadCurrentSceneWallpaperForDesign()

@@ -222,7 +222,7 @@ actor KonachanService {
         if let networkError = error as? NetworkError,
            case .loginRequired = networkError {
             return NetworkError.loginRequired(
-                message: LocalizationService.shared.t("Konachan 请求被 Cloudflare 拦截。请在「设置 → Konachan」完成登录或人机验证后重试。")
+                message: LocalizationService.shared.t("Konachan 请求被 Cloudflare 拦截。点击「人机验证」完成挑战后可继续。")
             )
         }
         return error

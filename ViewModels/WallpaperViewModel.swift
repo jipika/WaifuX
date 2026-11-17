@@ -1289,8 +1289,9 @@ class WallpaperViewModel: ObservableObject {
         )
     }
 
-    private func fetchWallpapers(query: String, page: Int) async throws -> WallpaperSearchResponse {
-        let parameters = WallhavenAPI.SearchParameters(
+    /// 探索列表查询参数的唯一组装点；首页 Konachan 区块复用同一份参数，保证两边数据一致。
+    private func listSearchParameters(query: String, page: Int) -> WallhavenAPI.SearchParameters {
+        WallhavenAPI.SearchParameters(
             query: query,
             page: page,
             categories: normalizedCategoryMask(),
@@ -1304,8 +1305,10 @@ class WallpaperViewModel: ObservableObject {
             colors: normalizedColors(),
             seed: sortingOption == .random ? currentRandomSeed : nil
         )
+    }
 
-        return try await fetchWallpapers(parameters: parameters)
+    private func fetchWallpapers(query: String, page: Int) async throws -> WallpaperSearchResponse {
+        return try await fetchWallpapers(parameters: listSearchParameters(query: query, page: page))
     }
 
     /// Wallhaven 请求最大重试次数（⚠️ VM 层不再重试，交给 NetworkService 统一重试）
@@ -1839,7 +1842,11 @@ class WallpaperViewModel: ObservableObject {
         case .wallhaven:
             return try await featuredFromMainSource()
         case .konachan:
-            return try await KonachanService.shared.fetchFeatured(limit: 24)
+            // 首页轮播与探索列表同参同源：复用列表第 1 页查询，仅放宽每页数量
+            var featuredParameters = listSearchParameters(query: searchQuery, page: 1)
+            featuredParameters.perPage = 24
+            let featuredResponse = try await fetchWallpapers(parameters: featuredParameters)
+            return Array(featuredResponse.data.prefix(24))
         case .pixiv:
             return try await PixivService.shared.fetchFeatured(limit: 24)
         }
@@ -1869,7 +1876,11 @@ class WallpaperViewModel: ObservableObject {
         case .wallhaven:
             return try await topFromMainSource()
         case .konachan:
-            return try await KonachanService.shared.fetchTop(limit: 8)
+            // 与探索列表同参同源：复用列表第 1 页查询
+            var topParameters = listSearchParameters(query: searchQuery, page: 1)
+            topParameters.perPage = 8
+            let topResponse = try await fetchWallpapers(parameters: topParameters)
+            return Array(topResponse.data.prefix(8))
         case .pixiv:
             return try await PixivService.shared.fetchTop(limit: 8)
         }
@@ -1899,7 +1910,11 @@ class WallpaperViewModel: ObservableObject {
         case .wallhaven:
             return try await latestFromMainSource()
         case .konachan:
-            return try await KonachanService.shared.fetchLatest(limit: 8)
+            // 与探索列表同参同源：复用列表第 1 页查询
+            var latestParameters = listSearchParameters(query: searchQuery, page: 1)
+            latestParameters.perPage = 8
+            let latestResponse = try await fetchWallpapers(parameters: latestParameters)
+            return Array(latestResponse.data.prefix(8))
         case .pixiv:
             return try await PixivService.shared.fetchLatest(limit: 8)
         }

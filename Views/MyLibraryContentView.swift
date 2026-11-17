@@ -191,7 +191,8 @@ struct MyLibraryContentView: View {
     @State private var savedLibraryScrollOffset: CGFloat = -1
     /// 恢复成功后自增，驱动 LibraryScrollRestorer 重新触发
     @State private var libraryScrollRestoreToken: Int = 0
-    /// 库页首次出现时完成一次引导加载（全量 update + initialLoad）。
+    /// 库页首次出现时完成一次本地引导（索引 + 当前目录列表）。
+    /// 首页/探索的网络 initialLoad 不属于本地库依赖，绝不能拖住首屏骨架。
     /// 详情往返的 re-appear 不再重跑：详情打开期间 revision publisher 仍在线上，
     /// 数据变化已通过 debouncedUpdate 流入网格；重跑只会白白 gridReloadToken++
     /// 触发整网格 reconfigure + 重发网络请求。
@@ -602,7 +603,7 @@ struct MyLibraryContentView: View {
                     // 只记第一次失败：Helper 未就绪时这条必然失败，逐次刷屏
                     // 没有信息量，最终结论由超时日志给出。
                     if attempts == 1 {
-                        AppLogger.debug(.general, "[LibraryLoad] 主动拉取库快照失败", metadata: [
+                        AppLogger.info(.startup, "[LibraryLoad] 主动拉取库快照失败", metadata: [
                             "attempt": "\(attempts)",
                             "error": error.localizedDescription,
                         ])
@@ -614,7 +615,7 @@ struct MyLibraryContentView: View {
             guard !Task.isCancelled else { return }
             if !helper.librarySnapshotIsArrived {
                 librarySnapshotWaitTimedOut = true
-                AppLogger.debug(.general, "[LibraryLoad] 等待库快照超时", metadata: [
+                AppLogger.info(.startup, "[LibraryLoad] 等待库快照超时", metadata: [
                     "attempts": "\(attempts)",
                     "connected": helper.isConnected ? "1" : "0",
                     "lastError": helper.lastError ?? "nil",
@@ -654,38 +655,33 @@ struct MyLibraryContentView: View {
 
             startLibrarySnapshotFetchIfPending()
 
-            // 一次性引导的结束不再靠固定超时：骨架的持续显隐由
-            // libraryCurrentTypeIsLoaded 决定，快照晚到时仍显示骨架而不是塌成假空态。
-            // 这里只保证最短展示防闪，并在快照已到位时同步重建一次当前页列表。
-            defer { libraryFirstLoadPlaceholderVisible = false }
-            let minimumVisible: TimeInterval = 0.18
-            let elapsed = Date().timeIntervalSince(loadStart)
-            if elapsed < minimumVisible {
-                do {
-                    try await Task.sleep(
-                        nanoseconds: UInt64((minimumVisible - elapsed) * 1_000_000_000)
-                    )
-                } catch {}
-            }
-            if helper.librarySnapshotIsArrived {
-                rebuildCurrentListsAfterCacheReady(reason: "bootstrap-snapshot-ready")
-            }
-
-            _ = await (initialLoad, animeFavoritesLoad)
-
-            // 分段耗时：定位「我的库加载慢」到底卡在索引、条目构建还是快照到达。
-            // snapshotArrived / counts 用来证明骨架撤下时数据是否真在（假空态取证）。
-            AppLogger.debug(.general, "[LibraryLoad] 我的库加载分段耗时", metadata: [
+            // 本地库首屏只等本地索引、当前目录构建与 Helper 快照。
+            // `initialLoad()` 拉的是首页/探索网络数据；弱网下它可能等待数分钟，
+            // 旧代码却把它放在撤骨架之前，导致快照和本地条目已就绪仍永远转圈。
+            // 本地索引与当前页列表一就绪，就允许首屏骨架按快照状态收敛；
+            // 此后才等待网络初始化，且这段耗时绝不反向遮住本地库。
+            libraryFirstLoadPlaceholderVisible = false
+            let localReady = Date()
+            AppLogger.info(.startup, "[LibraryLoad] 本地库首屏已放行", metadata: [
                 "indexMS": Int(indexReady.timeIntervalSince(loadStart) * 1000),
                 "itemsMS": Int(itemsReady.timeIntervalSince(indexReady) * 1000),
-                "loadMS": Int(Date().timeIntervalSince(itemsReady) * 1000),
-                "snapshotMS": Int(Date().timeIntervalSince(loadStart) * 1000),
+                "localReadyMS": Int(localReady.timeIntervalSince(loadStart) * 1000),
                 "snapshotArrived": helper.librarySnapshotIsArrived ? "1" : "0",
+                "pageBuilt": libraryCurrentPageIsBuilt ? "1" : "0",
                 "helperConnected": helper.isConnected ? "1" : "0",
                 "content": selectedContentType == .wallpaper ? "wallpaper"
                     : (selectedContentType == .video ? "video" : "anime"),
                 "counts": "\(wallpaperItems.count)/\(mediaItems.count)",
                 "records": "\(WallpaperLibraryService.shared.downloadRecords.count)/\(MediaLibraryService.shared.downloadRecords.count)",
+            ])
+
+            // 只等待正在飞行的网络初始化；本地首屏放行仍严格发生在它之前。
+            _ = await (initialLoad, animeFavoritesLoad)
+
+            // 网络初始化单独计时，不再冒充本地库加载耗时。
+            AppLogger.info(.startup, "[LibraryLoad] 库页附带初始化结束", metadata: [
+                "initialLoadMS": Int(Date().timeIntervalSince(localReady) * 1000),
+                "snapshotArrived": helper.librarySnapshotIsArrived ? "1" : "0",
             ])
         }
         .onAppear {
@@ -784,7 +780,7 @@ struct MyLibraryContentView: View {
             // 快照到达：先重建当前页列表再放行渲染。顺序反了会出现三段跳
             // （骨架撤下 → 空态闪现 → 内容），正是用户看到的「占位提前消失」。
             rebuildCurrentListsAfterCacheReady(reason: "snapshot-arrived")
-            AppLogger.debug(.general, "[LibraryLoad] 库快照到达并重建列表", metadata: [
+            AppLogger.info(.startup, "[LibraryLoad] 库快照到达并重建列表", metadata: [
                 "content": selectedContentType == .wallpaper ? "wallpaper"
                     : (selectedContentType == .video ? "video" : "anime"),
                 "counts": "\(wallpaperItems.count)/\(mediaItems.count)",
