@@ -143,11 +143,13 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 
 - **WaifuX 用户交流群**: [点击加入](https://qm.qq.com/q/SRCj8msygq) 👈 971414910
 
-<p align="center">
-  <img src="reward.jpg" width="280" alt="微信赞赏码" />
-  <img src="afdian_reward.jpg" width="280" alt="爱发电赞助码" />
-  <img src="alipay_reward.jpg" width="280" alt="支付宝赞赏码" />
-</p>
+<table>
+  <tr>
+    <td align="center" valign="top"><img src="reward.jpg" width="240" alt="微信赞赏码" /></td>
+    <td align="center" valign="top"><img src="afdian_reward.jpg" width="240" alt="爱发电赞助码" /></td>
+    <td align="center" valign="top"><img src="alipay_reward.jpg" width="240" alt="支付宝赞赏码" /></td>
+  </tr>
+</table>
 
 当然，**给项目点个 Star ⭐️** 同样是对开发者最大的鼓励！
 

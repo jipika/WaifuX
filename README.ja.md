@@ -152,11 +152,13 @@ WaifuX は**完全無料のオープンソース**個人プロジェクトです
 
 もし WaifuX がお役に立ったなら、プロジェクトの継続的な発展を支援することをぜひご検討ください：
 
-<p align="center">
-  <img src="reward.jpg" width="280" alt="WeChat 報酬QRコード" />
-  <img src="afdian_reward.jpg" width="280" alt="Afdian スポンサーQRコード" />
-  <img src="alipay_reward.jpg" width="280" alt="Alipay スポンサーQRコード" />
-</p>
+<table>
+  <tr>
+    <td align="center" valign="top"><img src="reward.jpg" width="240" alt="WeChat 報酬QRコード" /></td>
+    <td align="center" valign="top"><img src="afdian_reward.jpg" width="240" alt="Afdian スポンサーQRコード" /></td>
+    <td align="center" valign="top"><img src="alipay_reward.jpg" width="240" alt="Alipay スポンサーQRコード" /></td>
+  </tr>
+</table>
 
 もちろん、**スター ⭐️ を付けるだけ**でも大きな励みになります！
 
