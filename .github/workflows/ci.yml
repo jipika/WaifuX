@@ -661,7 +661,7 @@ jobs:
 
                       <table>
                         <tr>
-                          <td align="center" valign="top"><img src="https://raw.githubusercontent.com/jipika/WaifuX/main/reward.jpg" width="240" alt="微信赞赏码" /></td>
+                          <td align="center" valign="bottom"><img src="https://raw.githubusercontent.com/jipika/WaifuX/main/reward.jpg" width="240" alt="微信赞赏码" /></td>
                           <td align="center" valign="top"><img src="https://raw.githubusercontent.com/jipika/WaifuX/main/afdian_reward.jpg" width="240" alt="爱发电赞助码" /></td>
                           <td align="center" valign="top"><img src="https://raw.githubusercontent.com/jipika/WaifuX/main/alipay_reward.jpg" width="240" alt="支付宝赞赏码" /></td>
                         </tr>

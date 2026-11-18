@@ -145,7 +145,7 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 
 <table>
   <tr>
-    <td align="center" valign="top"><img src="reward.jpg" width="240" alt="微信赞赏码" /></td>
+    <td align="center" valign="bottom"><img src="reward.jpg" width="240" alt="微信赞赏码" /></td>
     <td align="center" valign="top"><img src="afdian_reward.jpg" width="240" alt="爱发电赞助码" /></td>
     <td align="center" valign="top"><img src="alipay_reward.jpg" width="240" alt="支付宝赞赏码" /></td>
   </tr>

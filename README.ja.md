@@ -154,7 +154,7 @@ WaifuX は**完全無料のオープンソース**個人プロジェクトです
 
 <table>
   <tr>
-    <td align="center" valign="top"><img src="reward.jpg" width="240" alt="WeChat 報酬QRコード" /></td>
+    <td align="center" valign="bottom"><img src="reward.jpg" width="240" alt="WeChat 報酬QRコード" /></td>
     <td align="center" valign="top"><img src="afdian_reward.jpg" width="240" alt="Afdian スポンサーQRコード" /></td>
     <td align="center" valign="top"><img src="alipay_reward.jpg" width="240" alt="Alipay スポンサーQRコード" /></td>
   </tr>
