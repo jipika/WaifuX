@@ -155,6 +155,7 @@ If you find WaifuX helpful, please consider supporting its continued development
 <p align="center">
   <img src="reward.jpg" width="280" alt="WeChat Reward QR Code" />
   <img src="afdian_reward.jpg" width="280" alt="Afdian Sponsor QR Code" />
+  <img src="alipay_reward.jpg" width="280" alt="Alipay Sponsor QR Code" />
 </p>
 
 Of course, **giving a Star ⭐️** is also greatly appreciated!
