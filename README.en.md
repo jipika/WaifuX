@@ -154,9 +154,9 @@ If you find WaifuX helpful, please consider supporting its continued development
 
 <table>
   <tr>
-    <td align="center" valign="bottom"><img src="reward.jpg" width="240" alt="WeChat Reward QR Code" /></td>
-    <td align="center" valign="top"><img src="afdian_reward.jpg" width="240" alt="Afdian Sponsor QR Code" /></td>
-    <td align="center" valign="top"><img src="alipay_reward.jpg" width="240" alt="Alipay Sponsor QR Code" /></td>
+    <td align="center" valign="bottom"><img src="reward.jpg" height="300" alt="WeChat Reward QR Code" /></td>
+    <td align="center" valign="top"><img src="afdian_reward.jpg" height="300" alt="Afdian Sponsor QR Code" /></td>
+    <td align="center" valign="top"><img src="alipay_reward.jpg" height="300" alt="Alipay Sponsor QR Code" /></td>
   </tr>
 </table>
 
