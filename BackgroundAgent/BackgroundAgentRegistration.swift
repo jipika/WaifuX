@@ -16,8 +16,15 @@ enum BackgroundAgentRegistrationError: LocalizedError {
     case unavailable(Int)
     /// 注册记录已落库，但 launchd 里启动不起来或 mach service 连不上。
     /// 与 `.unavailable` 区分：这里 BTM 状态可能已是「已启用」，旧校验会把它
-    /// 当成正常，实际客户端一连就 4099。
+    /// 当成正常，实际客户端一连就 4099。detail 带上 launchd 现场证据，
+    /// 让弹窗/横幅能直接看出是哪种失败形态。
     case launchdJobNotReady(String)
+    /// 探活期间 Helper 被反复拉起、却每次都以退出码 0 立刻退出：生产 Helper
+    /// 启动早期唯一的 exit(0) 是拿不到单实例锁（见 AgentMain），即另一个
+    /// WaifuXHelper 占着 background-helper.lock。KeepAlive.SuccessfulExit=false
+    /// 把 exit(0) 当「成功退出」不再重拉，mach 端口永远没人监听。
+    /// detail 里带占锁进程 pid 与路径；UI 据此先下线两份注册再清占锁者。
+    case helperInstanceLockConflict(String)
     /// 连接成功，但对方是旧构建或协议版本落后。
     ///
     /// 用户用新包替换旧版本后，launchd 的 KeepAlive 可能仍持有旧 helper 进程；
@@ -40,6 +47,8 @@ enum BackgroundAgentRegistrationError: LocalizedError {
             return String(format: t("WaifuX 后台服务注册失败（状态 %@），请重试或重新安装应用"), String(describing: status))
         case .launchdJobNotReady(let detail):
             return String(format: t("WaifuX 后台服务已注册但未能启动（%@）。请在系统设置 → 通用 → 登录项中允许 WaifuX 后台服务；仍失败请重装应用"), String(describing: detail))
+        case .helperInstanceLockConflict(let detail):
+            return String(format: t("WaifuX 后台服务的单实例锁被残留进程占用（%@），正在自动清理并重试；若反复出现请导出日志反馈"), String(describing: detail))
         case .helperOutdated(let detail):
             return String(format: t("WaifuX 后台服务仍是旧版本（%@），正在重新注册后台服务；若反复出现请重新安装应用"), String(describing: detail))
         case .launchdSpawnRejected:
@@ -153,12 +162,27 @@ enum BackgroundAgentRegistration {
         }.value
     }
 
+    /// 两份注册（默认 + 备用 relinked）的 job 都丢掉。
+    ///
+    /// 只 bootout「当前模式」那一个 Label 会留盲区：用户点过「修复后台服务」后
+    /// 再 `sfltool resetbtm`，relinked 的 BTM 记录没了、launchd 域里的 job 却还在，
+    /// `currentMode` 查不到记录判回 bundled，此后每轮修复都碰不到那个残留 job。
+    /// 它名下的 Helper 占着单实例锁，bundled 每次 spawn 都抢锁失败 exit(0)
+    /// （issue #128 用户机：runs=8、last exit code=0、mach service 不可达）。
+    /// bootout 到不存在的 job 返回非零属正常（幂等），两个 Label 都打一遍。
+    static func bootoutAllCachedJobs() async {
+        await bootoutCachedJob(label: BackgroundAgentRegistrationMode.bundled.launchdLabel)
+        await bootoutCachedJob(label: BackgroundAgentRegistrationMode.relinked.launchdLabel)
+    }
+
     /// - Parameter bootout: 注销之后、注册之前丢弃 launchd 里缓存的 job。
     ///   为 nil 时跳过，供不接触真实 launchd 的回归测试使用。
+    /// - Parameter probe: 真实可达性探针。返回 false = 暂时连不上（继续重试）；
+    ///   抛错 = 已确诊的失败形态（如单实例锁冲突），立即上抛，不再空转探针。
     static func repairLaunchdRegistration(
         _ service: some BackgroundAgentServiceRegistration,
         bootout: (@MainActor () async -> Void)? = nil,
-        probe: (@MainActor () async -> Bool)? = nil
+        probe: (@MainActor () async throws -> Bool)? = nil
     ) async throws {
         // 1. 注销，并等到 BTM 记录真的离开 .enabled。
         //    unregister 经 smd 异步落地；不等它落地，后面的 ensureEnabled 会看到
@@ -183,16 +207,31 @@ enum BackgroundAgentRegistration {
         try await waitForStatus(service, equals: .enabled, attempts: 10,
                                 failure: { String(format: LocalizationService.shared.t("注册后状态为 %@"), String(describing: $0)) })
 
-        // 3. BTM 说 enabled 不等于 launchd 里端口可连 —— 旧实现缺的就是这一步。
+        // 4. BTM 说 enabled 不等于 launchd 里端口可连 —— 旧实现缺的就是这一步。
+        //    探针抛错 = 已确诊形态（锁冲突等），直接上抛给调用方的专门路径。
         guard let probe else { return }
         for _ in 0..<8 {
             try Task.checkCancellation()
-            if await probe() { return }
+            if try await probe() { return }
             try await Task.sleep(for: .milliseconds(300))
         }
         try Task.checkCancellation()
-        if await probe() { return }
-        throw BackgroundAgentRegistrationError.launchdJobNotReady(LocalizationService.shared.t("mach service 不可达"))
+        if try await probe() { return }
+        let evidence = failureEvidence()
+        throw BackgroundAgentRegistrationError.launchdJobNotReady(
+            LocalizationService.shared.t("mach service 不可达") + "；"
+            + (evidence.isEmpty ? LocalizationService.shared.t("未见 WaifuXHelper 进程") : evidence))
+    }
+
+    /// 探针失败时的现场证据：同 uid 的 WaifuXHelper 进程（谁占着单实例锁）。
+    /// 纯进程表读取，不碰 launchd/BTM，也不做本地化（调用方都在 MainActor，
+    /// 空结果的占位文案由调用方补）。没有 Helper 进程时返回空串。
+    nonisolated static func failureEvidence() -> String {
+        let holders = BackgroundChildProcessCleanup.helperProcesses(
+            lockPath: BackgroundAgentWire.productionLockFileURL.path)
+        return holders.map { helper in
+            "pid=\(helper.child.pid) holdsLock=\(helper.holdsLock) path=\(helper.path)"
+        }.joined(separator: "; ")
     }
 
     // MARK: - 旧「开机自启」退役
@@ -245,9 +284,9 @@ enum BackgroundAgentRegistration {
 
     /// 把 Helper 从 `current` 注册迁到 `replacement` 注册。
     ///
-    /// 顺序：注销旧注册并等它离开 `.enabled` → `bootout`（丢掉 launchd 里旧 Label 的
-    /// job、释放同名 Mach service）→ 注册新 Label 并等回 `.enabled`。两份注册的
-    /// MachServices 相同，旧 job 不先下线，新 job 拿不到端口。
+    /// 顺序：注销旧注册并等它离开 `.enabled` → 若备用注册已有记录也一并注销
+    /// （防两份注册同时 enabled 抢同一个 Mach service）→ `bootout`（丢掉 launchd
+    /// 里两个 Label 的 job、释放同名 Mach service）→ 注册新 Label 并等回 `.enabled`。
     static func relinkAgent(
         from current: some BackgroundAgentServiceRegistration,
         to replacement: some BackgroundAgentServiceRegistration,
@@ -260,6 +299,17 @@ enum BackgroundAgentRegistration {
         }
         try await waitForStatus(current, leaving: .enabled, attempts: 10,
                                 failure: { String(format: LocalizationService.shared.t("旧注册注销后仍为已启用（状态 %@）"), String(describing: $0)) })
+        // 备用注册可能残留 enabled 记录（上一轮 relink 后 BTM 又被外部重置过）：
+        // 不先注销，register 会撞 kSMErrorAlreadyRegistered，或两份 job 同时抢端口。
+        if replacement.status == .enabled || replacement.status == .requiresApproval {
+            do {
+                try await replacement.unregister()
+            } catch {
+                if error is CancellationError || replacement.status == .enabled { throw error }
+            }
+            try await waitForStatus(replacement, leaving: .enabled, attempts: 10,
+                                    failure: { String(format: LocalizationService.shared.t("备用注册注销后仍为已启用（状态 %@）"), String(describing: $0)) })
+        }
         if let bootout { await bootout() }
         try ensureEnabled(replacement)
         try await waitForStatus(replacement, equals: .enabled, attempts: 10,
@@ -296,17 +346,33 @@ enum BackgroundAgentRegistration {
         }.value
     }
 
-    /// launchd 一直拉不起 Helper 的证据：顶层 `job state = spawn failed` 且
-    /// `last exit code = 78`（EX_CONFIG）。命中返回一行摘要，否则 nil。
+    /// launchd 侧失败证据的分类。`summary` 非 nil = 命中已知失败形态。
+    struct LaunchdFailureEvidence: Sendable {
+        enum Kind: Sendable {
+            /// job state = spawn failed 且 last exit code = 78（EX_CONFIG，启动约束拒收）。
+            case spawnRejected
+            /// runs > 0、last exit code = 0、job 不在运行：Helper 被拉起后立刻「成功退出」。
+            /// 生产 Helper 启动早期唯一的 exit(0) 是单实例锁被占（AgentMain）。
+            case cleanExitLoop
+        }
+        let kind: Kind
+        let summary: String
+    }
+
+    /// 解析 `launchctl print` 原文里的失败形态。只认顶层字段，coalition 等
+    /// 嵌套块里的 `state = active` 不参与判断；缩进 ≥2 的行一律视为嵌套。
     ///
     /// 用户机原文（2026-11-05）：`job state = spawn failed`、`last exit code = 78: EX_CONFIG`、
     /// `runs = 61`，launchd 日志同时报 `copy_bundle_path(...) error 0x6f`。
-    /// 只认这几行顶层字段，coalition 等嵌套块里的 `state = active` 不参与判断。
-    nonisolated static func spawnRejectionSummary(_ description: String) -> String? {
+    /// issue #128 用户机（2026-11-17）：`runs = 8`、`last exit code = 0`、job 已退出——
+    /// 锁冲突循环，与 spawn failed 是两种病，修复手法不同（前者清占锁进程，后者换注册）。
+    nonisolated static func launchdFailureEvidence(_ description: String) -> LaunchdFailureEvidence? {
         var jobState: String?
         var lastExit: String?
         var runs: String?
+        var topLevelState: String?
         for raw in description.split(separator: "\n") {
+            let indent = raw.prefix { $0 == "\t" || $0 == " " }.count
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("job state = ") {
                 jobState = String(line.dropFirst("job state = ".count))
@@ -314,10 +380,27 @@ enum BackgroundAgentRegistration {
                 lastExit = String(line.dropFirst("last exit code = ".count))
             } else if line.hasPrefix("runs = ") {
                 runs = String(line.dropFirst("runs = ".count))
+            } else if indent <= 1, line.hasPrefix("state = ") {
+                topLevelState = String(line.dropFirst("state = ".count))
             }
         }
-        guard jobState == "spawn failed", let lastExit, lastExit.hasPrefix("78") else { return nil }
-        return "job state=spawn failed, last exit=\(lastExit), runs=\(runs ?? "?")"
+        if jobState == "spawn failed", let lastExit, lastExit.hasPrefix("78") {
+            return LaunchdFailureEvidence(kind: .spawnRejected,
+                summary: "job state=spawn failed, last exit=\(lastExit), runs=\(runs ?? "?")")
+        }
+        if let lastExit, lastExit == "0" || lastExit.hasPrefix("0:"),
+           let runs, let runCount = Int(runs), runCount > 0,
+           jobState != "running", topLevelState != "running" {
+            return LaunchdFailureEvidence(kind: .cleanExitLoop,
+                summary: "job state=\(jobState ?? topLevelState ?? "?"), last exit=0, runs=\(runs)")
+        }
+        return nil
+    }
+
+    /// launchd 一直拉不起 Helper 的证据（spawn failed + exit 78）。命中返回一行摘要，否则 nil。
+    nonisolated static func spawnRejectionSummary(_ description: String) -> String? {
+        guard let evidence = launchdFailureEvidence(description), evidence.kind == .spawnRejected else { return nil }
+        return evidence.summary
     }
 
     /// 轮询等待状态变化。用 `try await Task.sleep`（不是 `try?`）让调用方的

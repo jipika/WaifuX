@@ -448,6 +448,9 @@ private final class CardMorphViewportView: NSView {
     weak var owner: WallpaperCardMorphCoordinator?
     private var reportPending = false
     override var isFlipped: Bool { true }
+    // 此视图只测量窗口坐标；即便旧版 SwiftUI 未透传 allowsHitTesting，
+    // 也绝不能让铺满窗口的原生探针接走顶栏或列表的鼠标事件。
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func layout() { super.layout(); scheduleReport() }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); scheduleReport() }
     func scheduleReport() {

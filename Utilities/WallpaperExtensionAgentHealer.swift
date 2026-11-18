@@ -53,10 +53,9 @@ enum WallpaperExtensionRecoveryPolicy {
     /// 启动失败、其它 lsregister 错误或任何 PlugInKit 失败都必须中止。
     static func registrationToolAccepted(label: String, status: Int32, output: String) -> Bool {
         if status == 0 { return true }
+        // lsregister 会在错误码后换行；关联同一条诊断，兼容空白并保留完整错误码边界。
         return label == "lsregister" && status == 1
-            && output.contains("failed to scan ")
-            && output.contains(": -10811 ")
-            && output.contains("from spotlight")
+            && output.range(of: #"failed to scan [^\r\n]+:\s+-10811\s+from spotlight"#, options: .regularExpression) != nil
     }
 
     /// 扩展状态文件里「正在渲染」的声明；isActive=false 或没有 contexts 时不构造。

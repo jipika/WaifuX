@@ -549,6 +549,8 @@ struct ContentView: View {
                 .opacity(detailPath.isEmpty ? 0 : 1)
                 .allowsHitTesting(!detailPath.isEmpty)
                 .accessibilityHidden(detailPath.isEmpty)
+                // 保留原生栈与返回历史；空栈后置，防御透明原生导航宿主潜在的命中遮挡。
+                .zIndex(detailPath.isEmpty ? -1 : 1)
                 .modifier(CardMorphDestinationReveal(coordinator: cardMorph))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

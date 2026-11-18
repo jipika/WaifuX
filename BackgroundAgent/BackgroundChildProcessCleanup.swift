@@ -68,9 +68,9 @@ enum BackgroundChildProcessCleanup {
 ///
 /// 用户把新包拖进 /Applications 替换旧包时，旧 Helper 可能还活着并占着
 /// `background-helper.lock`：它的可执行文件已被替换/移进废纸篓，路径前缀
-/// 匹配不到当前 bundle；新 Helper 拿不到锁直接 `exit(0)`。所以这里不按路径，
-/// 而按「同 uid + 进程名 WaifuXHelper + 打开着同一个 inode 的锁文件」三条件识别，
-/// 绝不只按进程名杀进程。测试 Helper 用 `.test` 锁文件，天然不会命中生产锁。
+/// 匹配不到当前 bundle；新 Helper 拿不到锁直接非零退出（EX_TEMPFAIL，见 AgentMain）。
+/// 所以这里不按路径，而按「同 uid + 进程名 WaifuXHelper + 打开着同一个 inode 的锁文件」
+/// 三条件识别，绝不只按进程名杀进程。测试 Helper 用 `.test` 锁文件，天然不会命中生产锁。
 extension BackgroundChildProcessCleanup {
     struct HelperProcess: Sendable {
         let child: Child

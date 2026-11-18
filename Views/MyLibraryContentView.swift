@@ -1785,21 +1785,30 @@ struct MyLibraryContentView: View {
         }
     }
 
-    /// 库页回可见时把标脏的另一套补齐。
+    /// 回到库页只补齐当前分类；其余分类保持脏标记，等真正切过去再重建。
     private func rebuildStaleLibraryListsIfNeeded() {
-        if wallpaperItemsStale {
+        switch selectedContentType {
+        case .wallpaper:
+            guard wallpaperItemsStale else { return }
             wallpaperItemsStale = false
             updateWallpaperItems()
-        }
-        if mediaItemsStale {
+        case .video:
+            guard mediaItemsStale else { return }
             mediaItemsStale = false
             updateMediaItems()
+        case .anime:
+            break
         }
     }
 
     private func debouncedUpdateWallpaperItems() {
         updateWallpaperDebounce?.cancel()
         let work = DispatchWorkItem { [self] in
+            // 排队后可能已切换分类，必须在执行时重查，不能刷新旧分类。
+            guard selectedContentType == .wallpaper else {
+                wallpaperItemsStale = true
+                return
+            }
             updateWallpaperItems()
         }
         updateWallpaperDebounce = work
@@ -1809,6 +1818,10 @@ struct MyLibraryContentView: View {
     private func debouncedUpdateMediaItems() {
         updateMediaDebounce?.cancel()
         let work = DispatchWorkItem { [self] in
+            guard selectedContentType == .video else {
+                mediaItemsStale = true
+                return
+            }
             updateMediaItems()
         }
         updateMediaDebounce = work
@@ -2004,8 +2017,11 @@ struct MyLibraryContentView: View {
         wallpaperIDIndexCache = idMap
         gridReloadToken &+= 1
         refreshWallpaperFolderDisplay()
-        libraryCurrentPageIsBuilt = helper.librarySnapshotIsArrived
-            && !viewModel.isLibraryCachePending
+        // 当前页的就绪状态只能由当前分类更新；非当前重建不能撤回或提前放行骨架。
+        if selectedContentType == .wallpaper {
+            libraryCurrentPageIsBuilt = helper.librarySnapshotIsArrived
+                && !viewModel.isLibraryCachePending
+        }
         syncSelectionWithVisibleItems()
         scheduleLibraryCoverBackfillIfNeeded()
     }
@@ -2133,8 +2149,10 @@ struct MyLibraryContentView: View {
         mediaIDIndexCache = idMap
         gridReloadToken &+= 1
         refreshMediaFolderDisplay()
-        libraryCurrentPageIsBuilt = helper.librarySnapshotIsArrived
-            && !mediaViewModel.isLibraryCachePending
+        if selectedContentType == .video {
+            libraryCurrentPageIsBuilt = helper.librarySnapshotIsArrived
+                && !mediaViewModel.isLibraryCachePending
+        }
         syncSelectionWithVisibleItems()
         scheduleLibraryCoverBackfillIfNeeded()
     }

@@ -250,7 +250,12 @@ private final class AgentApplicationDelegate: NSObject, NSApplicationDelegate {
                 ])
                 AppLogger.flushPendingWrites()
             }
-            exit(0)
+            // 必须非零退出（EX_TEMPFAIL）：两份 plist 的 KeepAlive.SuccessfulExit=false
+            // 把 exit(0) 当「成功退出」永不重拉，mach 端口没人监听，UI 只能看到
+            // 「mach service 不可达」，且 runs 递增 + last exit code = 0 成了唯一线索
+            // （issue #128）。非零退出让 launchd 按最小运行间隔重试，UI 侧按
+            // clean-exit-loop 证据识别锁冲突并清掉占锁者（见 BackgroundAgentClient）。
+            exit(75)
         }
         let listener = NSXPCListener(machServiceName: ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_SERVICE"] ?? BackgroundAgentWire.machServiceName)
         listener.delegate = connectionListener

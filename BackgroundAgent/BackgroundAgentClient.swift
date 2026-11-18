@@ -132,6 +132,9 @@ final class BackgroundAgentClient: ObservableObject {
     private var relinkRequested = false
     /// 本会话里常规修复后 launchd 仍拒绝 spawn 的证据摘要；非 nil 时重试只复查一次 launchd。
     private var lastSpawnRejection: String?
+    /// 本会话是否已执行过一轮锁冲突清理（下线两份注册 + 杀占锁 Helper）。
+    /// 清理后仍撞锁说明有东西在持续重拉占锁者，不再无限循环，报错带现场交给用户。
+    private var didAttemptLockConflictRecovery = false
     var onApplicationQuitRequested: (() -> Void)?
     var onHelperStopped: (() -> Void)?
     private var pendingCropCommands: [String: [String: Any]] = [:]
@@ -181,92 +184,115 @@ final class BackgroundAgentClient: ObservableObject {
         WaifuXPreferences.shared.loadLegacyPreferences()
         bootstrapTask = Task {
             defer { if generation == bootstrapGeneration { isBootstrapping = false } }
-            do {
-                try await runBootstrap()
-            } catch {
-                // 三类可自愈的失败：
-                // ① BTM 记录与 launchd 域脱节（job 被 bootout 过，或应用重建后
-                //    BTM 没把 job 重新下发），连接以 NSCocoaErrorDomain 4099 失败；
-                // ② 用户用新包替换旧版本后，launchd 的 KeepAlive 仍持有旧 helper、
-                //    原地升级又失败 —— hello 成功但身份/协议不符。
-                // ③ job 在 launchd 里存在、mach service 端口能连上（所以不是 4099），
-                //    但 bootstrap 阶段 hello/首波 RPC 120s 无响应 —— launchd spawn
-                //    循环失败（EX_CONFIG 类约束拒绝）或 Helper 起来后卡死都是这个
-                //    形态（2026-10-24 本机实测：job spawn failed 24516 次，
-                //    status=1 却只报「后台服务响应超时」，repair 永远不触发）。
-                // ④ 连接被对端立刻拒掉（NSCocoaErrorDomain 4097）：旧 Helper 还活着，
-                //    但它的可执行文件已随旧包被删掉，签名自检失败，于是拒绝每一个新 UI
-                //    （2026-11-01 用户机：Helper runs=1、never exited，UI 每次同秒 4097）。
-                //    hello 都发不出去，③ 的身份比对和原地升级路径根本走不到。
-                // 四者都只能靠注销重注册恢复。
-                let staleHelper = Self.indicatesStaleHelper(error)
-                let unresponsive = Self.indicatesUnresponsiveHelper(error)
-                let rejected = Self.indicatesRejectedConnection(error)
-                let spawnRejected = Self.indicatesSpawnRejection(error)
-                guard staleHelper || unresponsive || rejected || spawnRejected || Self.indicatesMissingLaunchdJob(error) else { throw error }
-                // 本会话已经确认过常规修复救不回来：不再重复注销/注册，直接交给横幅按钮。
-                if spawnRejected, lastSpawnRejection != nil { throw error }
-                // 同一时刻只允许一轮 repair：连点「重试」只 cancel 旧的
-                // bootstrapTask，而 SMAppService 的注销/注册不响应取消，
-                // 两轮交错会把刚注册好的 job 又注销掉（实测一秒内三次 4099）。
-                guard !isRepairingRegistration else {
-                    AppLogger.error(.startup, "Helper repair already in flight, skipping",
-                                    metadata: ["code": (error as NSError).code])
-                    throw CancellationError()
-                }
-                isRepairingRegistration = true
-                defer { isRepairingRegistration = false }
-                AppLogger.error(.startup,
-                                staleHelper
-                                    ? "Helper outdated after replacement, repairing registration"
-                                    : unresponsive
-                                        ? "Helper unresponsive during bootstrap (120s no reply), repairing registration"
-                                        : rejected
-                                            ? "Helper rejected the connection (4097), repairing registration"
-                                            : spawnRejected
-                                                ? "launchd keeps rejecting the Helper spawn (exit 78), repairing registration"
-                                                : "Helper service missing from launchd, repairing registration",
-                                metadata: ["code": (error as NSError).code,
-                                           "detail": error.localizedDescription])
-                try Task.checkCancellation()
-                let mode = currentRegistrationMode()
-                let service = SMAppService.agent(plistName: mode.plistName)
+            // 循环而不是「catch 里再跑一次 runBootstrap」：修复/锁冲突恢复之后的
+            // 那一轮 bootstrap 若再失败，必须重新走分类（受一次性预算约束），
+            // 不能在 catch 体内直接上抛、绕开自愈判定。
+            while true {
                 do {
-                    // 注销之后丢弃 launchd 里缓存的 job：正式包（Developer ID）与
-                    // Xcode 构建（Apple Development）交替运行时，签名类别变了，
-                    // 但只做注销/注册会复用旧启动约束，新 Helper 一启动就被
-                    // SIGKILL（退出码 78，BTM 却一直显示 enabled）。
-                    try await BackgroundAgentRegistration.repairLaunchdRegistration(
-                        service,
-                        bootout: {
-                            await BackgroundAgentRegistration.bootoutCachedJob(label: mode.launchdLabel)
-                            await Self.terminateStaleHelperLockHolders()
-                        }
-                    ) { [weak self] in
-                        guard let self else { return false }
-                        return await self.probeHelperReachable()
-                    }
-                    AppLogger.error(.startup, "Helper registration repaired",
-                                    metadata: ["status": service.status.rawValue])
+                    try await runBootstrap()
+                    return
                 } catch {
-                    AppLogger.error(.startup, "Helper registration repair failed",
-                                    metadata: ["status": service.status.rawValue,
-                                               "error": error.localizedDescription])
-                    if error is CancellationError { throw error }
-                    // 注销/注册之后 launchd 仍 spawn failed + exit 78：这一份注册的 BTM 记录
-                    // 本身坏了（2026-11-05 用户机：子记录指向父记录、父记录不列它），
-                    // 再重试也一样。换成专门的错误，横幅给「修复后台服务」。
-                    if let description = await BackgroundAgentRegistration.launchdJobDescription(label: mode.launchdLabel),
-                       let summary = BackgroundAgentRegistration.spawnRejectionSummary(description) {
-                        lastSpawnRejection = summary
-                        AppLogger.error(.startup, "launchd still rejects the Helper spawn after repair",
-                                        metadata: ["mode": mode.rawValue, "launchd": summary])
-                        throw BackgroundAgentRegistrationError.launchdSpawnRejected(summary)
+                    // 五类可自愈的失败：
+                    // ① BTM 记录与 launchd 域脱节（job 被 bootout 过，或应用重建后
+                    //    BTM 没把 job 重新下发），连接以 NSCocoaErrorDomain 4099 失败；
+                    // ② 用户用新包替换旧版本后，launchd 的 KeepAlive 仍持有旧 helper、
+                    //    原地升级又失败 —— hello 成功但身份/协议不符。
+                    // ③ job 在 launchd 里存在、mach service 端口能连上（所以不是 4099），
+                    //    但 bootstrap 阶段 hello/首波 RPC 120s 无响应 —— launchd spawn
+                    //    循环失败（EX_CONFIG 类约束拒绝）或 Helper 起来后卡死都是这个
+                    //    形态（2026-10-24 本机实测：job spawn failed 24516 次，
+                    //    status=1 却只报「后台服务响应超时」，repair 永远不触发）。
+                    // ④ 连接被对端立刻拒掉（NSCocoaErrorDomain 4097）：旧 Helper 还活着，
+                    //    但它的可执行文件已随旧包被删掉，签名自检失败，于是拒绝每一个新 UI
+                    //    （2026-11-01 用户机：Helper runs=1、never exited，UI 每次同秒 4097）。
+                    //    hello 都发不出去，③ 的身份比对和原地升级路径根本走不到。
+                    // ⑤ 单实例锁被残留 Helper 占用（issue #128）：新 Helper 每次 spawn
+                    //    都立刻退出，mach 端口没人监听；要清占锁者而不是反复重注册。
+                    // ①–④ 靠注销重注册恢复，⑤ 走专门的锁冲突恢复。
+                    let staleHelper = Self.indicatesStaleHelper(error)
+                    let unresponsive = Self.indicatesUnresponsiveHelper(error)
+                    let rejected = Self.indicatesRejectedConnection(error)
+                    let spawnRejected = Self.indicatesSpawnRejection(error)
+                    let lockConflict = Self.indicatesLockConflict(error)
+                    guard staleHelper || unresponsive || rejected || spawnRejected || lockConflict || Self.indicatesMissingLaunchdJob(error) else { throw error }
+                    // 本会话已经确认过常规修复救不回来：不再重复注销/注册，直接交给横幅按钮。
+                    if spawnRejected, lastSpawnRejection != nil { throw error }
+                    // 同一时刻只允许一轮 repair：连点「重试」只 cancel 旧的
+                    // bootstrapTask，而 SMAppService 的注销/注册不响应取消，
+                    // 两轮交错会把刚注册好的 job 又注销掉（实测一秒内三次 4099）。
+                    guard !isRepairingRegistration else {
+                        AppLogger.error(.startup, "Helper repair already in flight, skipping",
+                                        metadata: ["code": (error as NSError).code])
+                        throw CancellationError()
                     }
-                    throw error
+                    isRepairingRegistration = true
+                    defer { isRepairingRegistration = false }
+                    if lockConflict {
+                        guard !didAttemptLockConflictRecovery else {
+                            AppLogger.error(.startup, "Helper instance lock conflict persists after recovery",
+                                            metadata: ["detail": error.localizedDescription])
+                            throw error
+                        }
+                        didAttemptLockConflictRecovery = true
+                        AppLogger.error(.startup, "Helper instance lock conflict, recovering stale lock holder",
+                                        metadata: ["detail": error.localizedDescription])
+                        try Task.checkCancellation()
+                        try await recoverFromLockConflict()
+                        continue
+                    }
+                    AppLogger.error(.startup,
+                                    staleHelper
+                                        ? "Helper outdated after replacement, repairing registration"
+                                        : unresponsive
+                                            ? "Helper unresponsive during bootstrap (120s no reply), repairing registration"
+                                            : rejected
+                                                ? "Helper rejected the connection (4097), repairing registration"
+                                                : spawnRejected
+                                                    ? "launchd keeps rejecting the Helper spawn (exit 78), repairing registration"
+                                                    : "Helper service missing from launchd, repairing registration",
+                                    metadata: ["code": (error as NSError).code,
+                                               "detail": error.localizedDescription])
+                    try Task.checkCancellation()
+                    let mode = currentRegistrationMode()
+                    let service = SMAppService.agent(plistName: mode.plistName)
+                    do {
+                        // 注销之后丢弃 launchd 里缓存的 job：正式包（Developer ID）与
+                        // Xcode 构建（Apple Development）交替运行时，签名类别变了，
+                        // 但只做注销/注册会复用旧启动约束，新 Helper 一启动就被
+                        // SIGKILL（退出码 78，BTM 却一直显示 enabled）。
+                        // 两个 Label 都 bootout：relinked 残留 job 是锁冲突的温床（#128）。
+                        try await BackgroundAgentRegistration.repairLaunchdRegistration(
+                            service,
+                            bootout: {
+                                await BackgroundAgentRegistration.bootoutAllCachedJobs()
+                                await Self.terminateStaleHelperLockHolders()
+                            }
+                        ) { [weak self] in
+                            guard let self else { return false }
+                            return try await self.probeHelperReachable()
+                        }
+                        AppLogger.error(.startup, "Helper registration repaired",
+                                        metadata: ["status": service.status.rawValue])
+                    } catch {
+                        AppLogger.error(.startup, "Helper registration repair failed",
+                                        metadata: ["status": service.status.rawValue,
+                                                   "error": error.localizedDescription])
+                        if error is CancellationError { throw error }
+                        // repair 的 probe 已经认出锁冲突：重新走分类进专门路径，别误判成注册损坏。
+                        if Self.indicatesLockConflict(error) { continue }
+                        // 注销/注册之后 launchd 仍 spawn failed + exit 78：这一份注册的 BTM 记录
+                        // 本身坏了（2026-11-05 用户机：子记录指向父记录、父记录不列它），
+                        // 再重试也一样。换成专门的错误，横幅给「修复后台服务」。
+                        if let description = await BackgroundAgentRegistration.launchdJobDescription(label: mode.launchdLabel),
+                           let summary = BackgroundAgentRegistration.spawnRejectionSummary(description) {
+                            lastSpawnRejection = summary
+                            AppLogger.error(.startup, "launchd still rejects the Helper spawn after repair",
+                                            metadata: ["mode": mode.rawValue, "launchd": summary])
+                            throw BackgroundAgentRegistrationError.launchdSpawnRejected(summary)
+                        }
+                        throw error
+                    }
                 }
-                try Task.checkCancellation()
-                try await runBootstrap()
             }
         }
         let startedTask = bootstrapTask
@@ -371,6 +397,50 @@ final class BackgroundAgentClient: ObservableObject {
         return false
     }
 
+    /// 单实例锁被残留 Helper 占用（见 `BackgroundAgentRegistrationError.helperInstanceLockConflict`）。
+    private static func indicatesLockConflict(_ error: Error) -> Bool {
+        guard let registrationError = error as? BackgroundAgentRegistrationError else { return false }
+        if case .helperInstanceLockConflict = registrationError { return true }
+        return false
+    }
+
+    /// launchd 摘要 + 占锁进程现场。纯拼接、不做本地化：hello 观察器子任务是
+    /// nonisolated，也要用它；空现场的占位文案由 MainActor 调用方补。
+    private nonisolated static func lockConflictDetail(_ summary: String) -> String {
+        let evidence = BackgroundAgentRegistration.failureEvidence()
+        return evidence.isEmpty ? summary : summary + "；" + evidence
+    }
+
+    /// 锁冲突的专门恢复（issue #128）：占锁的 Helper 可能挂在另一份注册名下
+    /// （典型：点过「修复后台服务」后 resetbtm，relinked 的 BTM 记录没了、
+    /// launchd job 还在）。只 bootout 当前 Label 再杀占锁者，残留 job 的
+    /// KeepAlive 会立刻把它拉回来。所以先把两份注册都注销、两个 Label 都
+    /// bootout，确认没有 job 会重拉之后才杀占锁者，最后按当前模式重新注册。
+    private func recoverFromLockConflict() async throws {
+        for mode in [BackgroundAgentRegistrationMode.bundled, .relinked] {
+            let service = SMAppService.agent(plistName: mode.plistName)
+            guard service.status == .enabled || service.status == .requiresApproval else { continue }
+            do {
+                try await service.unregister()
+            } catch {
+                // 注销报错不阻断：下面按真实状态判断，bootout 仍会清 launchd 侧。
+                AppLogger.error(.startup, "Lock conflict recovery: unregister failed",
+                                metadata: ["mode": mode.rawValue, "error": error.localizedDescription])
+            }
+            for _ in 0..<10 {
+                try Task.checkCancellation()
+                if service.status != .enabled { break }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        await BackgroundAgentRegistration.bootoutAllCachedJobs()
+        await Self.terminateStaleHelperLockHolders()
+        let mode = currentRegistrationMode()
+        try BackgroundAgentRegistration.ensureEnabled(SMAppService.agent(plistName: mode.plistName))
+        AppLogger.error(.startup, "Lock conflict recovery finished, re-registering",
+                        metadata: ["mode": mode.rawValue])
+    }
+
     private func currentRegistrationMode() -> BackgroundAgentRegistrationMode {
         BackgroundAgentRegistration.currentMode(relinked: SMAppService.agent(plistName: BackgroundAgentWire.relinkedPlistName))
     }
@@ -405,7 +475,7 @@ final class BackgroundAgentClient: ObservableObject {
             "launchd": lastSpawnRejection ?? "",
         ])
         try await BackgroundAgentRegistration.relinkAgent(from: current, to: replacement, bootout: {
-            await BackgroundAgentRegistration.bootoutCachedJob(label: BackgroundAgentRegistrationMode.bundled.launchdLabel)
+            await BackgroundAgentRegistration.bootoutAllCachedJobs()
             await Self.terminateStaleHelperLockHolders()
         })
         // 注册换了，旧证据不再代表现状；新 Label 能不能起来由下面的 hello 和 launchd 观察判定。
@@ -425,9 +495,17 @@ final class BackgroundAgentClient: ObservableObject {
         // 本会话已确认 launchd 拒绝 spawn：重试只复查一次，不再等 120s hello 和一整轮修复。
         if lastSpawnRejection != nil {
             if let description = await BackgroundAgentRegistration.launchdJobDescription(label: mode.launchdLabel),
-               let summary = BackgroundAgentRegistration.spawnRejectionSummary(description) {
-                lastSpawnRejection = summary
-                throw BackgroundAgentRegistrationError.launchdSpawnRejected(summary)
+               let evidence = BackgroundAgentRegistration.launchdFailureEvidence(description) {
+                switch evidence.kind {
+                case .spawnRejected:
+                    lastSpawnRejection = evidence.summary
+                    throw BackgroundAgentRegistrationError.launchdSpawnRejected(evidence.summary)
+                case .cleanExitLoop:
+                    lastSpawnRejection = nil
+                    var detail = Self.lockConflictDetail(evidence.summary)
+                    if BackgroundAgentRegistration.failureEvidence().isEmpty { detail += "；" + t("未见 WaifuXHelper 进程") }
+                    throw BackgroundAgentRegistrationError.helperInstanceLockConflict(detail)
+                }
             }
             lastSpawnRejection = nil
         }
@@ -452,6 +530,7 @@ final class BackgroundAgentClient: ObservableObject {
         lastError = nil
         canRelinkRegistration = false
         isRelinkingRegistration = false
+        didAttemptLockConflictRecovery = false
         installPreferenceMutationHandler()
     }
 
@@ -757,25 +836,40 @@ final class BackgroundAgentClient: ObservableObject {
     ///
     /// launchd 拉不起 Helper 时（spawn failed + exit 78），消息只会在端口里排队，
     /// 光等 hello 要等满 120s 才超时。这里每 5s 看一次 `launchctl print`，连续两次
-    /// 命中拒绝证据就提前结束，进入 `start()` 的修复路径。Helper 正常时 hello
+    /// 命中失败证据就提前结束，进入 `start()` 的修复路径：exit 78 → 注册修复/换 Label；
+    /// runs>0 且 last exit 0（锁冲突循环，#128）→ 清占锁者。Helper 正常时 hello
     /// 先回来，观察任务随之取消，不改变健康路径。
     private func helloWatchingLaunchd(label: String) async throws -> BackgroundAgentHello {
         try await withThrowingTaskGroup(of: BackgroundAgentHello.self) { group in
             group.addTask { try await self.helloReply() }
             group.addTask {
                 var confirmations = 0
-                var summary = ""
+                var evidence: BackgroundAgentRegistration.LaunchdFailureEvidence?
                 while confirmations < 2 {
                     try await Task.sleep(for: .seconds(5))
                     if let description = await BackgroundAgentRegistration.launchdJobDescription(label: label),
-                       let rejection = BackgroundAgentRegistration.spawnRejectionSummary(description) {
-                        confirmations += 1
-                        summary = rejection
+                       let found = BackgroundAgentRegistration.launchdFailureEvidence(description) {
+                        // 形态翻转（先 exit 78 后 exit 0 等）按最新证据重新计数：
+                        // 两种病的恢复路径不同，定性必须跟最后一次采样一致。
+                        if found.kind == evidence?.kind {
+                            confirmations += 1
+                        } else {
+                            confirmations = 1
+                        }
+                        evidence = found
                     } else {
                         confirmations = 0
+                        evidence = nil
                     }
                 }
-                throw BackgroundAgentRegistrationError.launchdSpawnRejected(summary)
+                guard let evidence else { throw CancellationError() }
+                switch evidence.kind {
+                case .spawnRejected:
+                    throw BackgroundAgentRegistrationError.launchdSpawnRejected(evidence.summary)
+                case .cleanExitLoop:
+                    throw BackgroundAgentRegistrationError.helperInstanceLockConflict(
+                        Self.lockConflictDetail(evidence.summary))
+                }
             }
             defer { group.cancelAll() }
             guard let first = try await group.next() else { throw CancellationError() }
@@ -789,12 +883,24 @@ final class BackgroundAgentClient: ObservableObject {
     /// 或端口还没就绪时它照样是 enabled，所以必须真发一次 `hello` 才算验证
     /// （2026-10-19 用户机日志：旧实现只在 `.enabled` 上收尾，repair 后立刻又 4099）。
     /// 这里新建连接：repair 期间旧连接已被 invalidate。
-    private func probeHelperReachable() async -> Bool {
+    ///
+    /// 失败不再一律吞成 false：job 反复以退出码 0 秒退（单实例锁被占，#128）时
+    /// 抛出 `helperInstanceLockConflict`，让上层走清占锁者的专门路径，而不是
+    /// 空转 9 次探针后报一句「mach service 不可达」。
+    private func probeHelperReachable() async throws -> Bool {
         connect()
         do {
             let hello = try await helloReply(timeoutSeconds: 2)
             return hello.bundleIdentifier == BackgroundAgentWire.bundleIdentifier
         } catch {
+            if let description = await BackgroundAgentRegistration.launchdJobDescription(
+                label: currentRegistrationMode().launchdLabel),
+               let evidence = BackgroundAgentRegistration.launchdFailureEvidence(description),
+               evidence.kind == .cleanExitLoop {
+                var detail = Self.lockConflictDetail(evidence.summary)
+                if BackgroundAgentRegistration.failureEvidence().isEmpty { detail += "；" + t("未见 WaifuXHelper 进程") }
+                throw BackgroundAgentRegistrationError.helperInstanceLockConflict(detail)
+            }
             return false
         }
     }
