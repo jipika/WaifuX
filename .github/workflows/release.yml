@@ -244,6 +244,9 @@ jobs:
       - name: Build & Package
         env:
           WAIFUX_SKIP_DMG: "1"
+          # 弹弹play开放平台凭证（可选）：配置后打包注入 Info.plist，弹幕开箱可用；未配置时用户可在设置页自填。
+          WAIFUX_DANDAN_APPID: ${{ secrets.WAIFUX_DANDAN_APPID }}
+          WAIFUX_DANDAN_APPSECRET: ${{ secrets.WAIFUX_DANDAN_APPSECRET }}
         run: |
           chmod +x ./scripts/package.sh
           # 每个 job 只构建一个架构；三包由 matrix 并行，DMG 创建与公证都在本 job 内完成。

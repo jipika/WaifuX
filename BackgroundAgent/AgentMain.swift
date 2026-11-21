@@ -158,6 +158,14 @@ private final class AgentConnectionListener: NSObject, NSXPCListenerDelegate {
         connection.exportedObject = AgentEndpoint(connection: connection)
         let identity = ObjectIdentifier(connection)
         Task { @MainActor in UIClientExitMonitor.shared.connectionAccepted(identity) }
+        if !BackgroundRuntimeRole.isIsolatedTest {
+            // 连接被接受即留痕：与「Helper process started」对照，能区分
+            // 「UI 命令根本没到」（空闲自退循环）与「到了但撞锁」（秒退循环）。
+            AppLogger.info(.startup, "Helper accepted UI connection", metadata: [
+                "clientPID": connection.processIdentifier,
+                "clientPath": BackgroundChildProcessCleanup.executablePath(connection.processIdentifier),
+            ])
+        }
         connection.invalidationHandler = { @Sendable in
             Task { @MainActor in
                 BackgroundAgentRuntime.shared.unsubscribe(identity)
@@ -234,17 +242,33 @@ private final class AgentApplicationDelegate: NSObject, NSApplicationDelegate {
         let suffix = BackgroundRuntimeRole.isIsolatedTest ? ".test" : ""
         let lockPath = directory.appendingPathComponent("background-helper\(suffix).lock").path
         instanceLock = open(lockPath, O_CREAT | O_RDWR, 0o600)
-        let openErrno = instanceLock < 0 ? errno : 0
-        let locked = instanceLock >= 0 && flock(instanceLock, LOCK_EX | LOCK_NB) == 0
-        let lockErrno = instanceLock >= 0 && !locked ? errno : 0
+        if instanceLock < 0 {
+            // 锁文件都建不出来 = 数据目录不可达/不可写（issue #128 真因：目录被做成
+            // 指向外置盘的符号链接，卷名改名后断链，open 返回 ENOENT）。这不是锁冲突，
+            // 注销重注册救不回来。日志文件也在同一目录、同样写不进，os_log 是唯一留痕。
+            let openErrno = errno
+            if !BackgroundRuntimeRole.isIsolatedTest {
+                AppLogger.error(.startup, "Helper exiting: data directory unreachable, cannot create instance lock", metadata: [
+                    "pid": getpid(),
+                    "directory": directory.path,
+                    "lockPath": lockPath,
+                    "openErrno": openErrno,
+                    "error": String(cString: strerror(openErrno)),
+                ])
+                AppLogger.flushPendingWrites()
+            }
+            // EX_TEMPFAIL：环境修复（挂回磁盘/修符号链接）后 launchd 重试即可恢复。
+            exit(75)
+        }
+        let locked = flock(instanceLock, LOCK_EX | LOCK_NB) == 0
         guard locked else {
-            // 拿不到锁 = 另一个 Helper 在跑。以前静默 exit(0)，导出日志里什么都看不到。
+            // 锁文件在、但被别的 Helper 占着 = 真正的单实例冲突。
+            let lockErrno = errno
             if !BackgroundRuntimeRole.isIsolatedTest {
                 let holders = BackgroundChildProcessCleanup.helperProcesses(lockPath: lockPath).filter(\.holdsLock)
-                AppLogger.error(.startup, "Helper exiting: instance lock unavailable", metadata: [
+                AppLogger.error(.startup, "Helper exiting: instance lock held by another Helper", metadata: [
                     "pid": getpid(),
                     "path": BackgroundChildProcessCleanup.executablePath(getpid()),
-                    "openErrno": openErrno,
                     "lockErrno": lockErrno,
                     "holders": holders.isEmpty ? "unknown" : holders.map { "\($0.child.pid)@\($0.path)" }.joined(separator: ";"),
                 ])
@@ -252,9 +276,8 @@ private final class AgentApplicationDelegate: NSObject, NSApplicationDelegate {
             }
             // 必须非零退出（EX_TEMPFAIL）：两份 plist 的 KeepAlive.SuccessfulExit=false
             // 把 exit(0) 当「成功退出」永不重拉，mach 端口没人监听，UI 只能看到
-            // 「mach service 不可达」，且 runs 递增 + last exit code = 0 成了唯一线索
-            // （issue #128）。非零退出让 launchd 按最小运行间隔重试，UI 侧按
-            // clean-exit-loop 证据识别锁冲突并清掉占锁者（见 BackgroundAgentClient）。
+            // 「mach service 不可达」（issue #128）。非零退出让 launchd 按最小运行间隔
+            // 重试，UI 侧按「反复自行退出 + 另一 Helper 持锁」证据识别并清掉占锁者。
             exit(75)
         }
         let listener = NSXPCListener(machServiceName: ProcessInfo.processInfo.environment["WAIFUX_HELPER_TEST_SERVICE"] ?? BackgroundAgentWire.machServiceName)

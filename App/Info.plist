@@ -69,5 +69,9 @@
 	</dict>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>WaifuX 需要捕获系统输出音频，为动态壁纸与桌面挂件提供实时音频可视化。</string>
+	<key>WaifuXDandanAppID</key>
+	<string>$(WAIFUX_DANDAN_APPID)</string>
+	<key>WaifuXDandanAppSecret</key>
+	<string>$(WAIFUX_DANDAN_APPSECRET)</string>
 </dict>
 </plist>

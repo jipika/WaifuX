@@ -1,103 +1,91 @@
 import Foundation
 
-/// Kazumi 规则加载器
-/// 从 Kazumi 的规则仓库加载动漫源规则
+/// Fetches and converts Kazumi rules without confusing the API capability level with selector syntax.
 actor KazumiRuleLoader {
     static let shared = KazumiRuleLoader()
-    
-    // Kazumi 规则仓库地址
-    private let ruleRepositoryURL = "https://raw.githubusercontent.com/Predidit/KazumiRules/main/"
-    private let indexURL = "https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json"
-    
-    // 缓存
+    static let repositoryURL = URL(string: "https://raw.githubusercontent.com/Predidit/KazumiRules/main/")!
+    private let session: URLSession
+    private let repository: URL
     private var cachedRules: [String: AnimeRule] = [:]
-    private var cachedIndex: [KazumiRuleIndex] = []
-    
-    /// Kazumi 规则索引（字段尽量可选，避免官方 index 微调导致整表解码失败）
-    struct KazumiRuleIndex: Codable {
+    private var cacheGeneration = 0
+    private var ruleGenerations: [String: Int] = [:]
+
+    init(session: URLSession = .shared, repository: URL = KazumiRuleLoader.repositoryURL) {
+        self.session = session
+        self.repository = repository
+    }
+    struct KazumiRuleIndex: Codable, Sendable {
         let name: String
         let version: String?
         let useNativePlayer: Bool?
         let antiCrawlerEnabled: Bool?
         let lastUpdate: Int64?
-        /// 与 Kazumi 索引对齐：弃用源不再下载/展示
         let deprecated: Bool?
+        var id: String { AnimeRule.normalizedID(name) }
     }
-    
-    /// 清空内存缓存，避免全量同步后仍使用旧的已解析规则
     func clearCache() {
+        cacheGeneration += 1
         cachedRules.removeAll()
-        cachedIndex.removeAll()
+        ruleGenerations.removeAll()
     }
-
-    /// 获取规则索引列表
-    func fetchRuleIndex() async throws -> [KazumiRuleIndex] {
-        guard let url = URL(string: indexURL) else {
-            throw URLError(.badURL)
+    private func download(_ url: URL) async throws -> Data {
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw AnimeRuleCompatibilityError(reason: "Rule download failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         }
-        
-        let (data, _) = try await URLSession.shared.data(from: url)
-        let index = try JSONDecoder().decode([KazumiRuleIndex].self, from: data)
-        cachedIndex = index
+        return data
+    }
+    func fetchRuleIndex() async throws -> [KazumiRuleIndex] {
+        let index = try JSONDecoder().decode([KazumiRuleIndex].self, from: await download(repository.appendingPathComponent("index.json")))
+        let active = index.filter { $0.deprecated != true }
+        guard !active.isEmpty, Set(active.map(\.id)).count == active.count,
+              active.allSatisfy({ !$0.name.isEmpty && $0.id.range(of: "^[a-z0-9_-]+$", options: .regularExpression) != nil }) else {
+            throw AnimeRuleCompatibilityError(reason: "Invalid or empty Kazumi index")
+        }
         return index
     }
-    
-    /// 加载指定规则
-    func loadRule(name: String) async throws -> AnimeRule {
-        // 检查缓存
-        if let cached = cachedRules[name] {
-            return cached
-        }
-        
-        // 直接使用 index 中的 name，不做大小写转换（GitHub raw 文件名大小写敏感）
-        let ruleURL = "\(ruleRepositoryURL)\(name).json"
-        guard let url = URL(string: ruleURL) else {
-            throw URLError(.badURL)
-        }
-        
-        print("[KazumiRuleLoader] 加载规则: \(name) from \(ruleURL)")
-        let (data, _) = try await URLSession.shared.data(from: url)
-        
-        // 解析 Kazumi 规则格式
-        let kazumiRule = try JSONDecoder().decode(KazumiRule.self, from: data)
-        
-        // 转换为我们的 AnimeRule 格式
-        let animeRule = convertKazumiRuleToAnimeRule(kazumiRule)
-        
-        // 缓存
-        cachedRules[name] = animeRule
-        
-        return animeRule
+    func loadRule(name: String, forceRefresh: Bool = false) async throws -> AnimeRule {
+        let id = AnimeRule.normalizedID(name)
+        if !forceRefresh, let cached = cachedRules[id] { return cached }
+        guard id.range(of: "^[a-z0-9_-]+$", options: .regularExpression) != nil else { throw URLError(.badURL) }
+        let generation = cacheGeneration
+        ruleGenerations[id, default: 0] += 1
+        let requestGeneration = ruleGenerations[id]!
+        let data = try await download(repository.appendingPathComponent(name + ".json"))
+        let rule = try Self.decodeRule(data)
+        guard rule.id == id else { throw AnimeRuleCompatibilityError(reason: "Rule name does not match requested entry: \(name)") }
+        // An older request must not replace the cache after invalidation or a newer forced fetch.
+        if generation == cacheGeneration && requestGeneration == ruleGenerations[id] { cachedRules[id] = rule }
+        return rule
     }
-    
-    /// 加载所有可用规则
     func loadAllRules() async throws -> [AnimeRule] {
-        let index = try await fetchRuleIndex()
-        var rules: [AnimeRule] = []
-        
-        for ruleIndex in index {
-            if ruleIndex.deprecated == true {
-                print("[KazumiRuleLoader] 跳过弃用规则: \(ruleIndex.name)")
-                continue
-            }
-            do {
-                let rule = try await loadRule(name: ruleIndex.name)
-                rules.append(rule)
-                print("[KazumiRuleLoader] ✓ 成功加载: \(ruleIndex.name) v\(ruleIndex.version ?? "?")")
-            } catch {
-                print("[KazumiRuleLoader] ✗ 加载失败: \(ruleIndex.name) - \(error)")
-            }
+        var result: [AnimeRule] = []
+        for item in try await fetchRuleIndex() where item.deprecated != true {
+            let rule = try await loadRule(name: item.name, forceRefresh: true)
+            guard item.version == nil || item.version == rule.version else { throw AnimeRuleCompatibilityError(reason: "Index/version mismatch: \(item.name)") }
+            result.append(rule)
         }
-        
-        return rules
+        return result
     }
-    
-    /// Kazumi 规则格式
-    struct KazumiRule: Codable {
+    /// Supports both already-converted local caches and upstream Kazumi JSON.
+    nonisolated static func decodeRule(_ data: Data) throws -> AnimeRule {
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let rule: AnimeRule
+        if object?["id"] != nil {
+            rule = try JSONDecoder().decode(AnimeRule.self, from: data)
+        } else {
+            rule = try convert(JSONDecoder().decode(KazumiRule.self, from: data))
+        }
+        try AnimeAPIRuleEngine.validateRule(rule)
+        return rule
+    }
+    struct KazumiRule: Decodable {
         let name: String
         let type: String?
         let version: String?
-        let api: String?  // JSON 中是字符串，如 "1", "2"
+        let api: String?
         let baseURL: String?
         let searchURL: String?
         let searchList: String?
@@ -107,141 +95,29 @@ actor KazumiRuleLoader {
         let chapterResult: String?
         let chapterName: String?
         let useWebview: Bool?
-        let useNativePlayer: Bool?
         let multiSource: Bool?
-        let muliSources: Bool?  // 处理拼写错误：有些规则写的是 muliSources
+        let muliSources: Bool?
         let userAgent: String?
         let referer: String?
         let headers: [String: String]?
         let antiCrawler: Bool?
-        let antiCrawlerConfig: KazumiAntiCrawlerConfig?
-        let adBlocker: Bool?
-
-        enum CodingKeys: String, CodingKey {
-            case name, type, version, api, baseURL, searchURL
-            case searchList, searchName, searchResult
-            case chapterRoads, chapterResult, chapterName
-            case useWebview, useNativePlayer, multiSource, muliSources
-            case userAgent, referer, headers, antiCrawler, antiCrawlerConfig, adBlocker
-        }
-
-        /// 获取多源标志（兼容 muliSources 拼写错误）
-        var hasMultiSources: Bool {
-            multiSource ?? muliSources ?? false
-        }
-        
-        /// Kazumi 反爬虫配置格式
-        struct KazumiAntiCrawlerConfig: Codable {
-            let enabled: Bool?
-            let captchaType: Int?
-            let captchaImage: String?
-            let captchaInput: String?
-            let captchaButton: String?
-        }
+        let antiCrawlerConfig: AntiCrawlerConfig?
+        let searchMode: AnimeRuleMode?
+        let chapterMode: AnimeRuleMode?
+        let searchApiConfig: AnimeAPISearch?
+        let chapterApiConfig: AnimeAPIChapter?
     }
-    
-    /// 将 Kazumi 规则转换为我们的 AnimeRule 格式
-    private func convertKazumiRuleToAnimeRule(_ kazumiRule: KazumiRule) -> AnimeRule {
-        // 构建搜索 XPath 配置
-        let xpathSearch = AnimeSearchXPath(
-            url: kazumiRule.searchURL?.replacingOccurrences(of: "@keyword", with: "{keyword}") ?? "",
-            list: kazumiRule.searchList ?? "",
-            title: kazumiRule.searchName ?? "",
-            cover: nil,  // Kazumi 规则中没有单独的封面选择器
-            detail: kazumiRule.searchResult ?? "",
-            id: nil
-        )
-        
-        // 构建详情 XPath 配置
-        let xpathDetail = AnimeDetailXPath(
-            title: nil,
-            cover: nil,
-            description: nil,
-            episodes: kazumiRule.chapterRoads,
-            episodeName: kazumiRule.chapterName,
-            episodeLink: nil,
-            episodeThumb: nil,
-            fullImage: nil,
-            resolution: nil,
-            fileSize: nil
-        )
-        
-        // 构建列表 XPath 配置
-        let xpathList = AnimeListXPath(
-            url: "",
-            list: kazumiRule.chapterResult ?? "",
-            title: "",
-            cover: "",
-            detail: "",
-            nextPage: nil
-        )
-        
+    private nonisolated static func convert(_ input: KazumiRule) throws -> AnimeRule {
         let xpath = AnimeXPathRules(
-            search: xpathSearch,
-            detail: xpathDetail,
-            list: xpathList
-        )
-        
-        // 构建反爬虫配置（对齐 Kazumi）
-        let antiCrawlerConfig: AntiCrawlerConfig
-        if let kazumiConfig = kazumiRule.antiCrawlerConfig {
-            let captchaType: CaptchaType
-            switch kazumiConfig.captchaType {
-            case 1:
-                captchaType = .imageCaptcha
-            case 2:
-                captchaType = .autoClickButton
-            default:
-                captchaType = .imageCaptcha
-            }
-            antiCrawlerConfig = AntiCrawlerConfig(
-                enabled: kazumiConfig.enabled ?? kazumiRule.antiCrawler ?? false,
-                captchaType: captchaType,
-                captchaImage: kazumiConfig.captchaImage ?? "",
-                captchaInput: kazumiConfig.captchaInput ?? "",
-                captchaButton: kazumiConfig.captchaButton ?? ""
-            )
-        } else {
-            // 兼容旧版规则：只有 antiCrawler 布尔字段
-            antiCrawlerConfig = AntiCrawlerConfig(
-                enabled: kazumiRule.antiCrawler ?? false,
-                captchaType: .imageCaptcha,
-                captchaImage: "",
-                captchaInput: "",
-                captchaButton: ""
-            )
-        }
-
-        // 构建 AnimeRule
-        return AnimeRule(
-            id: kazumiRule.name.lowercased(),
-            api: kazumiRule.api ?? "2",
-            type: kazumiRule.type ?? "anime",
-            name: kazumiRule.name,
-            version: kazumiRule.version ?? "1.0.0",
-            deprecated: false,
-            baseURL: kazumiRule.baseURL ?? "",
-            headers: kazumiRule.headers,
-            userAgent: kazumiRule.userAgent,
-            referer: kazumiRule.referer,
-            timeout: 30,
-            searchURL: kazumiRule.searchURL?.replacingOccurrences(of: "@keyword", with: "{keyword}") ?? "",
-            searchList: nil,  // 使用 XPath 格式
-            searchName: nil,
-            searchCover: nil,
-            searchDetail: nil,
-            searchId: nil,
-            detailTitle: nil,
-            detailCover: nil,
-            detailDesc: nil,
-            episodeList: nil,
-            episodeName: nil,
-            episodeLink: nil,
-            episodeThumb: nil,
-            useWebview: kazumiRule.useWebview ?? false,
-            multiSources: kazumiRule.hasMultiSources,
-            xpath: xpath,
-            antiCrawlerConfig: antiCrawlerConfig
-        )
+            search: AnimeSearchXPath(url: input.searchURL ?? "", list: input.searchList ?? "", title: input.searchName ?? "", cover: nil, detail: input.searchResult ?? "", id: nil),
+            detail: AnimeDetailXPath(title: nil, cover: nil, description: nil, episodes: input.chapterRoads, episodeName: input.chapterName, episodeLink: nil, episodeThumb: nil, fullImage: nil, resolution: nil, fileSize: nil),
+            list: AnimeListXPath(url: "", list: input.chapterResult ?? "", title: "", cover: "", detail: "", nextPage: nil))
+        return AnimeRule(id: input.name, api: input.api ?? "1", type: input.type ?? "anime", name: input.name,
+                         version: input.version ?? "1.0", baseURL: input.baseURL ?? "", headers: input.headers,
+                         userAgent: input.userAgent, referer: input.referer, searchURL: input.searchURL ?? "",
+                         useWebview: input.useWebview, multiSources: input.multiSource ?? input.muliSources ?? false,
+                         xpath: xpath, antiCrawlerConfig: input.antiCrawlerConfig ?? AntiCrawlerConfig(enabled: input.antiCrawler ?? false),
+                         searchMode: input.searchMode ?? .xpath, chapterMode: input.chapterMode ?? .xpath,
+                         searchApiConfig: input.searchApiConfig, chapterApiConfig: input.chapterApiConfig)
     }
 }

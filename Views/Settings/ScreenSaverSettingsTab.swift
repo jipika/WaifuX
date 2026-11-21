@@ -2,8 +2,7 @@ import SwiftUI
 
 /// 「设置 → 通用」里的屏保区块（嵌入 GeneralSettingsTab，不再有独立标签）。
 ///
-/// 行为与动态锁屏一致：安装组件后屏保**自动跟随当前桌面壁纸**——
-/// 更换壁纸（含 Scene / Web 离线烘焙完成）后自动更新，不单独选壁纸。
+/// 默认跟随桌面；关闭跟随后可在壁纸详情的「更多」菜单中单独选择。
 /// macOS 仍要求在「系统设置 → 墙纸 → 屏幕保护程序」中手动选中 WaifuX 一次，
 /// 这是系统限制。
 ///
@@ -79,7 +78,7 @@ struct ScreenSaverSettingsTab: View {
         }
     }
 
-    // MARK: - 跟随状态
+    // MARK: - 屏保壁纸
 
     private var wallpaperSection: some View {
         MacSettingsSection(header: t("screensaver.wallpaper")) {
@@ -91,24 +90,26 @@ struct ScreenSaverSettingsTab: View {
             MacSettingsRow(
                 title: t("screensaver.followTitle"),
                 subtitle: t("screensaver.followSubtitle"),
-                showDivider: false
+                showDivider: service.followsDesktopWallpaper
             ) {
-                Button(t("screensaver.syncNow")) {
-                    isWorking = true
-                    Task {
-                        defer { isWorking = false }
-                        do {
-                            try await service.syncNow()
-                            service.refreshConfiguredState()
-                        } catch {
-                            errorMessage = error.localizedDescription
-                        }
-                    }
-                }
+                MacToggle(isOn: Binding(
+                    get: { service.followsDesktopWallpaper },
+                    set: { enabled in perform { try await service.setFollowsDesktopWallpaper(enabled) } }
+                ))
+                .accessibilityLabel(t("screensaver.followTitle"))
                 .disabled(isWorking)
             }
 
-            Text(t("screensaver.followFooter"))
+            if service.followsDesktopWallpaper {
+                MacSettingsRow(title: t("screensaver.syncNow"), showDivider: false) {
+                    Button(t("screensaver.syncNow")) {
+                        perform { try await service.syncNow() }
+                    }
+                    .disabled(isWorking)
+                }
+            }
+
+            Text(t(service.followsDesktopWallpaper ? "screensaver.followFooter" : "screensaver.manualFooter"))
                 .font(.system(size: 11.5))
                 .foregroundStyle(Color.white.opacity(0.4))
                 .fixedSize(horizontal: false, vertical: true)

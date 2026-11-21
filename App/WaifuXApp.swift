@@ -695,6 +695,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         AnimeDownloadStore.shared.restoreSavedData()
         AnimeProgressStore.shared.restoreSavedData()
         PlaybackProgressCache.shared.restoreSavedData()
+        AnimeDownloadEngine.shared.restoreSavedTasks()
+        AnimeDownloadEngine.shared.onNeedsVerification = { rule, episode in
+            AnimeWindowManager.shared.presentDownloadVerification(rule: rule, episode: episode)
+        }
+        AnimeDownloadEngine.shared.onDownloadCompleted = { record in
+            await AnimeDanmakuCache.shared.cacheAfterDownload(
+                animeId: record.animeId, title: record.animeTitle, episodeNumber: record.episodeNumber
+            )
+        }
+        Task(priority: .utility) {
+            await AnimeRuleStore.shared.syncOnLaunchInBackground()
+        }
         DownloadTaskService.shared.restoreSavedTasks()
         WallpaperSourceManager.shared.restoreState()
         WorkshopSourceManager.shared.refreshStoredSteamIdentity()
@@ -930,16 +942,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         restoreMainWindowDataIfNeeded()
 
         if window == nil {
-            let contentView = ContentView(
-                wallpaperViewModel: wallpaperViewModel,
-                mediaViewModel: mediaViewModel,
-                animeViewModel: animeViewModel
-            )
-                .frame(
-                    minWidth: Self.minimumWindowSize.width,
-                    minHeight: Self.minimumWindowSize.height
-                )
-
             // ⚠️ 使用 defer: false 立即显示窗口
             window = NSWindow(
                 contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
@@ -957,7 +959,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             if #available(macOS 15.0, *) {
                 window?.titlebarSeparatorStyle = .none
             }
-            window?.minSize = Self.minimumWindowSize
             window?.collectionBehavior = .fullScreenPrimary
             if let window {
                 WindowSpaceCoordinator.prepare(window)
@@ -968,30 +969,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             window?.standardWindowButton(.miniaturizeButton)?.isHidden = true
             window?.standardWindowButton(.zoomButton)?.isHidden = true
 
-            // ⚠️ 先设置 contentView，再恢复保存的窗口尺寸
-            let hostingView = EdgeToEdgeHostingView(rootView: contentView.defaultAppStorage(WaifuXPreferences.shared).attachingBackgroundAgentBanner())
-            configureOpaqueHostingView(hostingView)
-            window?.contentView = hostingView
-
-            // 恢复保存的窗口尺寸
-            window?.setFrameAutosaveName(WindowAutosaveName.mainWindow)
-            if !hasSavedWindowFrame() { window?.center() }
-
-            window?.delegate = self
-        } else if window?.contentView == nil {
-            // 视图树之前已被释放，重新挂载
-            let contentView = ContentView(
-                wallpaperViewModel: wallpaperViewModel,
-                mediaViewModel: mediaViewModel,
-                animeViewModel: animeViewModel
-            )
-                .frame(
-                    minWidth: Self.minimumWindowSize.width,
-                    minHeight: Self.minimumWindowSize.height
-                )
-            let hostingView = EdgeToEdgeHostingView(rootView: contentView.defaultAppStorage(WaifuXPreferences.shared).attachingBackgroundAgentBanner())
-            configureOpaqueHostingView(hostingView)
-            window?.contentView = hostingView
+            if let window {
+                // 先挂载内容，再恢复保存的窗口尺寸。
+                installMainWindowContent(in: window)
+                window.setFrameAutosaveName(WindowAutosaveName.mainWindow)
+                if !hasSavedWindowFrame() { window.center() }
+                window.delegate = self
+            }
+        } else if let window, window.contentView == nil {
+            // 视图树之前已被释放，重新挂载。
+            installMainWindowContent(in: window)
         }
 
         // 确保窗口显示在最前面
@@ -1140,10 +1127,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         WallpaperEngineXBridge.shared.isControllingExternalEngine
     }
 
-    private func configureOpaqueHostingView<Content: View>(_ hostingView: EdgeToEdgeHostingView<Content>) {
+    private func installMainWindowContent(in window: NSWindow) {
+        let contentView = ContentView(
+            wallpaperViewModel: wallpaperViewModel,
+            mediaViewModel: mediaViewModel,
+            animeViewModel: animeViewModel
+        )
+        .defaultAppStorage(WaifuXPreferences.shared)
+        .attachingBackgroundAgentBanner()
+        let hostingView = EdgeToEdgeHostingView(rootView: contentView)
+        // #130：不把 NSHostingView 直接设为 contentView，避免窗口约束更新时
+        // 反复测量 SwiftUI 内容。尺寸只从窗口传给容器和宿主，不反向推算。
+        let container = NSView()
+        hostingView.sizingOptions = []
+        hostingView.frame = container.bounds
+        hostingView.autoresizingMask = [.width, .height]
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor(Color(hex: "0D0D0D")).cgColor
         hostingView.layer?.isOpaque = true
+        container.addSubview(hostingView)
+        window.contentView = container
+        window.contentMinSize = Self.minimumWindowSize
     }
 
     func quitApplication() {
@@ -1296,6 +1300,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
                 print("[WaifuXApp] Wallpaper extension still running — defer registration")
                 return
             }
+
+            if WallpaperExtensionKeeper.hasUsableElectedExtension(for: extensionURL) {
+                print("[WaifuXApp] Usable wallpaper extension already elected — skip repair")
+                return
+            }
+            guard !WallpaperExtensionKeeper.isExtensionProcessRunning() else { return }
 
             // —— 优先注册当前 bundle ——
             self.registerBundleWithLaunchServices(appURL)

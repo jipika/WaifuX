@@ -113,7 +113,9 @@ class AnimeProgressStore: ObservableObject {
         currentTime: Double,
         totalDuration: Double
     ) {
-        let progress = totalDuration > 0 ? currentTime / totalDuration : 0
+        guard currentTime.isFinite, totalDuration.isFinite, currentTime >= 0, totalDuration >= 0,
+              currentTime > 0 || totalDuration > 0 else { return }
+        let progress = totalDuration > 0 ? min(1, currentTime / totalDuration) : 0
         let isCompleted = progress >= 0.9
         
         let key = "\(animeId)_\(episodeId)"

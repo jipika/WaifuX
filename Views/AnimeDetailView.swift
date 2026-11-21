@@ -346,8 +346,8 @@ struct AnimeDetailView: View {
 
 
 
-// MARK: - 别名搜索弹窗
-private struct AliasSearchSheet: View {
+// MARK: - 别名搜索弹窗（详情页与播放器窗口共用）
+struct AliasSearchSheet: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     @Environment(\.dismiss) private var dismiss
 

@@ -75,6 +75,7 @@ struct WallpaperDetailSheet: View {
     /// 本次复制动作的 toast 文案（复制链接 / 复制图片共用同一 toast 位）
     @State private var copyToastMessage = ""
     @State private var showDSHBackgroundToast = false
+    @State private var showScreenSaverToast = false
     @State private var showMoreOptionsPopover = false
 
     // MARK: - 作者壁纸弹窗相关
@@ -290,8 +291,8 @@ struct WallpaperDetailSheet: View {
                         .padding(.bottom, 48)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showCopyLinkToast)
-                } else if showDSHBackgroundToast {
-                    Text(t("dshHarness.applied"))
+                } else if showScreenSaverToast || showDSHBackgroundToast {
+                    Text(t(showScreenSaverToast ? "screensaver.applied" : "dshHarness.applied"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 20)
@@ -303,7 +304,7 @@ struct WallpaperDetailSheet: View {
                         )
                         .padding(.bottom, 48)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showDSHBackgroundToast)
+                        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showDSHBackgroundToast || showScreenSaverToast)
                 }
             }
         }
@@ -856,6 +857,21 @@ struct WallpaperDetailSheet: View {
     @ViewBuilder
     private var morePopoverMenuContent: some View {
         VStack(spacing: 0) {
+            Button {
+                showMoreOptionsPopover = false
+                setAsScreenSaver()
+            } label: {
+                HStack {
+                    Image(systemName: "display")
+                    Text(t("screensaver.setWallpaper"))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .disabled(isSettingWallpaper || isDownloading)
+
             if isAlreadyDownloaded {
                 Button {
                     // 不关闭菜单，保持锚点有效
@@ -1506,6 +1522,30 @@ struct WallpaperDetailSheet: View {
                     metadata: ["id": wallpaperID, "error": error.localizedDescription,
                      "耗时(s)": String(format: "%.2f", Date().timeIntervalSince(start))])
                 print("Download error: \(error)")
+            }
+        }
+    }
+
+    private func setAsScreenSaver() {
+        guard !isSettingWallpaper, !isDownloading else { return }
+        let selected = wallpaper
+        isSettingWallpaper = true
+        Task { @MainActor in
+            defer { isSettingWallpaper = false }
+            do {
+                let url = try await viewModel.localWallpaperFileURLForApplication(selected)
+                let title = selected.title ?? url.deletingPathExtension().lastPathComponent
+                try await ScreenSaverService.shared.setWallpaper(itemID: selected.id, title: title, localURL: url)
+                guard wallpaper.id == selected.id else { return }
+                showScreenSaverToast = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2.2))
+                    showScreenSaverToast = false
+                }
+            } catch {
+                guard wallpaper.id == selected.id else { return }
+                errorMessage = error.localizedDescription
+                showError = true
             }
         }
     }

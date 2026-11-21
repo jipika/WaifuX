@@ -113,6 +113,8 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             var result: WallpaperSourceReadiness?
             var continuation: CheckedContinuation<WallpaperSourceReadiness, Never>?
             var missingContext: MissingContext?
+            var readyPeerPID: Int32?
+            var readyPeerAt: TimeInterval?
         }
         struct MissingContext: Sendable {
             let displayID: UInt32
@@ -179,6 +181,26 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             }
             lock.unlock()
             continuation?.resume(returning: result)
+        }
+
+        func noteReadyPeer(displayID: UInt32, requestID: String, pid: Int32, success: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            guard var entry = entries[displayID], entry.requestID == requestID else { return }
+            if success {
+                entry.readyPeerPID = pid
+                entry.readyPeerAt = Date().timeIntervalSince1970
+            } else if entry.readyPeerPID == pid {
+                entry.readyPeerPID = nil
+                entry.readyPeerAt = nil
+            }
+            entries[displayID] = entry
+        }
+
+        func hasFreshReadyPeer(displayID: UInt32, requestID: String, pid: Int32, after: TimeInterval) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard let entry = entries[displayID], entry.requestID == requestID,
+                  entry.readyPeerPID == pid, let time = entry.readyPeerAt else { return false }
+            return time >= after
         }
 
         /// Only an explicit missing_context receipt from the real socket peer creates
@@ -283,6 +305,52 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             let status = sourceReady.status(displayID: displayID, requestID: requestID)
             guard status.current, !status.ready, !status.failed,
                   let command = latestSourceCommands.withLock({ $0[displayID] }),
+                  command.requestID == requestID else { return false }
+            commands.removeAll { $0.displayID == displayID && ($0.action == "switch_video" || $0.action == "switch_image") }
+            commands.append(command)
+            return true
+        }
+        if replayed { notifyCommandsChanged() }
+        return replayed
+    }
+
+    /// Adopt an already-published per-display cache only while there is no newer IPC source.
+    func enqueueCachedSourceForRecovery(displayID: UInt32, url: URL, video: Bool) -> String? {
+        guard isRunning else { return nil }
+        let request = cmdLock.withLock { commands -> String? in
+            guard latestSourceCommands.withLock({ $0[displayID] }) == nil else { return nil }
+            let id = UUID().uuidString
+            let videoID = video ? url.deletingPathExtension().lastPathComponent : "display-\(displayID)"
+            registerLocalDecodeVideo(videoID: videoID, videoURL: url)
+            let command = IPCCommand(action: video ? "switch_video" : "switch_image", videoID: videoID,
+                                     displayID: displayID, requestID: id)
+            sourceReady.begin(displayID: displayID, requestID: id)
+            latestSourceCommands.withLock { $0[displayID] = command }
+            commands.append(command)
+            return id
+        }
+        if request != nil { notifyCommandsChanged() }
+        return request
+    }
+
+    func recoveryRequestID(displayID: UInt32) -> String? {
+        guard isRunning else { return nil }
+        return latestSourceCommands.withLock { $0[displayID]?.requestID }
+    }
+
+    func hasFreshRecoveryReceipt(displayID: UInt32, requestID: String, pid: Int32, after: TimeInterval) -> Bool {
+        guard isRunning else { return false }
+        return cmdLock.withLock { _ in
+            latestSourceCommands.withLock { $0[displayID]?.requestID } == requestID
+                && sourceReady.hasFreshReadyPeer(displayID: displayID, requestID: requestID, pid: pid, after: after)
+        }
+    }
+
+    /// Replay the current source without rewriting its original caller's result.
+    func replaySourceForMissingProcessRecovery(displayID: UInt32, requestID: String) -> Bool {
+        guard isRunning else { return false }
+        let replayed = cmdLock.withLock { commands -> Bool in
+            guard let command = latestSourceCommands.withLock({ $0[displayID] }),
                   command.requestID == requestID else { return false }
             commands.removeAll { $0.displayID == displayID && ($0.action == "switch_video" || $0.action == "switch_image") }
             commands.append(command)
@@ -852,6 +920,9 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
                 break
             }
             let success = request.params?["success"].map { $0 != "0" } ?? true
+            if let peerPID, peerPID > 0 {
+                sourceReady.noteReadyPeer(displayID: displayID, requestID: requestID, pid: peerPID, success: success)
+            }
             reportSourceReady(displayID: displayID, requestID: requestID, success: success)
             response = .init(id: request.id, videos: nil, videoPath: nil, error: nil)
 

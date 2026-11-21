@@ -7,11 +7,16 @@ import Foundation
 
 struct AnimeRule: Identifiable, Codable, Hashable {
     let id: String
-    let api: String      // "1" = 简化版(CSS), "2" = XPath版
+    let api: String      // Kazumi capability level, independent of selector mode
     let type: String      // "anime"
     let name: String
     let version: String
     let deprecated: Bool
+
+    let searchMode: AnimeRuleMode
+    let chapterMode: AnimeRuleMode
+    let searchApiConfig: AnimeAPISearch?
+    let chapterApiConfig: AnimeAPIChapter?
 
     // 站点配置
     let baseURL: String
@@ -59,6 +64,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         case videoSelector, videoSourceAttr, useWebview, multiSources
         case xpath
         case antiCrawlerConfig
+        case searchMode, chapterMode, searchApiConfig, chapterApiConfig
     }
 
     // 初始化器支持两种格式
@@ -96,9 +102,13 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         multiSources: Bool? = false,
         // API v2 字段
         xpath: AnimeXPathRules? = nil,
-        antiCrawlerConfig: AntiCrawlerConfig? = nil
+        antiCrawlerConfig: AntiCrawlerConfig? = nil,
+        searchMode: AnimeRuleMode? = nil,
+        chapterMode: AnimeRuleMode? = nil,
+        searchApiConfig: AnimeAPISearch? = nil,
+        chapterApiConfig: AnimeAPIChapter? = nil
     ) {
-        self.id = id
+        self.id = Self.normalizedID(id)
         self.api = api
         self.type = type
         self.name = name
@@ -135,32 +145,89 @@ struct AnimeRule: Identifiable, Codable, Hashable {
 
         self.xpath = xpath
         self.antiCrawlerConfig = antiCrawlerConfig
+        self.searchMode = searchMode ?? (xpath?.search == nil ? .css : .xpath)
+        self.chapterMode = chapterMode ?? (xpath?.detail == nil ? .css : .xpath)
+        self.searchApiConfig = searchApiConfig
+        self.chapterApiConfig = chapterApiConfig
+    }
+
+    static func normalizedID(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try c.decodeIfPresent(String.self, forKey: .id) ?? "",
+            api: try c.decodeIfPresent(String.self, forKey: .api) ?? "1",
+            type: try c.decodeIfPresent(String.self, forKey: .type) ?? "anime",
+            name: try c.decodeIfPresent(String.self, forKey: .name) ?? "",
+            version: try c.decodeIfPresent(String.self, forKey: .version) ?? "1.0",
+            deprecated: try c.decodeIfPresent(Bool.self, forKey: .deprecated) ?? false,
+            baseURL: try c.decodeIfPresent(String.self, forKey: .baseURL) ?? "",
+            headers: try c.decodeIfPresent([String: String].self, forKey: .headers),
+            userAgent: try c.decodeIfPresent(String.self, forKey: .userAgent),
+            referer: try c.decodeIfPresent(String.self, forKey: .referer),
+            timeout: try c.decodeIfPresent(Int.self, forKey: .timeout),
+            searchURL: try c.decodeIfPresent(String.self, forKey: .searchURL) ?? "",
+            searchList: try c.decodeIfPresent(String.self, forKey: .searchList),
+            searchName: try c.decodeIfPresent(String.self, forKey: .searchName),
+            searchCover: try c.decodeIfPresent(String.self, forKey: .searchCover),
+            searchDetail: try c.decodeIfPresent(String.self, forKey: .searchDetail),
+            searchId: try c.decodeIfPresent(String.self, forKey: .searchId),
+            detailTitle: try c.decodeIfPresent(String.self, forKey: .detailTitle),
+            detailCover: try c.decodeIfPresent(String.self, forKey: .detailCover),
+            detailDesc: try c.decodeIfPresent(String.self, forKey: .detailDesc),
+            detailStatus: try c.decodeIfPresent(String.self, forKey: .detailStatus),
+            detailRating: try c.decodeIfPresent(String.self, forKey: .detailRating),
+            episodeList: try c.decodeIfPresent(String.self, forKey: .episodeList),
+            episodeName: try c.decodeIfPresent(String.self, forKey: .episodeName),
+            episodeLink: try c.decodeIfPresent(String.self, forKey: .episodeLink),
+            episodeThumb: try c.decodeIfPresent(String.self, forKey: .episodeThumb),
+            videoSelector: try c.decodeIfPresent(String.self, forKey: .videoSelector),
+            videoSourceAttr: try c.decodeIfPresent(String.self, forKey: .videoSourceAttr),
+            useWebview: try c.decodeIfPresent(Bool.self, forKey: .useWebview),
+            multiSources: try c.decodeIfPresent(Bool.self, forKey: .multiSources),
+            xpath: try c.decodeIfPresent(AnimeXPathRules.self, forKey: .xpath),
+            antiCrawlerConfig: try c.decodeIfPresent(AntiCrawlerConfig.self, forKey: .antiCrawlerConfig),
+            searchMode: try c.decodeIfPresent(AnimeRuleMode.self, forKey: .searchMode),
+            chapterMode: try c.decodeIfPresent(AnimeRuleMode.self, forKey: .chapterMode),
+            searchApiConfig: try c.decodeIfPresent(AnimeAPISearch.self, forKey: .searchApiConfig),
+            chapterApiConfig: try c.decodeIfPresent(AnimeAPIChapter.self, forKey: .chapterApiConfig)
+        )
+    }
+
+    var compatibilityIssue: String? {
+        guard let level = Int(api), (1...9).contains(level) else { return "Unsupported Kazumi API level: \(api)" }
+        if searchMode == .api && searchApiConfig == nil { return "Missing API search configuration" }
+        if chapterMode == .api && chapterApiConfig == nil { return "Missing API chapter configuration" }
+        return nil
     }
 
     // 辅助计算属性: 获取实际的搜索列表选择器
     func getSearchListSelector() -> String {
-        if api == "2", let xpath = xpath, let search = xpath.search {
+        if searchMode == .xpath, let xpath = xpath, let search = xpath.search {
             return search.list
         }
         return searchList ?? "a"
     }
     
     func getSearchNameSelector() -> String {
-        if api == "2", let xpath = xpath, let search = xpath.search {
+        if searchMode == .xpath, let xpath = xpath, let search = xpath.search {
             return search.title
         }
         return searchName ?? ""
     }
     
     func getSearchCoverSelector() -> String {
-        if api == "2", let xpath = xpath, let search = xpath.search, let cover = search.cover {
+        if searchMode == .xpath, let xpath = xpath, let search = xpath.search, let cover = search.cover {
             return cover
         }
         return searchCover ?? "img"
     }
     
     func getSearchDetailSelector() -> String {
-        if api == "2", let xpath = xpath, let search = xpath.search {
+        if searchMode == .xpath, let xpath = xpath, let search = xpath.search {
             return search.detail
         }
         return searchDetail ?? "a[href]"
@@ -216,10 +283,15 @@ struct AnimeListXPath: Codable {
 
 // MARK: - 反爬虫配置 (参考 Kazumi AntiCrawlerConfig)
 
-/// 验证码类型（对齐 Kazumi CaptchaType）
+/// Values are retained for compatibility; verification always stays user driven.
 enum CaptchaType: Int, Codable {
-    case imageCaptcha = 1  // 图片验证码，需要用户手动输入
-    case autoClickButton = 2  // 自动点击验证按钮
+    case imageCaptcha = 1
+    case autoClickButton = 2
+    case customJavaScript = 3
+    case unknown = 0
+    init(from decoder: Decoder) throws {
+        self = Self(rawValue: try decoder.singleValueContainer().decode(Int.self)) ?? .unknown
+    }
 }
 
 struct AntiCrawlerConfig: Codable {
@@ -228,30 +300,38 @@ struct AntiCrawlerConfig: Codable {
     let captchaImage: String
     let captchaInput: String
     let captchaButton: String
-
-    init(
-        enabled: Bool = false,
-        captchaType: CaptchaType = .imageCaptcha,
-        captchaImage: String = "",
-        captchaInput: String = "",
-        captchaButton: String = ""
-    ) {
+    let captchaDetectType: Int
+    let captchaDetectValue: String
+    /// Stored losslessly; never executed by the parser.
+    let captchaScript: String
+    enum CodingKeys: String, CodingKey {
+        case enabled, captchaType, captchaImage, captchaInput, captchaButton
+        case captchaDetectType, captchaDetectValue, captchaScript
+    }
+    init(enabled: Bool = false, captchaType: CaptchaType = .imageCaptcha,
+         captchaImage: String = "", captchaInput: String = "", captchaButton: String = "",
+         captchaDetectType: Int = 1, captchaDetectValue: String = "", captchaScript: String = "") {
         self.enabled = enabled
         self.captchaType = captchaType
         self.captchaImage = captchaImage
         self.captchaInput = captchaInput
         self.captchaButton = captchaButton
+        self.captchaDetectType = captchaDetectType
+        self.captchaDetectValue = captchaDetectValue
+        self.captchaScript = captchaScript
     }
-
-    static func empty() -> AntiCrawlerConfig {
-        AntiCrawlerConfig(
-            enabled: false,
-            captchaType: .imageCaptcha,
-            captchaImage: "",
-            captchaInput: "",
-            captchaButton: ""
-        )
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(enabled: try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false,
+                  captchaType: try c.decodeIfPresent(CaptchaType.self, forKey: .captchaType) ?? .imageCaptcha,
+                  captchaImage: try c.decodeIfPresent(String.self, forKey: .captchaImage) ?? "",
+                  captchaInput: try c.decodeIfPresent(String.self, forKey: .captchaInput) ?? "",
+                  captchaButton: try c.decodeIfPresent(String.self, forKey: .captchaButton) ?? "",
+                  captchaDetectType: try c.decodeIfPresent(Int.self, forKey: .captchaDetectType) ?? 1,
+                  captchaDetectValue: try c.decodeIfPresent(String.self, forKey: .captchaDetectValue) ?? "",
+                  captchaScript: try c.decodeIfPresent(String.self, forKey: .captchaScript) ?? "")
     }
+    static func empty() -> AntiCrawlerConfig { AntiCrawlerConfig() }
 }
 
 // MARK: - 动漫规则索引 (用于规则市场)

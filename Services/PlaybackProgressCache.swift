@@ -51,7 +51,8 @@ class PlaybackProgressCache: ObservableObject {
     private let userDefaults = WaifuXPreferences.shared
     private let cacheKey = "playback_progress_cache"
     private var saveTimer: Timer?
-    private var currentProgress: PlaybackProgress?
+    private var activeProgresses: [UUID: PlaybackProgress] = [:]
+    private let legacySessionID = UUID()
 
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
@@ -79,73 +80,66 @@ class PlaybackProgressCache: ObservableObject {
 
     // MARK: - 更新进度
 
-    /// 开始跟踪播放进度
+    /// 每个播放器使用独立 session；旧调用保留专用的兼容会话。
+    @discardableResult
     func startTracking(
         animeId: String,
         animeTitle: String,
         episode: AnimeDetail.AnimeEpisodeItem,
         sourceId: String,
         sourceName: String,
-        coverURL: String?
-    ) {
-        let progressId = "\(sourceId)_\(episode.id)"
-        currentProgress = PlaybackProgress(
-            id: progressId,
-            animeId: animeId,
-            animeTitle: animeTitle,
-            episodeId: episode.id,
-            episodeName: episode.name,
-            episodeNumber: episode.episodeNumber,
-            sourceId: sourceId,
-            sourceName: sourceName,
-            currentTime: 0,
-            duration: 0,
-            lastPlayedAt: Date(),
-            coverURL: coverURL
+        coverURL: String?,
+        sessionID: UUID? = nil
+    ) -> UUID {
+        let session = sessionID ?? legacySessionID
+        if let previous = activeProgresses[session] { commit([previous]) }
+        activeProgresses[session] = PlaybackProgress(
+            id: "\(sourceId)_\(episode.id)", animeId: animeId, animeTitle: animeTitle,
+            episodeId: episode.id, episodeName: episode.name, episodeNumber: episode.episodeNumber,
+            sourceId: sourceId, sourceName: sourceName, currentTime: 0, duration: 0,
+            lastPlayedAt: Date(), coverURL: coverURL
         )
+        return session
     }
 
-    /// 更新当前播放进度
-    func updateProgress(currentTime: Double, duration: Double) {
-        guard var progress = currentProgress else { return }
+    func updateProgress(currentTime: Double, duration: Double, sessionID: UUID? = nil) {
+        guard currentTime.isFinite, duration.isFinite, currentTime >= 0, duration >= 0,
+              var progress = activeProgresses[sessionID ?? legacySessionID] else { return }
         progress.currentTime = currentTime
         progress.duration = duration
         progress.lastPlayedAt = Date()
-        currentProgress = progress
-
-        // 延迟保存，避免频繁写入
-        saveTimer?.invalidate()
-        saveTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+        activeProgresses[sessionID ?? legacySessionID] = progress
+        // 不在每帧重置截止时间，持续播放也会每五秒写入一次。
+        guard saveTimer == nil else { return }
+        saveTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                self?.commitCurrentProgress()
+                guard let self else { return }
+                self.saveTimer = nil
+                self.commit(Array(self.activeProgresses.values))
             }
         }
     }
 
-    /// 提交当前进度到缓存
-    private func commitCurrentProgress() {
-        guard let progress = currentProgress else { return }
-
-        // 移除旧的记录
-        progresses.removeAll { $0.id == progress.id }
-
-        // 添加新记录到开头
-        progresses.insert(progress, at: 0)
-
-        // 限制缓存数量（保留最近100条）
-        if progresses.count > 100 {
-            progresses = Array(progresses.prefix(100))
+    private func commit(_ updates: [PlaybackProgress]) {
+        // 未成功得到媒体时长/位置的失败解析不能覆盖先前续播记录。
+        for progress in updates where progress.duration > 0 || progress.currentTime > 0 {
+            if let existing = progresses.first(where: { $0.id == progress.id }),
+               existing.lastPlayedAt > progress.lastPlayedAt { continue }
+            progresses.removeAll { $0.id == progress.id }
+            progresses.append(progress)
         }
-
+        progresses = Array(progresses.sorted { $0.lastPlayedAt > $1.lastPlayedAt }.prefix(100))
         saveToDisk()
-        objectWillChange.send()
     }
 
-    /// 停止跟踪并保存最终进度
-    func stopTracking() {
-        saveTimer?.invalidate()
-        commitCurrentProgress()
-        currentProgress = nil
+    func stopTracking(sessionID: UUID? = nil) {
+        if let progress = activeProgresses.removeValue(forKey: sessionID ?? legacySessionID) {
+            commit([progress])
+        }
+        if activeProgresses.isEmpty {
+            saveTimer?.invalidate()
+            saveTimer = nil
+        }
     }
 
     // MARK: - 查询进度

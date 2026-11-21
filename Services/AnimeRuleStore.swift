@@ -1,422 +1,238 @@
 import Foundation
 
-// MARK: - 动漫规则商店
-
-/// 动漫规则管理服务
-/// 管理动漫规则的加载、安装、更新、删除
+/// A full snapshot is the durable commit unit. Network awaits never expose a partial rule set.
 actor AnimeRuleStore {
     static let shared = AnimeRuleStore()
-
     private var rules: [String: AnimeRule] = [:]
+    private var loaded = false
     private let rulesDirectory: URL
+    private let loader: KazumiRuleLoader
+    private let session: URLSession
     private let fileManager = FileManager.default
-    
-    // 注意：动漫规则固定从 Kazumi 官方仓库加载
-    // 与壁纸/媒体规则完全分离，不走用户配置的 Profiles 仓库
-
-    init() {
-        guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            // 使用临时目录作为回退
-            self.rulesDirectory = fileManager.temporaryDirectory
-                .appendingPathComponent("WaifuX", isDirectory: true)
-                .appendingPathComponent("AnimeRules", isDirectory: true)
-            return
-        }
-        self.rulesDirectory = supportDir
-            .appendingPathComponent("WaifuX", isDirectory: true)
-            .appendingPathComponent("AnimeRules", isDirectory: true)
-
-        // 创建目录
-        try? fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
+    private var synchronization: Task<Void, Error>?
+    private var launchCheckStarted = false
+    private var ruleRevisions: [String: Int] = [:]
+    private func beginRuleOperation(_ id: String) -> Int {
+        ruleRevisions[id, default: 0] += 1
+        return ruleRevisions[id]!
     }
+    private enum Mutation { case save(AnimeRule), remove }
+    /// Mutations committed while a remote transaction is suspended win over its older view.
+    private var pendingMutations: [String: Mutation] = [:]
+    private var snapshotURL: URL { rulesDirectory.appendingPathComponent("rules.snapshot") }
 
-    /// 本地仅作缓存：与远程索引对齐，清空磁盘上的动漫规则后按 Kazumi 全量重新下载（非弃用项）
+    /// Directory and transport injection keep regression tests away from production caches.
+    init(directory: URL? = nil, loader: KazumiRuleLoader = .shared, session: URLSession = .shared) {
+        rulesDirectory = directory ?? (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("WaifuX", isDirectory: true).appendingPathComponent("AnimeRules", isDirectory: true)
+        self.loader = loader
+        self.session = session
+    }
     func ensureDefaultRulesCopied() async {
-        do {
-            try await replaceAllRulesFromKazumiRemote()
-            print("[AnimeRuleStore] Kazumi 全量覆盖完成，共 \(allRules().count) 个")
-        } catch {
-            print("[AnimeRuleStore] Kazumi 全量同步失败（保留上次本地缓存）: \(error)")
-        }
+        do { try await replaceAllRulesFromKazumiRemote() }
+        catch { print("[AnimeRuleStore] Sync failed; retaining complete cache: \(error)") }
     }
-
-    /// 应用启动时在后台执行一次：始终以远程为准覆盖本地缓存（不合并、不以本地版本为准）
+    /// Call once from AppDelegate's asynchronous restore phase, even with a nonempty cache.
+    /// Concurrent startup/view/market requests join the same transaction.
     func syncOnLaunchInBackground() async {
-        print("[AnimeRuleStore] [启动同步] 开始从 Kazumi 远程仓库同步规则…")
-        print("[AnimeRuleStore] [启动同步] 规则存储目录: \(rulesDirectory.path)")
-
-        // 确保目录存在
-        do {
-            try fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
-            print("[AnimeRuleStore] [启动同步] 规则目录已确保存在")
-        } catch {
-            print("[AnimeRuleStore] [启动同步] 创建规则目录失败: \(error.localizedDescription)")
-        }
-
-        do {
-            try await replaceAllRulesFromKazumiRemote()
-            let rules = await loadAllRules()
-            print("[AnimeRuleStore] [启动同步] Kazumi 全量覆盖完成，共 \(rules.count) 个规则")
-        } catch {
-            print("[AnimeRuleStore] [启动同步] 全量同步失败: \(error.localizedDescription)")
-            // 同步失败时，尝试加载本地缓存
-            let cachedRules = await loadAllRules()
-            print("[AnimeRuleStore] [启动同步] 使用本地缓存: \(cachedRules.count) 个规则")
-        }
-    }
-
-    /// 删除 `AnimeRules` 目录下所有 `.json` 并清空内存字典（成功拉取索引后再调用）
-    private func clearAllLocalRuleFiles() throws {
-        rules.removeAll()
-        guard let files = try? fileManager.contentsOfDirectory(at: rulesDirectory, includingPropertiesForKeys: nil) else {
+        if launchCheckStarted {
+            if let task = synchronization { _ = try? await task.value }
             return
         }
-        for file in files where file.pathExtension == "json" {
-            try? fileManager.removeItem(at: file)
-        }
+        launchCheckStarted = true
+        await ensureDefaultRulesCopied()
     }
+    func clearInMemoryCache() { rules.removeAll(); loaded = false }
 
-    /// 后台释放前台资源时只清内存，不删除本地规则文件。
-    func clearInMemoryCache() {
-        rules.removeAll(keepingCapacity: false)
-    }
-
-    /// 从 Kazumi 官方索引全量同步：远程成功后再清空本地并逐条下载覆盖（与索引一致，弃用项不安装）
     func replaceAllRulesFromKazumiRemote() async throws {
-        print("[AnimeRuleStore] 开始获取 Kazumi 远程索引…")
-        let indexData = try await fetchIndexData()
-        print("[AnimeRuleStore] 索引数据获取成功，大小: \(indexData.count) bytes")
-
-        guard let index = try? JSONDecoder().decode(KazumiAnimeIndex.self, from: indexData) else {
-            print("[AnimeRuleStore] 索引数据解码失败")
-            throw AnimeRuleStoreError.invalidIndex
-        }
-        print("[AnimeRuleStore] 索引解码成功，共 \(index.count) 个规则")
-
-        await KazumiRuleLoader.shared.clearCache()
-        try clearAllLocalRuleFiles()
-
-        var installedCount = 0
-        var skippedCount = 0
-        for item in index {
-            if item.deprecated == true {
-                skippedCount += 1
-                continue
-            }
-            let rule = await installRuleByName(item.name)
-            if rule != nil {
-                installedCount += 1
-            }
-        }
-        print("[AnimeRuleStore] 全量同步完成: 安装 \(installedCount) 个, 跳过弃用 \(skippedCount) 个")
+        if let task = synchronization { return try await task.value }
+        try loadCacheIfNeeded()
+        pendingMutations.removeAll()
+        let task = Task { try await self.synchronizeSnapshot() }
+        synchronization = task
+        defer { synchronization = nil; pendingMutations.removeAll() }
+        try await task.value
     }
-
-    // MARK: - 初始化
-
-    /// 获取远程可用规则列表（不自动安装）
-    /// 与 Kazumi 对齐：显示全部可用规则，让用户手动选择安装
+    private func synchronizeSnapshot() async throws {
+        let index = try await loader.fetchRuleIndex()
+        var staged: [String: AnimeRule] = [:]
+        for entry in index where entry.deprecated != true {
+            try Task.checkCancellation()
+            let rule = try await loader.loadRule(name: entry.name, forceRefresh: true)
+            guard rule.id == entry.id, entry.version == nil || entry.version == rule.version else {
+                throw AnimeRuleCompatibilityError(reason: "Index/version mismatch: \(entry.name)")
+            }
+            try AnimeAPIRuleEngine.validateRule(rule)
+            guard staged.updateValue(rule, forKey: rule.id) == nil else { throw AnimeRuleStoreError.invalidIndex }
+        }
+        guard !staged.isEmpty else { throw AnimeRuleStoreError.invalidIndex }
+        // No await between merging concurrent user edits and the durable/in-memory commit.
+        for (id, mutation) in pendingMutations {
+            switch mutation { case .save(let rule): staged[id] = rule; case .remove: staged.removeValue(forKey: id) }
+        }
+        try commit(staged)
+    }
+    private func loadCacheIfNeeded() throws {
+        guard !loaded else { return }
+        var candidate: [String: AnimeRule] = [:]
+        if fileManager.fileExists(atPath: snapshotURL.path) {
+            let values = try JSONDecoder().decode([AnimeRule].self, from: Data(contentsOf: snapshotURL))
+            for rule in values { candidate[rule.id] = rule }
+        } else if fileManager.fileExists(atPath: rulesDirectory.path) {
+            // Read-only migration: original individual JSON files remain an untouched fallback.
+            for file in try fileManager.contentsOfDirectory(at: rulesDirectory, includingPropertiesForKeys: nil)
+                .filter({ $0.pathExtension.lowercased() == "json" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                guard let rule = try? loadRule(from: file) else { continue }
+                if let old = candidate[rule.id], !Self.isNewer(rule.version, than: old.version) { continue }
+                candidate[rule.id] = rule
+            }
+        }
+        rules = candidate
+        loaded = true
+    }
+    private func commit(_ candidate: [String: AnimeRule]) throws {
+        let ordered = candidate.values.sorted { $0.id < $1.id }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let stagedData = try encoder.encode(ordered)
+        let verified = try JSONDecoder().decode([AnimeRule].self, from: stagedData)
+        guard verified.count == candidate.count, Set(verified.map(\.id)).count == verified.count else { throw AnimeRuleStoreError.invalidIndex }
+        try fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
+        // Foundation stages a sibling file then renames it atomically on this filesystem.
+        // Any encode/validation/write failure leaves both the old snapshot and memory intact.
+        try stagedData.write(to: snapshotURL, options: .atomic)
+        rules = candidate
+        loaded = true
+    }
+    nonisolated static func isNewer(_ version: String, than installed: String) -> Bool {
+        version.compare(installed, options: .numeric) == .orderedDescending
+    }
     func fetchAvailableRules() async -> [AnimeRuleInfo] {
         do {
-            let indexData = try await fetchIndexData()
-            guard let index = try? JSONDecoder().decode(KazumiAnimeIndex.self, from: indexData) else {
-                return []
+            return try await loader.fetchRuleIndex().filter { $0.deprecated != true }.map {
+                AnimeRuleInfo(id: $0.id, name: $0.name, version: $0.version ?? "1.0", description: nil, antiCrawlerEnabled: $0.antiCrawlerEnabled ?? false)
             }
-            return index
-                .filter { $0.deprecated != true }
-                .map { $0.asRuleInfo }
-        } catch {
-            print("[AnimeRuleStore] 获取可用规则列表失败: \(error)")
-            return []
-        }
+        } catch { print("[AnimeRuleStore] Index fetch failed: \(error)"); return [] }
     }
-
-    /// 安装指定规则
     func installRuleByName(_ name: String) async -> AnimeRule? {
+        let id = AnimeRule.normalizedID(name)
+        let revision = beginRuleOperation(id)
         do {
-            let rule = try await KazumiRuleLoader.shared.loadRule(name: name)
+            let rule = try await loader.loadRule(name: name, forceRefresh: true)
+            guard ruleRevisions[id] == revision else { return nil }
             try saveRule(rule)
-            print("[AnimeRuleStore] 安装规则成功: \(name)")
             return rule
-        } catch {
-            print("[AnimeRuleStore] 安装规则失败 \(name): \(error)")
-            return nil
-        }
+        } catch { print("[AnimeRuleStore] Install failed \(name): \(error)"); return nil }
     }
-
-    /// 卸载指定规则
-    func uninstallRule(_ ruleId: String) throws {
-        rules.removeValue(forKey: ruleId)
-        let filePath = rulesDirectory.appendingPathComponent("\(ruleId).json")
-        if fileManager.fileExists(atPath: filePath.path) {
-            try fileManager.removeItem(at: filePath)
-            print("[AnimeRuleStore] 卸载规则: \(ruleId)")
-        }
-    }
-
-    /// 检查规则是否已安装
+    func uninstallRule(_ ruleId: String) throws { try removeRule(id: ruleId) }
     func isRuleInstalled(_ ruleId: String) -> Bool {
-        return rules[ruleId] != nil || fileManager.fileExists(atPath: rulesDirectory.appendingPathComponent("\(ruleId).json").path)
+        try? loadCacheIfNeeded()
+        return rules[AnimeRule.normalizedID(ruleId)] != nil
     }
-
-    // MARK: - 加载规则
-    
-    /// 从 Kazumi 官方仓库加载所有规则
-    /// 注意：动漫规则固定从 Predidit/KazumiRules 加载，与壁纸/媒体规则完全分离
-    func loadRulesFromRemote() async throws -> [AnimeRule] {
-        return try await KazumiRuleLoader.shared.loadAllRules()
-    }
-    
-    /// 加载所有本地规则
+    func loadRulesFromRemote() async throws -> [AnimeRule] { try await loader.loadAllRules() }
     func loadAllRules() async -> [AnimeRule] {
-        guard let files = try? fileManager.contentsOfDirectory(at: rulesDirectory, includingPropertiesForKeys: nil)
-            .filter({ $0.pathExtension == "json" }) else {
-            return []
-        }
-
-        var loadedRules: [AnimeRule] = []
-
-        for file in files {
-            if let rule = try? loadRule(from: file) {
-                rules[rule.id] = rule
-                loadedRules.append(rule)
-            }
-        }
-
-        return loadedRules
-            .filter { !$0.deprecated }
-            .sorted { $0.name < $1.name }
-    }
-
-    /// 从文件加载规则
-    func loadRule(from url: URL) throws -> AnimeRule {
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(AnimeRule.self, from: data)
-    }
-
-    // MARK: - 安装规则
-
-    /// 从 URL 安装规则
-    func installRule(from urlString: String) async throws -> AnimeRule {
-        guard let remoteURL = URL(string: urlString) else {
-            throw AnimeRuleStoreError.invalidURL
-        }
-
-        let (data, response) = try await URLSession.shared.data(from: remoteURL)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            throw AnimeRuleStoreError.downloadFailed
-        }
-
-        let rule = try JSONDecoder().decode(AnimeRule.self, from: data)
-        try saveRule(rule)
-
-        return rule
-    }
-
-    /// 从 GitHub 仓库安装规则
-    func installRuleFromGitHub(
-        owner: String,
-        repo: String,
-        path: String,
-        branch: String = "main"
-    ) async throws -> AnimeRule {
-        let rawURL = "https://raw.githubusercontent.com/\(owner)/\(repo)/\(branch)/\(path)"
-        return try await installRule(from: rawURL)
-    }
-
-    /// 批量安装 Kazumi 动漫规则（与全量覆盖一致）
-    func installKazumiAnimeRules() async throws -> [AnimeRule] {
-        try await replaceAllRulesFromKazumiRemote()
-        return await loadAllRules()
-    }
-
-    /// 从 Kazumi 官方仓库获取索引
-    private func fetchIndexData() async throws -> Data {
-        let kazumiIndexURL = "https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json"
-        print("[AnimeRuleStore] 获取索引: \(kazumiIndexURL)")
-
-        guard let url = URL(string: kazumiIndexURL) else {
-            print("[AnimeRuleStore] 索引 URL 无效")
-            throw AnimeRuleStoreError.invalidURL
-        }
-
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                print("[AnimeRuleStore] 响应类型无效")
-                throw AnimeRuleStoreError.downloadFailed
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                print("[AnimeRuleStore] HTTP 错误: \(httpResponse.statusCode)")
-                throw AnimeRuleStoreError.downloadFailed
-            }
-
-            print("[AnimeRuleStore] 索引获取成功: HTTP \(httpResponse.statusCode)")
-            return data
-        } catch {
-            print("[AnimeRuleStore] 网络请求失败: \(error.localizedDescription)")
-            throw error
-        }
-    }
-
-    // MARK: - 保存规则
-
-    /// 保存规则到本地
-    func saveRule(_ rule: AnimeRule) throws {
-        let data = try JSONEncoder().encode(rule)
-        let filePath = rulesDirectory.appendingPathComponent("\(rule.id).json")
-        try data.write(to: filePath)
-        rules[rule.id] = rule
-        print("[AnimeRuleStore] Saved rule: \(rule.id)")
-    }
-
-    // MARK: - 获取规则
-
-    /// 获取指定规则
-    func rule(for id: String) -> AnimeRule? {
-        return rules[id]
-    }
-
-    /// 获取所有规则（弃用项不返回，避免占列表空间）
-    func allRules() -> [AnimeRule] {
-        return rules.values
-            .filter { !$0.deprecated }
-            .sorted { $0.name < $1.name }
-    }
-
-    /// 获取可用规则（未弃用）
-    func availableRules() -> [AnimeRule] {
+        do { try loadCacheIfNeeded() }
+        catch { print("[AnimeRuleStore] Cache read failed: \(error)") }
         return allRules()
     }
-
-    // MARK: - 删除规则
-
-    /// 删除规则
-    func removeRule(id: String) throws {
-        rules.removeValue(forKey: id)
-        let filePath = rulesDirectory.appendingPathComponent("\(id).json")
-        if fileManager.fileExists(atPath: filePath.path) {
-            try fileManager.removeItem(at: filePath)
-            print("[AnimeRuleStore] Removed rule: \(id)")
-        }
+    func loadRule(from url: URL) throws -> AnimeRule {
+        // Legacy caches may contain rules requiring capabilities this client cannot execute yet;
+        // decoding keeps them visible so the market can offer a compatible replacement.
+        try JSONDecoder().decode(AnimeRule.self, from: Data(contentsOf: url))
     }
-
-    // MARK: - 更新规则
-
-    /// 与「全量覆盖」一致：始终以远程索引为准覆盖本地
-    func checkForUpdates() async throws -> [String] {
-        try await replaceAllRulesFromKazumiRemote()
-        return allRules().map(\.name)
-    }
-
-    /// 更新单个规则
-    func updateRule(id: String) async throws -> AnimeRule? {
-        guard rules[id] != nil else {
-            return nil
-        }
-
-        // 重新下载并覆盖
-        return try await installRule(from: "https://raw.githubusercontent.com/jipika/WallHaven-Profiles/main/anime/\(id).json")
-    }
-
-    // MARK: - 导出规则
-
-    /// 导出规则为 Data
-    func exportRule(id: String) throws -> Data? {
-        guard let rule = rules[id] else { return nil }
-        return try JSONEncoder().encode(rule)
-    }
-
-    /// 导出所有规则
-    func exportAllRules() throws -> Data {
-        return try JSONEncoder().encode(allRules())
-    }
-
-    // MARK: - 导入规则
-
-    /// 从 Data 导入规则
-    func importRule(from data: Data) throws -> AnimeRule {
-        let rule = try JSONDecoder().decode(AnimeRule.self, from: data)
+    func installRule(from urlString: String) async throws -> AnimeRule {
+        guard let url = URL(string: urlString), ["http", "https"].contains(url.scheme ?? "") else { throw AnimeRuleStoreError.invalidURL }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 30)
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw AnimeRuleStoreError.downloadFailed }
+        let rule = try KazumiRuleLoader.decodeRule(data)
         try saveRule(rule)
         return rule
     }
-
-    // MARK: - 规则目录
-
-    /// 获取规则目录路径
-    func rulesDirectoryPath() -> URL {
-        return rulesDirectory
+    func installRuleFromGitHub(owner: String, repo: String, path: String, branch: String = "main") async throws -> AnimeRule {
+        try await installRule(from: "https://raw.githubusercontent.com/\(owner)/\(repo)/\(branch)/\(path)")
     }
+    func installKazumiAnimeRules() async throws -> [AnimeRule] {
+        try await replaceAllRulesFromKazumiRemote()
+        return allRules()
+    }
+    func saveRule(_ rule: AnimeRule) throws {
+        try AnimeAPIRuleEngine.validateRule(rule)
+        try loadCacheIfNeeded()
+        var candidate = rules
+        candidate[rule.id] = rule
+        try commit(candidate)
+        _ = beginRuleOperation(rule.id)
+        if synchronization != nil { pendingMutations[rule.id] = .save(rule) }
+    }
+    func rule(for id: String) -> AnimeRule? {
+        try? loadCacheIfNeeded()
+        return rules[AnimeRule.normalizedID(id)]
+    }
+    func allRules() -> [AnimeRule] { rules.values.filter { !$0.deprecated }.sorted { $0.name < $1.name } }
+    func availableRules() -> [AnimeRule] { allRules() }
+    func removeRule(id: String) throws {
+        try loadCacheIfNeeded()
+        let key = AnimeRule.normalizedID(id)
+        var candidate = rules
+        candidate.removeValue(forKey: key)
+        try commit(candidate)
+        _ = beginRuleOperation(key)
+        if synchronization != nil { pendingMutations[key] = .remove }
+    }
+    func checkForUpdates() async throws -> [String] {
+        let previous = Dictionary(uniqueKeysWithValues: (await loadAllRules()).map { ($0.id, $0.version) })
+        try await replaceAllRulesFromKazumiRemote()
+        return allRules().filter { previous[$0.id] != $0.version }.map(\.name)
+    }
+    func updateRule(id: String) async throws -> AnimeRule? {
+        try loadCacheIfNeeded()
+        let key = AnimeRule.normalizedID(id)
+        guard rules[key] != nil else { return nil }
+        let revision = beginRuleOperation(key)
+        // Resolve case-sensitive filenames from the canonical Kazumi index, never the old Profiles repo.
+        let index = try await loader.fetchRuleIndex()
+        guard let entry = index.first(where: { $0.id == key && $0.deprecated != true }) else { throw AnimeRuleStoreError.ruleNotFound(id) }
+        let rule = try await loader.loadRule(name: entry.name, forceRefresh: true)
+        guard ruleRevisions[key] == revision else { return nil }
+        guard entry.version == nil || entry.version == rule.version else { throw AnimeRuleStoreError.invalidIndex }
+        try saveRule(rule)
+        return rule
+    }
+    func exportRule(id: String) throws -> Data? {
+        try loadCacheIfNeeded()
+        guard let rule = rules[AnimeRule.normalizedID(id)] else { return nil }
+        return try JSONEncoder().encode(rule)
+    }
+    func exportAllRules() throws -> Data { try loadCacheIfNeeded(); return try JSONEncoder().encode(allRules()) }
+    func importRule(from data: Data) throws -> AnimeRule {
+        let rule = try KazumiRuleLoader.decodeRule(data)
+        try saveRule(rule)
+        return rule
+    }
+    func rulesDirectoryPath() -> URL { rulesDirectory }
 }
-
-// MARK: - 规则索引 (Kazumi 格式)
-
-/// KazumiRules index.json 格式（直接是数组）
-private typealias KazumiAnimeIndex = [KazumiRuleItem]
-
-private struct KazumiRuleItem: Codable {
-    let name: String
-    let version: String?
-    let useNativePlayer: Bool?
-    let antiCrawlerEnabled: Bool?
-    let author: String?
-    let lastUpdate: Int64?
-    /// Kazumi / 自建索引可选字段：为 true 时不展示、不自动安装
-    let deprecated: Bool?
-}
-
-// MARK: - 公开规则信息类型
 
 struct AnimeRuleInfo: Identifiable {
     let id: String
+    /// Case-sensitive upstream filename stem, distinct from normalized identity.
     let name: String
     let version: String
     let description: String?
     let antiCrawlerEnabled: Bool
 }
 
-// 扩展 KazumiRuleItem 转换为 AnimeRuleInfo
-extension KazumiRuleItem {
-    var asRuleInfo: AnimeRuleInfo {
-        AnimeRuleInfo(
-            id: name,
-            name: name,
-            version: version ?? "1.0",
-            description: nil,
-            antiCrawlerEnabled: antiCrawlerEnabled ?? false
-        )
-    }
-
-    /// 构造规则文件的 URL
-    var ruleURL: String {
-        "https://raw.githubusercontent.com/Predidit/KazumiRules/main/\(name).json"
-    }
-}
-
-// MARK: - 错误类型
-
 enum AnimeRuleStoreError: Error, LocalizedError {
-    case invalidURL
-    case downloadFailed
-    case invalidIndex
-    case ruleNotFound(String)
-    case saveFailed(String)
-
+    case invalidURL, downloadFailed, invalidIndex
+    case ruleNotFound(String), saveFailed(String)
     var errorDescription: String? {
         switch self {
-        case .invalidURL:
-            return "Invalid URL"
-        case .downloadFailed:
-            return "Failed to download rule"
-        case .invalidIndex:
-            return "Invalid rules index"
-        case .ruleNotFound(let id):
-            return "Rule not found: \(id)"
-        case .saveFailed(let reason):
-            return "Failed to save rule: \(reason)"
+        case .invalidURL: return "Invalid URL"
+        case .downloadFailed: return "Failed to download rule"
+        case .invalidIndex: return "Invalid rules index"
+        case .ruleNotFound(let id): return "Rule not found: \(id)"
+        case .saveFailed(let reason): return "Failed to save rule: \(reason)"
         }
     }
 }

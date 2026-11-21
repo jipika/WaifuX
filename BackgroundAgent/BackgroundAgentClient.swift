@@ -404,11 +404,14 @@ final class BackgroundAgentClient: ObservableObject {
         return false
     }
 
-    /// launchd 摘要 + 占锁进程现场。纯拼接、不做本地化：hello 观察器子任务是
-    /// nonisolated，也要用它；空现场的占位文案由 MainActor 调用方补。
-    private nonisolated static func lockConflictDetail(_ summary: String) -> String {
-        let evidence = BackgroundAgentRegistration.failureEvidence()
-        return evidence.isEmpty ? summary : summary + "；" + evidence
+    /// 「另一个正占着单实例锁的 Helper」摘要（pid + 路径）。撞锁判定的进程表
+    /// 证据：撞锁秒退的 Helper 自己不持锁（flock 失败），持锁的一定是别的进程；
+    /// 健康 Helper 空闲自退时这里为空，不会误判。纯进程表读取，nonisolated 可用。
+    private nonisolated static func otherLockHolderSummary() -> String? {
+        let holders = BackgroundChildProcessCleanup.helperProcesses(
+            lockPath: BackgroundAgentWire.productionLockFileURL.path).filter(\.holdsLock)
+        guard !holders.isEmpty else { return nil }
+        return holders.map { "pid=\($0.child.pid) path=\($0.path)" }.joined(separator: "; ")
     }
 
     /// 锁冲突的专门恢复（issue #128）：占锁的 Helper 可能挂在另一份注册名下
@@ -487,6 +490,11 @@ final class BackgroundAgentClient: ObservableObject {
         try Task.checkCancellation()
         try await retirePre154MainAppLoginItem()
         try BackgroundAgentRegistration.validateBundle(WaifuXHostBundle.bundleURL)
+        // 数据目录不可达（断链符号链接/外置盘未挂载）是环境问题，注册修复救不回来：
+        // 在等 120s hello 之前直接点名路径（issue #128 真因）。
+        try BackgroundAgentRegistration.validateDataDirectory(
+            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("WaifuX", isDirectory: true))
         if relinkRequested { try await relinkRegistration() }
         let mode = currentRegistrationMode()
         if mode == .relinked {
@@ -495,16 +503,15 @@ final class BackgroundAgentClient: ObservableObject {
         // 本会话已确认 launchd 拒绝 spawn：重试只复查一次，不再等 120s hello 和一整轮修复。
         if lastSpawnRejection != nil {
             if let description = await BackgroundAgentRegistration.launchdJobDescription(label: mode.launchdLabel),
-               let evidence = BackgroundAgentRegistration.launchdFailureEvidence(description) {
+               let evidence = BackgroundAgentRegistration.launchdFailureEvidence(
+                   description, otherHolderSummary: Self.otherLockHolderSummary()) {
                 switch evidence.kind {
                 case .spawnRejected:
                     lastSpawnRejection = evidence.summary
                     throw BackgroundAgentRegistrationError.launchdSpawnRejected(evidence.summary)
                 case .cleanExitLoop:
                     lastSpawnRejection = nil
-                    var detail = Self.lockConflictDetail(evidence.summary)
-                    if BackgroundAgentRegistration.failureEvidence().isEmpty { detail += "；" + t("未见 WaifuXHelper 进程") }
-                    throw BackgroundAgentRegistrationError.helperInstanceLockConflict(detail)
+                    throw BackgroundAgentRegistrationError.helperInstanceLockConflict(evidence.summary)
                 }
             }
             lastSpawnRejection = nil
@@ -837,8 +844,8 @@ final class BackgroundAgentClient: ObservableObject {
     /// launchd 拉不起 Helper 时（spawn failed + exit 78），消息只会在端口里排队，
     /// 光等 hello 要等满 120s 才超时。这里每 5s 看一次 `launchctl print`，连续两次
     /// 命中失败证据就提前结束，进入 `start()` 的修复路径：exit 78 → 注册修复/换 Label；
-    /// runs>0 且 last exit 0（锁冲突循环，#128）→ 清占锁者。Helper 正常时 hello
-    /// 先回来，观察任务随之取消，不改变健康路径。
+    /// 反复自行退出且另一个 Helper 持锁（撞锁循环，#128，退出码 0/75 都算）→ 清占锁者。
+    /// Helper 正常时 hello 先回来，观察任务随之取消，不改变健康路径。
     private func helloWatchingLaunchd(label: String) async throws -> BackgroundAgentHello {
         try await withThrowingTaskGroup(of: BackgroundAgentHello.self) { group in
             group.addTask { try await self.helloReply() }
@@ -848,8 +855,9 @@ final class BackgroundAgentClient: ObservableObject {
                 while confirmations < 2 {
                     try await Task.sleep(for: .seconds(5))
                     if let description = await BackgroundAgentRegistration.launchdJobDescription(label: label),
-                       let found = BackgroundAgentRegistration.launchdFailureEvidence(description) {
-                        // 形态翻转（先 exit 78 后 exit 0 等）按最新证据重新计数：
+                       let found = BackgroundAgentRegistration.launchdFailureEvidence(
+                           description, otherHolderSummary: Self.otherLockHolderSummary()) {
+                        // 形态翻转（先 exit 78 后撞锁等）按最新证据重新计数：
                         // 两种病的恢复路径不同，定性必须跟最后一次采样一致。
                         if found.kind == evidence?.kind {
                             confirmations += 1
@@ -867,8 +875,7 @@ final class BackgroundAgentClient: ObservableObject {
                 case .spawnRejected:
                     throw BackgroundAgentRegistrationError.launchdSpawnRejected(evidence.summary)
                 case .cleanExitLoop:
-                    throw BackgroundAgentRegistrationError.helperInstanceLockConflict(
-                        Self.lockConflictDetail(evidence.summary))
+                    throw BackgroundAgentRegistrationError.helperInstanceLockConflict(evidence.summary)
                 }
             }
             defer { group.cancelAll() }
@@ -884,9 +891,9 @@ final class BackgroundAgentClient: ObservableObject {
     /// （2026-10-19 用户机日志：旧实现只在 `.enabled` 上收尾，repair 后立刻又 4099）。
     /// 这里新建连接：repair 期间旧连接已被 invalidate。
     ///
-    /// 失败不再一律吞成 false：job 反复以退出码 0 秒退（单实例锁被占，#128）时
-    /// 抛出 `helperInstanceLockConflict`，让上层走清占锁者的专门路径，而不是
-    /// 空转 9 次探针后报一句「mach service 不可达」。
+    /// 失败不再一律吞成 false：job 反复自行退出、且另一个 Helper 占着单实例锁
+    /// （#128，旧包 exit 0 / 新包 exit 75 都算）时抛出 `helperInstanceLockConflict`，
+    /// 让上层走清占锁者的专门路径，而不是空转 9 次探针后报一句「mach service 不可达」。
     private func probeHelperReachable() async throws -> Bool {
         connect()
         do {
@@ -895,11 +902,10 @@ final class BackgroundAgentClient: ObservableObject {
         } catch {
             if let description = await BackgroundAgentRegistration.launchdJobDescription(
                 label: currentRegistrationMode().launchdLabel),
-               let evidence = BackgroundAgentRegistration.launchdFailureEvidence(description),
+               let evidence = BackgroundAgentRegistration.launchdFailureEvidence(
+                   description, otherHolderSummary: Self.otherLockHolderSummary()),
                evidence.kind == .cleanExitLoop {
-                var detail = Self.lockConflictDetail(evidence.summary)
-                if BackgroundAgentRegistration.failureEvidence().isEmpty { detail += "；" + t("未见 WaifuXHelper 进程") }
-                throw BackgroundAgentRegistrationError.helperInstanceLockConflict(detail)
+                throw BackgroundAgentRegistrationError.helperInstanceLockConflict(evidence.summary)
             }
             return false
         }

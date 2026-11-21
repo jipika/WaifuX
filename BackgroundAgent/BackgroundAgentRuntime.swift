@@ -120,12 +120,23 @@ final class BackgroundAgentRuntime {
     func startAtLoginIfNeeded() async {
         guard !BackgroundRuntimeRole.isIsolatedTest else { return }
         let preferences = WaifuXPreferences.shared
-        if preferences.bool(forKey: BackgroundAgentWire.migrationKey), preferences.bool(forKey: "launch_at_login") || (!currentSession.isEmpty && preferences.string(forKey: sessionKey) == currentSession) {
+        let migrated = preferences.bool(forKey: BackgroundAgentWire.migrationKey)
+        let launchAtLogin = preferences.bool(forKey: "launch_at_login")
+        let session = currentSession
+        let sessionMatches = !session.isEmpty && preferences.string(forKey: sessionKey) == session
+        // 启动决策留痕：issue #128 排查时「Helper 秒退循环」有两种成因（撞锁 /
+        // 空闲自退），log show 里形态相同，只有这条日志能区分走了哪个分支。
+        AppLogger.info(.startup, "Helper startup decision", metadata: [
+            "migrated": migrated, "launchAtLogin": launchAtLogin, "sessionMatches": sessionMatches,
+        ])
+        if migrated, launchAtLogin || sessionMatches {
             await startRuntime()
         } else {
             idleExitTask = Task {
                 try? await Task.sleep(for: .seconds(30))
                 guard !Task.isCancelled, !isReady else { return }
+                AppLogger.error(.startup, "Helper idle exit: no UI command within 30s and no login restore", metadata: [:])
+                AppLogger.flushPendingWrites()
                 NSApp.terminate(nil)
             }
         }
@@ -1038,6 +1049,16 @@ final class BackgroundAgentRuntime {
         case "saver.syncNow":
             try await ScreenSaverService.shared.syncNow()
             return [:]
+        case "saver.setFollow":
+            guard let enabled = a.values["enabled"] as? Bool else { throw CocoaError(.coderValueNotFound) }
+            try await ScreenSaverService.shared.setFollowsDesktopWallpaper(enabled)
+            return [:]
+        case "saver.setWallpaper":
+            try await ScreenSaverService.shared.setWallpaper(
+                itemID: a.string("itemID"), title: a.string("title"), localURL: a.optionalURL("localURL"),
+                useMediaRecord: a.bool("useMediaRecord")
+            )
+            return [:]
         case "optimization.applySettings0":
             try VideoOptimizationQueueService.shared.applySettings(autoOnDownload: a.bool("autoOnDownload"))
             return [:]
@@ -1121,10 +1142,10 @@ final class BackgroundAgentRuntime {
             guard let root = await WallpaperEngineEmbeddedAssets.awaitAssetsReady() else { throw CocoaError(.fileReadNoSuchFile) }
             return ["root": try JSONEncoder().encode(root)]
         case "bake.scene.wait":
-            let artifact = try await SceneOfflineBakeService.bake(eligibility: a.decode("eligibility", as: SceneBakeEligibilitySnapshot.self), contentRoot: a.url("root"), cacheItemID: a.string("cacheID"), durationSeconds: a.values["duration"] as? Double, fps: a.optionalInteger("fps").map(Int32.init), renderer: SceneBakeRenderer(rawValue: a.string("renderer")) ?? .wallpaperWgpu, persistArtifactToItemID: a.optionalString("itemID"), progressItemID: a.optionalString("progressItemID"), displayTitle: a.optionalString("title"), isCompanion: a.bool("companion"))
+            let artifact = try await SceneOfflineBakeService.bake(eligibility: a.decode("eligibility", as: SceneBakeEligibilitySnapshot.self), contentRoot: a.url("root"), cacheItemID: a.string("cacheID"), durationSeconds: a.values["duration"] as? Double, fps: a.optionalInteger("fps").map(Int32.init), renderer: SceneBakeRenderer(rawValue: a.string("renderer")) ?? .wallpaperWgpu, persistArtifactToItemID: a.optionalString("itemID"), progressItemID: a.optionalString("progressItemID"), displayTitle: a.optionalString("title"), isCompanion: a.bool("companion"), outputSize: OfflineBakePixelSize(width: a.optionalInteger("width"), height: a.optionalInteger("height")), forceRebake: a.bool("forceRebake"))
             return ["artifact": try JSONEncoder().encode(artifact)]
         case "bake.record.wait":
-            let artifact = try await SceneOfflineBakeService.bake(record: a.decode("record", as: MediaDownloadRecord.self), durationSeconds: a.values["duration"] as? Double, fps: a.optionalInteger("fps").map(Int32.init), renderer: SceneBakeRenderer(rawValue: a.string("renderer")) ?? .wallpaperWgpu)
+            let artifact = try await SceneOfflineBakeService.bake(record: a.decode("record", as: MediaDownloadRecord.self), durationSeconds: a.values["duration"] as? Double, fps: a.optionalInteger("fps").map(Int32.init), renderer: SceneBakeRenderer(rawValue: a.string("renderer")) ?? .wallpaperWgpu, outputSize: OfflineBakePixelSize(width: a.optionalInteger("width"), height: a.optionalInteger("height")), forceRebake: a.bool("forceRebake"))
             return ["artifact": try JSONEncoder().encode(artifact)]
         case "bake.video.wait":
             let result = try await BakeService.shared.bakeVideo(scenePath: a.string("path"), assetsPath: a.optionalString("assets"), outputURL: a.url("output"), targetWidth: a.optionalInteger("width"), targetHeight: a.optionalInteger("height"), fps: a.integer("fps"), duration: a.double("duration"))

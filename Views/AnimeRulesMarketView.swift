@@ -5,7 +5,7 @@ import SwiftUI
 
 struct AnimeRulesMarketView: View {
     @State private var availableRules: [AnimeRuleInfo] = []
-    @State private var installedRuleIds: Set<String> = []
+    @State private var installedVersions: [String: String] = [:]
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showingError = false
@@ -69,7 +69,7 @@ struct AnimeRulesMarketView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .disabled(isLoading || availableRules.allSatisfy { installedRuleIds.contains($0.id) })
+            .disabled(isLoading || availableRules.allSatisfy { !needsInstallation($0) })
         }
         .padding()
     }
@@ -104,7 +104,8 @@ struct AnimeRulesMarketView: View {
         List(availableRules) { rule in
             RuleMarketItem(
                 rule: rule,
-                isInstalled: installedRuleIds.contains(rule.id),
+                installedVersion: installedVersions[rule.id],
+                isBusy: isLoading,
                 onInstall: { await installRule(rule) },
                 onUninstall: { await uninstallRule(rule) }
             )
@@ -119,7 +120,7 @@ struct AnimeRulesMarketView: View {
 
         // 加载已安装的规则
         let installedRules = await AnimeRuleStore.shared.loadAllRules()
-        installedRuleIds = Set(installedRules.map { $0.id })
+        installedVersions = Dictionary(uniqueKeysWithValues: installedRules.map { ($0.id, $0.version) })
 
         // 加载可用规则列表
         let available = await AnimeRuleStore.shared.fetchAvailableRules()
@@ -133,6 +134,13 @@ struct AnimeRulesMarketView: View {
 
         let available = await AnimeRuleStore.shared.fetchAvailableRules()
         availableRules = available
+        let installed = await AnimeRuleStore.shared.loadAllRules()
+        installedVersions = Dictionary(uniqueKeysWithValues: installed.map { ($0.id, $0.version) })
+    }
+
+    private func needsInstallation(_ rule: AnimeRuleInfo) -> Bool {
+        guard let installed = installedVersions[rule.id] else { return true }
+        return AnimeRuleStore.isNewer(rule.version, than: installed)
     }
 
     // MARK: - 安装规则
@@ -140,8 +148,8 @@ struct AnimeRulesMarketView: View {
         isLoading = true
         defer { isLoading = false }
 
-        if let _ = await AnimeRuleStore.shared.installRuleByName(rule.id) {
-            installedRuleIds.insert(rule.id)
+        if let installed = await AnimeRuleStore.shared.installRuleByName(rule.name) {
+            installedVersions[installed.id] = installed.version
         } else {
             errorMessage = String(format: t("animeRules.installFailed"), rule.name)
             showingError = true
@@ -155,7 +163,7 @@ struct AnimeRulesMarketView: View {
 
         do {
             try await AnimeRuleStore.shared.uninstallRule(rule.id)
-            installedRuleIds.remove(rule.id)
+            installedVersions.removeValue(forKey: rule.id)
         } catch {
             errorMessage = String(format: t("animeRules.uninstallFailed"), error.localizedDescription)
             showingError = true
@@ -167,12 +175,13 @@ struct AnimeRulesMarketView: View {
         isLoading = true
         defer { isLoading = false }
 
-        for rule in availableRules {
-            if !installedRuleIds.contains(rule.id) {
-                if let _ = await AnimeRuleStore.shared.installRuleByName(rule.id) {
-                    installedRuleIds.insert(rule.id)
-                }
-            }
+        do {
+            // Full install/update shares the store's all-or-nothing transaction.
+            let installed = try await AnimeRuleStore.shared.installKazumiAnimeRules()
+            installedVersions = Dictionary(uniqueKeysWithValues: installed.map { ($0.id, $0.version) })
+        } catch {
+            errorMessage = String(format: t("animeRules.installAllFailed"), error.localizedDescription)
+            showingError = true
         }
     }
 }
@@ -180,7 +189,10 @@ struct AnimeRulesMarketView: View {
 // MARK: - 规则市场项
 private struct RuleMarketItem: View {
     let rule: AnimeRuleInfo
-    let isInstalled: Bool
+    let installedVersion: String?
+    let isBusy: Bool
+    private var isInstalled: Bool { installedVersion != nil }
+    private var hasUpdate: Bool { installedVersion.map { AnimeRuleStore.isNewer(rule.version, than: $0) } ?? false }
     let onInstall: () async -> Void
     let onUninstall: () async -> Void
 
@@ -206,7 +218,7 @@ private struct RuleMarketItem: View {
                         .font(.system(size: 14, weight: .semibold))
 
                     if isInstalled {
-                        Text(t("animeRules.installed"))
+                        Text(t(hasUpdate ? "animeRules.updateAvailable" : "animeRules.installed"))
                             .font(.system(size: 10))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -226,6 +238,11 @@ private struct RuleMarketItem: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
+                    if let installedVersion {
+                        Text(String(format: t("animeRules.installedVersion"), installedVersion))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
                     if rule.antiCrawlerEnabled {
                         Label(t("animeRules.needsVerification"), systemImage: "exclamationmark.triangle")
                             .font(.system(size: 11))
@@ -236,7 +253,15 @@ private struct RuleMarketItem: View {
 
             Spacer()
 
-            // 操作按钮
+            // Updating does not replace the separate uninstall action.
+            if hasUpdate {
+                Button(t("animeRules.update")) {
+                    isProcessing = true
+                    Task { await onInstall(); isProcessing = false }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isBusy || isProcessing)
+            }
             Button {
                 isProcessing = true
                 Task {
@@ -265,7 +290,7 @@ private struct RuleMarketItem: View {
                 RoundedRectangle(cornerRadius: 6)
                     .stroke(isInstalled ? Color.white.opacity(0.3) : Color.clear, lineWidth: 1)
             )
-            .disabled(isProcessing)
+            .disabled(isBusy || isProcessing)
         }
         .padding(.vertical, 4)
     }

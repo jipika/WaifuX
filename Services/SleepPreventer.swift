@@ -14,6 +14,7 @@ final class SleepPreventer {
         case userSetting
         /// 番剧 / 视频播放期间
         case mediaPlayback
+        case mediaSession(UUID)
     }
 
     private var activeReasons: Set<Reason> = []
@@ -39,13 +40,13 @@ final class SleepPreventer {
     }
 
     /// 播放视频时调用（兼容既有调用点）
-    func startPreventingSleep() {
-        setPreventingSleep(true, reason: .mediaPlayback)
+    func startPreventingSleep(sessionID: UUID? = nil) {
+        setPreventingSleep(true, reason: sessionID.map { .mediaSession($0) } ?? .mediaPlayback)
     }
 
     /// 停止播放时调用（兼容既有调用点；不会影响用户设置持有的 assertion）
-    func stopPreventingSleep() {
-        setPreventingSleep(false, reason: .mediaPlayback)
+    func stopPreventingSleep(sessionID: UUID? = nil) {
+        setPreventingSleep(false, reason: sessionID.map { .mediaSession($0) } ?? .mediaPlayback)
     }
 
     // MARK: - Assertion lifecycle

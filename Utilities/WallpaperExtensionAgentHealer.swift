@@ -59,7 +59,7 @@ enum WallpaperExtensionRecoveryPolicy {
     }
 
     /// 扩展状态文件里「正在渲染」的声明；isActive=false 或没有 contexts 时不构造。
-    struct ActiveRecord: Equatable {
+    struct ActiveRecord: Equatable, Codable {
         let pid: Int32
         let updatedAt: TimeInterval
     }
@@ -73,6 +73,8 @@ enum WallpaperExtensionRecoveryPolicy {
         case awaitingContexts
         /// 验证窗口内没有稳定实例，退避后对同一证据重试。
         case verificationFailed
+        /// Registration was accepted, but the same rendering instance is still definitely gone.
+        case restartForMissing(ActiveRecord)
     }
 
     struct State {
@@ -95,7 +97,8 @@ enum WallpaperExtensionRecoveryPolicy {
         /// - now: 单调时钟；wallNow: 与状态文件 updatedAt 同源的墙钟。
         mutating func observe(
             selected: Bool, pids: [Int32]?, record: ActiveRecord?,
-            now: TimeInterval, wallNow: TimeInterval, registrationInProgress: Bool
+            now: TimeInterval, wallNow: TimeInterval, registrationInProgress: Bool,
+            allowMissingRestart: Bool = false, attempted: ActiveRecord? = nil
         ) -> Action {
             if observingSince == nil { observingSince = now }
             guard selected else {
@@ -119,10 +122,23 @@ enum WallpaperExtensionRecoveryPolicy {
                     endPending()
                     return .recovered
                 }
+                if pids.isEmpty, let record, record == pendingEvidence {
+                    if missingSince == nil { missingSince = now }
+                    missingSamples += 1
+                } else {
+                    resetMissing()
+                }
                 guard now - pendingSince >= WallpaperExtensionRecoveryPolicy.verifyWindow else { return .none }
+                if allowMissingRestart, !registrationInProgress, pids.isEmpty,
+                   let record, record == pendingEvidence, record != attempted {
+                    guard missingSamples >= 2, let missingSince,
+                          now - missingSince >= WallpaperExtensionRecoveryPolicy.missingConfirmation else { return .none }
+                    return .restartForMissing(record)
+                }
                 return verificationTimeout(now: now, registrationInProgress: registrationInProgress)
             }
-            guard pids.isEmpty, let record, !pids.contains(record.pid), record != handledEvidence else {
+            guard pids.isEmpty, let record, !pids.contains(record.pid), record != handledEvidence,
+                  record != attempted else {
                 resetMissing()
                 return .none
             }
@@ -219,6 +235,53 @@ enum WallpaperExtensionRecoveryPolicy {
     }
 }
 
+/// The one-shot record is independent of CFPrefs acknowledgement. An interrupted
+/// reservation is ambiguous and deliberately cannot be retried after a Helper crash.
+enum WallpaperMissingRestartJournal {
+    typealias Fault = WallpaperExtensionRecoveryPolicy.ActiveRecord
+    enum Phase: String, Codable { case reserved, sent, notSent }
+    enum Gate: Equatable { case ready, retryAfter(TimeInterval), blocked }
+    struct Entry: Codable {
+        let fault: Fault
+        let phase: Phase
+        let number: Int
+        let recordedAt: TimeInterval
+    }
+
+    static func url(for stateFile: URL) -> URL {
+        stateFile.deletingLastPathComponent().appendingPathComponent("waifux-wallpaper-restart-journal.json")
+    }
+
+    static func read(at url: URL) throws -> Entry? {
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            guard let data = try handle.read(upToCount: 4097), !data.isEmpty, data.count <= 4096 else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let entry = try JSONDecoder().decode(Entry.self, from: data)
+            guard entry.number == 1 || entry.number == 2, entry.recordedAt.isFinite, entry.recordedAt > 0 else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            return entry
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain
+            && (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError) {
+            return nil
+        }
+    }
+
+    static func gate(_ entry: Entry?, fault: Fault) -> Gate {
+        guard let entry, entry.fault == fault else { return .ready }
+        guard entry.phase == .notSent, entry.number < 2 else { return .blocked }
+        return .retryAfter(entry.recordedAt + 15)
+    }
+
+    static func write(fault: Fault, phase: Phase, number: Int, at url: URL, now: TimeInterval = Date().timeIntervalSince1970) throws {
+        let record = Entry(fault: fault, phase: phase, number: number, recordedAt: now)
+        try JSONEncoder().encode(record).write(to: url, options: .atomic)
+    }
+}
+
 /// @unchecked Sendable：全部可变状态由 stateLock 保护，探测在私有串行队列执行。
 /// init 与 Darwin 回调里不读偏好；开关在每次采样时读取。
 final class WallpaperExtensionAgentHealer: @unchecked Sendable {
@@ -235,6 +298,19 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var state = WallpaperExtensionRecoveryPolicy.State()
     private var healInProgress = false
+    private struct MissingVerification {
+        let scopes: [WallpaperAgentRecoveryTargetPolicy.Scope]
+        let restartedAt: TimeInterval
+        let originalPID: Int32
+        let deadline: TimeInterval
+        var replayed: [UInt32: String] = [:]
+        var readyPID: Int32?
+        var readyRequests: [UInt32: String] = [:]
+        var readySince: TimeInterval = 0
+    }
+    private var missingVerification: MissingVerification?
+    private var missingPreflightAfter: TimeInterval = 0
+    private static let missingAttemptKey = "wallpaper_missing_process_recovery_attempt"
     private var embeddedExtensionURL: URL?
     private var stateURL: URL?
     private var lifecycleGeneration: UInt64 = 0
@@ -391,15 +467,27 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
         }
         let now = ProcessInfo.processInfo.systemUptime
         let wallNow = Date().timeIntervalSince1970
+        let journalGate: WallpaperMissingRestartJournal.Gate
+        if let record, let stateFile {
+            do { journalGate = WallpaperMissingRestartJournal.gate(try WallpaperMissingRestartJournal.read(at: WallpaperMissingRestartJournal.url(for: stateFile)), fault: record) }
+            catch { journalGate = .blocked }
+        } else { journalGate = .ready }
+        let attempted = journalGate == .blocked ? record : nil
+        let waiting: Bool
+        if case .retryAfter(let deadline) = journalGate { waiting = wallNow < deadline } else { waiting = false }
 
         stateLock.lock()
         guard started, monitoring, lifecycleGeneration == observingGeneration else { stateLock.unlock(); return }
         let action = state.observe(selected: selected, pids: pids, record: record,
-                                   now: now, wallNow: wallNow, registrationInProgress: healInProgress || contextBusy != nil
-                || contextStates.values.contains(where: { $0.pendingSubmission != nil }))
+                                   now: now, wallNow: wallNow, registrationInProgress: healInProgress || contextBusy != nil || waiting || now < missingPreflightAfter
+                || missingVerification != nil || contextStates.values.contains(where: { $0.pendingSubmission != nil }),
+                                    allowMissingRestart: true, attempted: attempted)
         let generation = lifecycleGeneration
         let extensionURL = embeddedExtensionURL
-        if action == .register { healInProgress = true }
+        switch action {
+        case .register, .restartForMissing: healInProgress = true
+        default: break
+        }
         stateLock.unlock()
 
         switch action {
@@ -411,6 +499,13 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
             os_log(.info, log: log, "extension relaunched and stable; WallpaperAgent has not assigned a context yet — not registering again")
         case .verificationFailed:
             os_log(.error, log: log, "no stable extension within 150s after registration; backing off")
+        case .restartForMissing(let fault):
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let eligible = extensionURL.map { WallpaperExtensionKeeper.hasUsableElectedExtension(for: $0) } ?? false
+                Task { @MainActor [weak self] in
+                    self?.restartForMissingExtension(fault, generation: generation, eligible: eligible)
+                }
+            }
         case .register:
             os_log(.info, log: log, "extension pid %{public}d died while rendering; validating host appex before safe registration",
                    record?.pid ?? 0)
@@ -428,6 +523,169 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
             }
         }
         scheduleContextRecovery(generation: generation)
+    }
+
+    private static func legacyMissingAttempt() -> WallpaperExtensionRecoveryPolicy.ActiveRecord? {
+        guard let values = WaifuXPreferences.shared.dictionary(forKey: missingAttemptKey),
+              let pid = (values["pid"] as? NSNumber)?.int32Value, pid > 0,
+              let time = (values["updatedAt"] as? NSNumber)?.doubleValue, time.isFinite else { return nil }
+        return .init(pid: pid, updatedAt: time)
+    }
+
+    @MainActor
+    private func restartForMissingExtension(
+        _ fault: WallpaperExtensionRecoveryPolicy.ActiveRecord, generation: UInt64, eligible: Bool
+    ) {
+        stateLock.lock()
+        let file = stateURL
+        stateLock.unlock()
+        defer {
+            stateLock.lock()
+            healInProgress = false
+            stateLock.unlock()
+        }
+        guard isCurrentHealingGeneration(generation), let file else { return }
+        let journal = WallpaperMissingRestartJournal.url(for: file)
+        let entry: WallpaperMissingRestartJournal.Entry?
+        do { entry = try WallpaperMissingRestartJournal.read(at: journal) }
+        catch {
+            os_log(.error, log: log, "missing extension restart journal unreadable: %{public}@", error.localizedDescription)
+            return
+        }
+        switch WallpaperMissingRestartJournal.gate(entry, fault: fault) {
+        case .blocked: return
+        case .retryAfter(let deadline) where Date().timeIntervalSince1970 < deadline: return
+        default: break
+        }
+        let number = entry?.fault == fault ? (entry?.number ?? 0) + 1 : 1
+        if !eligible {
+            stateLock.lock()
+            state.registrationFailed(now: ProcessInfo.processInfo.systemUptime)
+            stateLock.unlock()
+            os_log(.error, log: log, "missing extension recovery deferred: no usable elected extension")
+            return
+        }
+        guard !VideoWallpaperManager.shared.isScreenLocked, WallpaperAgentRecoveryExecutor.sessionAllowsRecovery(),
+              let report = Self.contextReport(at: file), report.pid == fault.pid, report.updatedAt == fault.updatedAt else { return }
+        let scopes = report.activeDisplays.sorted().compactMap { WallpaperAgentRecoveryExecutor.currentScope(displayID: $0) }
+            .filter { WallpaperAgentRecoveryExecutor.isSelected($0) }
+        guard !scopes.isEmpty else { return }
+        func scopeIsCurrent(_ scope: WallpaperAgentRecoveryTargetPolicy.Scope) -> Bool {
+            WallpaperAgentRecoveryExecutor.currentScope(displayID: scope.displayID) == scope
+                && WallpaperAgentRecoveryExecutor.isSelected(scope)
+        }
+        let restartedAt = Date().timeIntervalSince1970
+        var reserved = false
+        let result = WallpaperAgentRecoveryExecutor.attemptRestart(shouldContinue: {
+            self.isCurrentHealingGeneration(generation) && !VideoWallpaperManager.shared.isScreenLocked
+                && scopes.allSatisfy { scopeIsCurrent($0) }
+                && Self.activeRecord(at: file) == fault && ProcessLiveness.isDefinitelyDead(fault.pid)
+                && WallpaperExtensionKeeper.observedExtensionProcessPids()?.isEmpty == true
+        }, legacyCutoff: Self.legacyMissingAttempt() == fault ? fault.updatedAt : nil, reserve: {
+            do {
+                try WallpaperMissingRestartJournal.write(fault: fault, phase: .reserved, number: number, at: journal)
+                reserved = true
+                return true
+            } catch {
+                os_log(.error, log: self.log, "cannot reserve missing extension restart: %{public}@", error.localizedDescription)
+                return false
+            }
+        })
+        let sent = result == .sent
+        if reserved {
+            do { try WallpaperMissingRestartJournal.write(fault: fault, phase: sent ? .sent : .notSent, number: number, at: journal) }
+            catch { os_log(.error, log: log, "restart outcome not persisted; reservation remains closed: %{public}@", error.localizedDescription) }
+        }
+        stateLock.lock()
+        if sent {
+            state.registrationFailed(now: ProcessInfo.processInfo.systemUptime)
+            missingVerification = MissingVerification(scopes: scopes, restartedAt: restartedAt, originalPID: fault.pid,
+                deadline: ProcessInfo.processInfo.systemUptime + 60)
+        } else {
+            missingPreflightAfter = ProcessInfo.processInfo.systemUptime + 15
+        }
+        stateLock.unlock()
+        os_log(sent ? .info : .error, log: log, "missing extension recovery pid=%d candidate=%d: %{public}@",
+               fault.pid, number, String(describing: result))
+    }
+
+    /// Returns true while this branch owns recovery. It never treats the old ready bit or cold cache as a receipt.
+    @MainActor
+    private func verifyMissingProcessRecovery(generation: UInt64) -> Bool {
+        stateLock.lock()
+        let file = stateURL
+        var pending = missingVerification
+        stateLock.unlock()
+        guard var verification = pending else { return false }
+        let now = ProcessInfo.processInfo.systemUptime
+        let server = WallpaperExtensionSocketServer.shared
+        let selected = verification.scopes.allSatisfy { scope in
+            WallpaperAgentRecoveryExecutor.currentScope(displayID: scope.displayID) == scope
+                && WallpaperAgentRecoveryExecutor.isSelected(scope)
+        }
+        if selected, now < verification.deadline {
+            if let pids = WallpaperExtensionKeeper.observedExtensionProcessPids(), pids.count == 1,
+               let report = Self.contextReport(at: file), pids.first == report.pid, report.pid != verification.originalPID,
+               report.updatedAt >= verification.restartedAt {
+                var readyRequests: [UInt32: String] = [:]
+                for scope in verification.scopes where report.activeDisplays.contains(scope.displayID) {
+                    let display = scope.displayID
+                    if let request = server.recoveryRequestID(displayID: display) {
+                        if verification.replayed[display] != request,
+                           server.replaySourceForMissingProcessRecovery(displayID: display, requestID: request) {
+                            verification.replayed[display] = request
+                        }
+                        if server.hasFreshRecoveryReceipt(displayID: display, requestID: request, pid: report.pid,
+                                                          after: verification.restartedAt) {
+                            readyRequests[display] = request
+                        }
+                    } else if let source = Self.cachedRecoverySource(displayID: display, stateFile: file),
+                              let request = server.enqueueCachedSourceForRecovery(displayID: display, url: source.url, video: source.video) {
+                        verification.replayed[display] = request
+                    }
+                }
+                if readyRequests.count == verification.scopes.count {
+                    if verification.readyPID != report.pid || verification.readyRequests != readyRequests {
+                        verification.readyPID = report.pid
+                        verification.readyRequests = readyRequests
+                        verification.readySince = now
+                    }
+                    if now - verification.readySince >= 2 {
+                        pending = nil
+                        os_log(.info, log: log, "missing extension recovery verified pid=%d: fresh contexts and source_ready on %d display(s)",
+                               report.pid, readyRequests.count)
+                    } else { pending = verification }
+                } else { verification.readyPID = nil; pending = verification }
+            } else { verification.readyPID = nil; pending = verification }
+        } else {
+            pending = nil
+            os_log(.error, log: log, "missing extension recovery not verified: scope changed or source did not become ready")
+        }
+        stateLock.lock()
+        if lifecycleGeneration == generation { missingVerification = pending }
+        stateLock.unlock()
+        if pending != nil { scheduleContextFollowup(generation: generation) }
+        return true
+    }
+
+    /// Recover a cold Helper's exact per-screen publication, never the legacy global fallback.
+    private static func cachedRecoverySource(displayID: UInt32, stateFile: URL?) -> (url: URL, video: Bool)? {
+        guard let container = stateFile?.deletingLastPathComponent() else { return nil }
+        let prefs = container.appendingPathComponent("waifux-wallpaper-prefs.json")
+        guard let size = try? prefs.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0, size <= 64 * 1024,
+              let data = try? Data(contentsOf: prefs), data.count <= 64 * 1024,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let key = "display-\(displayID)"
+        let video = (root["currentVideoPaths"] as? [String: String])?[key]
+        let image = (root["currentImagePaths"] as? [String: String])?[key]
+        guard (video == nil) != (image == nil), let path = video ?? image, path.hasPrefix("/") else { return nil }
+        let isVideo = video != nil
+        let directory = container.appendingPathComponent(isVideo ? "WallpaperVideos" : "WallpaperImages")
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+        guard url.deletingLastPathComponent().path == directory,
+              (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { return nil }
+        return (URL(fileURLWithPath: path).standardizedFileURL, isVideo)
     }
 
     /// A new request (including one which has not reported pending yet) invalidates
@@ -462,6 +720,7 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
         contextMonitoringSince = nil
         contextFollowupGeneration = nil
         contextLastAgentRestartWall = nil
+        missingVerification = nil
         contextWallStarts.removeAll()
         contextAccepted.removeAll()
         contextReplayed.removeAll()
@@ -492,6 +751,11 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
               WallpaperAgentRecoveryExecutor.sessionAllowsRecovery() else {
             stateLock.lock(); suspendContextRecovery(); stateLock.unlock()
             return
+        }
+        if verifyMissingProcessRecovery(generation: generation) { return }
+        if let file, let fault = Self.activeRecord(at: file) {
+            let journal = try? WallpaperMissingRestartJournal.read(at: WallpaperMissingRestartJournal.url(for: file))
+            if journal?.fault == fault || Self.legacyMissingAttempt() == fault { return }
         }
         let server = WallpaperExtensionSocketServer.shared
         let evidence = Dictionary(uniqueKeysWithValues: server.contextRecoveryEvidence().map { ($0.displayID, $0) })
@@ -610,9 +874,9 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
                         return
                     }
                     let restartedAt = Date().timeIntervalSince1970
-                    let accepted = WallpaperAgentRecoveryExecutor.restartCurrentUserAgent {
+                    let accepted = WallpaperAgentRecoveryExecutor.restartCurrentUserAgent(shouldContinue: {
                         self.contextSubmissionAllowed(displayID: display, submission: submission, generation: generation)
-                    }
+                    })
                     if !accepted, !self.contextSubmissionAllowed(displayID: display, submission: submission, generation: generation) {
                         self.cancelContextSubmission(displayID: display, submission: submission)
                     } else {

@@ -316,9 +316,18 @@ final class AppLogger: @unchecked Sendable {
 #if DEBUG
         // 1. 控制台输出（带 emoji + 颜色）
         print("\(level.emoji) \(line)")
+#endif
 
-        // 2. os.log 输出（系统日志，可用 Console.app 查看）
+        // 2. os.log 输出（系统日志，可用 Console.app / log show 查看）。
+        //    DEBUG 全量；Release 只留 error 与关键链路模块——issue #128 真因是
+        //    数据目录断链，日志文件与数据目录同路径、同样写不进，os_log 是
+        //    Helper 侧唯一能留痕的渠道，不能随文件一起消失。
+#if DEBUG
         os_log("%{public}@", log: Self.oslog, type: level.osLogType(), line)
+#else
+        if level == .error || Self.releasePersistedModules.contains(module) {
+            os_log("%{public}@", log: Self.oslog, type: level.osLogType(), line)
+        }
 #endif
 
         // 3. 文件持久化：Release 模式下只保留 error 级别，用于排查用户问题。

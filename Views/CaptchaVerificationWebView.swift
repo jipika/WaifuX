@@ -21,23 +21,20 @@ struct CaptchaVerificationWebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         
-        // 设置 User-Agent
-        if let userAgent = customUserAgent {
-            webView.customUserAgent = userAgent
-        }
-        
-        // 加载 URL
-        let request = URLRequest(url: url)
-        webView.load(request)
+        webView.customUserAgent = AnimeVideoExtractor.nonempty(customUserAgent)
+            ?? AnimeVideoExtractor.defaultBrowserUserAgent
+
+        context.coordinator.requestedURL = url
+        webView.load(URLRequest(url: url))
         
         return webView
     }
     
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        // 检查是否需要加载新 URL
-        if nsView.url?.absoluteString != url.absoluteString {
-            let request = URLRequest(url: url)
-            nsView.load(request)
+        // 比较输入入口，站内验证跳转不能被SwiftUI的重绘重置。
+        if context.coordinator.requestedURL != url {
+            context.coordinator.requestedURL = url
+            nsView.load(URLRequest(url: url))
         }
     }
 
@@ -53,12 +50,15 @@ struct CaptchaVerificationWebView: NSViewRepresentable {
     }
     
     class Coordinator: NSObject, WKNavigationDelegate {
+        var requestedURL: URL?
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            print("[CaptchaVerificationWebView] 页面加载完成: \(webView.url?.absoluteString ?? "unknown")")
+            print("[CaptchaVerificationWebView] 页面加载完成 host=\(webView.url?.host ?? "unknown")")
         }
         
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            print("[CaptchaVerificationWebView] 页面加载失败: \(error.localizedDescription)")
+            let failure = error as NSError
+            print("[CaptchaVerificationWebView] 页面加载失败 domain=\(failure.domain) code=\(failure.code)")
         }
     }
 }

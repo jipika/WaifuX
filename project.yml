@@ -131,6 +131,10 @@ targets:
         LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks
         # 内嵌 assets zip 的 .o 文件由 scripts/build-wallpaper-wgpu.sh 手动生成并提交。
         OTHER_LDFLAGS: $(inherited)
+        # 弹弹play开放平台凭证：本地默认空（用户在设置页填写后存 Keychain）；
+        # CI 用 xcodebuild WAIFUX_DANDAN_APPID=... WAIFUX_DANDAN_APPSECRET=... 覆盖（值来自 GitHub Secrets）。
+        WAIFUX_DANDAN_APPID: ""
+        WAIFUX_DANDAN_APPSECRET: ""
     dependencies:
       - package: SwiftSoup
       - package: Kanna
@@ -394,6 +398,8 @@ targets:
       - path: Metal/VideoLoopAnalysisMetalComparator.swift
       - path: Models/ContentModels.swift
       - path: Models/AnimeRule.swift
+      - path: Models/AnimeAPIConfiguration.swift
+      - path: Models/AnimeDownloadTask.swift
       - path: Models/DataSourceRule.swift
       - path: Models/DisplayCropSettings.swift
       - path: Models/DownloadError.swift
@@ -455,6 +461,7 @@ targets:
       - path: Services/LocalWallpaperApplyService.swift
       - path: Services/LocalWallpaperScanner.swift
       - path: Services/LocalizationService.swift
+      - path: Services/AnimeFeatureLocalization.swift
       - path: Services/LockScreenFramePusher.swift
       - path: Services/LockScreenWallpaperService.swift
       - path: Services/AppGroupCacheBudget.swift

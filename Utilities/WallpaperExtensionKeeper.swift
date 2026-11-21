@@ -191,6 +191,35 @@ enum WallpaperExtensionKeeper {
         return reviveExtension(at: extensionURL, waitForActivation: true)
     }
 
+    /// Only the default PlugInKit match counts, not an inactive duplicate in -A -D.
+    /// A valid installed copy need not be displaced by an Xcode build of the same provider.
+    static func hasUsableElectedExtension(for embeddedURL: URL) -> Bool {
+        let result = runTool("/usr/bin/pluginkit", arguments: ["-m", "-v", "-i", extensionBundleID],
+                             label: "pluginkit lookup", logResult: false)
+        guard result.status == 0 else { return false }
+        let records = result.output.split(whereSeparator: \.isNewline).compactMap { line -> URL? in
+            guard line.hasPrefix("+"), line.contains("\(extensionBundleID)("),
+                  let start = line.firstIndex(of: "/") else { return nil }
+            let path = line[start...].trimmingCharacters(in: .whitespaces)
+            guard path.hasSuffix("/Contents/PlugIns/WaifuXWallpaperExtension.appex") else { return nil }
+            return URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        }
+        guard records.count == 1, let elected = records.first,
+              registrationRejectionReason(for: elected) == nil,
+              let team = signingTeam(for: embeddedURL), team == signingTeam(for: elected) else { return false }
+        return true
+    }
+
+    private static func signingTeam(for url: URL) -> String? {
+        var code: SecStaticCode?
+        var information: CFDictionary?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+              let dictionary = information as? [String: Any],
+              let team = dictionary[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty else { return nil }
+        return team
+    }
+
     /// 只注册签名与沙盒授权有效的宿主内 appex。每一步之前复查选择状态与扩展进程：
     /// 注册会让 pkd remove 同 bundle ID 的全部实例，对存活扩展执行就是本案凶器。
     /// - waitForActivation: false 时只报告注册命令是否被接受；激活由调用方
@@ -204,6 +233,11 @@ enum WallpaperExtensionKeeper {
         guard FileManager.default.fileExists(atPath: extensionURL.path) else {
             keeperLog("embedded appex missing at \(extensionURL.path)")
             return false
+        }
+        if hasUsableElectedExtension(for: extensionURL) {
+            keeperLog("usable extension already elected — skip re-registration")
+            if !waitForActivation { return true }
+            return observedExtensionProcessPids()?.isEmpty == false
         }
         // 只放行实测的 lsregister Spotlight -10811；其它工具错误立即中止并退避。
         let steps: [(label: String, tool: String, arguments: [String])] = [
@@ -276,7 +310,7 @@ enum WallpaperExtensionKeeper {
 
     /// 保留真实退出码与输出；无法启动时状态为 -1。
     @discardableResult
-    private static func runTool(_ launchPath: String, arguments: [String], label: String) -> ToolResult {
+    private static func runTool(_ launchPath: String, arguments: [String], label: String, logResult: Bool = true) -> ToolResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
@@ -286,14 +320,14 @@ enum WallpaperExtensionKeeper {
         do {
             try process.run()
         } catch {
-            keeperLog("\(label) failed to launch: \(error.localizedDescription)")
+            if logResult { keeperLog("\(label) failed to launch: \(error.localizedDescription)") }
             return ToolResult(status: -1, output: error.localizedDescription)
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         let output = String(data: data, encoding: .utf8) ?? ""
         let tail = output.isEmpty ? "" : " output=\(output.prefix(400))"
-        keeperLog("\(label) exit=\(process.terminationStatus)\(tail)")
+        if logResult { keeperLog("\(label) exit=\(process.terminationStatus)\(tail)") }
         return ToolResult(status: process.terminationStatus, output: output)
     }
 

@@ -62,6 +62,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case workshop
     case pixiv
     case konachan
+    case bangumi
+    case danmaku
     case scheduler
     case sync
     case about
@@ -77,6 +79,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .workshop: return t("wallpaperEngine")
         case .pixiv: return "Pixiv"
         case .konachan: return "Konachan"
+        case .bangumi: return "Bangumi"
+        case .danmaku: return t("settings.danmaku.title")
         case .scheduler: return t("scheduler")
         case .sync: return t("cloudSync")
         case .about: return t("about")
@@ -92,6 +96,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .workshop: return "gearshape.2" // Steam/Workshop 风格
         case .pixiv: return "p.circle"
         case .konachan: return "k.circle"
+        case .bangumi: return "person.crop.circle"
+        case .danmaku: return "text.bubble"
         case .scheduler: return "clock.arrow.circlepath"
         case .sync: return "icloud"
         case .about: return "info.circle"
@@ -193,6 +199,10 @@ struct SettingsView: View {
                         PixivSettingsTab()
                     case .konachan:
                         KonachanSettingsTab()
+                    case .bangumi:
+                        BangumiAccountSyncView()
+                    case .danmaku:
+                        DanmakuSettingsTab()
                     case .scheduler:
                         SchedulerSettingsTab(viewModel: viewModel)
                     case .sync:
@@ -221,7 +231,7 @@ struct SettingsView: View {
     }
 
     /// tab → 引导锚点（设置总览导览逐步高亮左侧分类）。
-    private static func settingsGuideAnchor(for tab: SettingsTab) -> GuideAnchorID {
+    private static func settingsGuideAnchor(for tab: SettingsTab) -> GuideAnchorID? {
         switch tab {
         case .general: return .settingsTabGeneral
         case .modules: return .settingsTabModules
@@ -230,6 +240,8 @@ struct SettingsView: View {
         case .workshop: return .settingsTabWorkshop
         case .pixiv: return .settingsTabPixiv
         case .konachan: return .settingsTabKonachan
+        case .bangumi: return nil
+        case .danmaku: return nil
         case .scheduler: return .settingsTabScheduler
         case .sync: return .settingsTabSync
         case .about: return .settingsTabAbout
@@ -240,7 +252,7 @@ struct SettingsView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(SettingsTab.allCases.filter { $0 != .sync }, id: \.self) { tab in
-                SidebarItem(
+                let item = SidebarItem(
                     tab: tab,
                     isSelected: selectedTab == tab,
                     action: {
@@ -249,7 +261,11 @@ struct SettingsView: View {
                         }
                     }
                 )
-                .guideAnchor(Self.settingsGuideAnchor(for: tab))
+                if let anchor = Self.settingsGuideAnchor(for: tab) {
+                    item.guideAnchor(anchor)
+                } else {
+                    item
+                }
             }
 
             Spacer()

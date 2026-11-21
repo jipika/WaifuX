@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Combine
 
@@ -718,6 +719,7 @@ final class MediaLibraryService: ObservableObject {
         if isWeb {
             return name.contains("_\(SceneBakeRenderer.wallpaperEngineWeb.rawValue)_")
                 || name.hasPrefix("web_v")
+                || SceneOfflineBakeService.isNamedWebBakeProduct(name)
         }
         return SceneOfflineBakeService.looksLikeBakeProductFilename(name)
     }
@@ -807,11 +809,15 @@ final class MediaLibraryService: ObservableObject {
         syncDlIndex()
         downloadRecords = Array(downloadRecords)
 
-        // 绑定新成片时清掉同目录历史随机 UUID 残留
+        // Re-baking is not a wallpaper apply: do not remove a previous output that is still playing.
         let videoURL = URL(fileURLWithPath: artifact.videoPath)
+        let assignedPaths = NSScreen.screens.compactMap {
+            VideoWallpaperManager.shared.assignedVideoURL(for: $0)?.standardizedFileURL.path
+        }
         SceneOfflineBakeService.cleanupStaleBakeFiles(
             inDirectory: videoURL.deletingLastPathComponent(),
-            keeping: videoURL
+            keeping: videoURL,
+            preserving: CurrentWallpaperService.shared.activeFilePaths.union(assignedPaths)
         )
 
         // 确保烘焙视频有抽帧封面

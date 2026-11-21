@@ -58,7 +58,7 @@ class AnimePlayerWindowController: NSWindowController {
         // 监听全屏切换通知
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(handleToggleFullScreen),
+            selector: #selector(handleToggleFullScreen(_:)),
             name: .togglePlayerFullScreen,
             object: nil
         )
@@ -72,7 +72,8 @@ class AnimePlayerWindowController: NSWindowController {
         window.contentView = EdgeToEdgeHostingView(rootView: contentView)
     }
     
-    @objc private func handleToggleFullScreen() {
+    @objc private func handleToggleFullScreen(_ notification: Notification) {
+        guard notification.object as? String == animeId else { return }
         window?.toggleFullScreen(nil)
     }
     
@@ -86,6 +87,11 @@ class AnimePlayerWindowController: NSWindowController {
                 return event
             }
             
+            // 文本输入与附着sheet保留自己的空格/方向键，不能被播放快捷键截走。
+            if playerWindow.attachedSheet != nil || playerWindow.firstResponder is NSTextView ||
+                event.modifierFlags.intersection([.command, .control, .option]).isEmpty == false {
+                return event
+            }
             switch event.keyCode {
             case 49: // 空格键
                 self.togglePlayPause()
@@ -207,6 +213,7 @@ class AnimeWindowManager: ObservableObject {
     static let shared = AnimeWindowManager()
     
     private var windowControllers: [String: AnimePlayerWindowController] = [:]
+    private var downloadVerificationWindows: [String: AnimeDownloadVerificationWindowController] = [:]
     
     private init() {}
     
@@ -226,9 +233,9 @@ class AnimeWindowManager: ObservableObject {
         windowControllers[anime.id] = controller
         controller.showWindow()
         
-        // 自动搜索所有源
+        // 规则装载完成后再检索所有源；两步在同一任务里串行，杜绝空规则时检索被静默跳过。
         Task {
-            await viewModel.searchAllSources()
+            await viewModel.loadRulesAndSearchAllSources()
         }
         
         return true
@@ -239,6 +246,22 @@ class AnimeWindowManager: ObservableObject {
         windowControllers.removeValue(forKey: animeId)
     }
     
+    func presentDownloadVerification(rule: AnimeRule, episode: AnimeDetail.AnimeEpisodeItem) {
+        if let existing = downloadVerificationWindows[rule.id] {
+            existing.showWindow(nil)
+            existing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        guard let url = URL(string: episode.url), ["http", "https"].contains(url.scheme ?? "") else { return }
+        let session = CaptchaVerificationSession(rule: rule, startURL: url, replayEpisode: episode, isDownload: true)
+        let controller = AnimeDownloadVerificationWindowController(session: session) { [weak self] in
+            self?.downloadVerificationWindows.removeValue(forKey: rule.id)
+        }
+        downloadVerificationWindows[rule.id] = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
     /// 关闭指定动漫的窗口
     func closeWindow(for animeId: String) {
         windowControllers[animeId]?.closeWindow()
@@ -250,5 +273,48 @@ class AnimeWindowManager: ObservableObject {
         let controllers = Array(windowControllers.values)
         windowControllers.removeAll()
         controllers.forEach { $0.closeWindow() }
+        let verificationControllers = Array(downloadVerificationWindows.values)
+        downloadVerificationWindows.removeAll()
+        verificationControllers.forEach { $0.close() }
+    }
+}
+
+/// 下载可在播放器关闭或已有sheet时要求验证，使用独立窗口承载同一手动验证页。
+@MainActor
+private final class AnimeDownloadVerificationWindowController: NSWindowController, NSWindowDelegate {
+    private let onClosed: () -> Void
+    private var verificationTask: Task<Void, Never>?
+
+    init(session: CaptchaVerificationSession, onClosed: @escaping () -> Void) {
+        self.onClosed = onClosed
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 740),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = t("player.securityVerification") + " · " + session.rule.name
+        window.isReleasedWhenClosed = false
+        super.init(window: window)
+        window.delegate = self
+        window.center()
+        window.contentView = NSHostingView(rootView: LiquidGlassCaptchaSheet(
+            session: session,
+            onCancel: { [weak self] in self?.close() },
+            onVerified: { [weak self] in
+                guard let self, self.verificationTask == nil else { return }
+                self.verificationTask = Task { @MainActor [weak self] in
+                    await WebViewCookieSync.syncWKWebsiteDataStoreToSharedHTTPCookieStorage()
+                    guard let self, !Task.isCancelled else { return }
+                    AnimeDownloadEngine.shared.resume(episodeId: session.replayEpisode?.id ?? "", sourceId: session.rule.id)
+                    self.close()
+                }
+            }
+        ))
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func windowWillClose(_ notification: Notification) {
+        verificationTask?.cancel()
+        verificationTask = nil
+        window?.contentView = nil
+        onClosed()
     }
 }

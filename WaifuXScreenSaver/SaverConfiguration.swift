@@ -49,7 +49,7 @@ struct SaverConfiguration {
     static let supportedVersion = 1
 
     /// 读取并校验配置。任一环节不满足（文件缺失 / 版本不符 / 渲染文件不存在）都返回 nil，
-    /// 由视图层显示"请在 WaifuX 设置中选择屏保壁纸"。
+    /// 由视图层引导用户从壁纸详情页选择。
     static func load() -> SaverConfiguration? {
         let url = configurationURL
         guard let data = try? Data(contentsOf: url),
@@ -151,6 +151,7 @@ struct SaverConfiguration {
     private static func identity(of object: [String: Any]) -> Data {
         var stable = object
         stable.removeValue(forKey: "configuredAt")
+        stable.removeValue(forKey: "followsDesktopWallpaper")
         guard JSONSerialization.isValidJSONObject(stable),
               let data = try? JSONSerialization.data(withJSONObject: stable, options: [.sortedKeys]) else {
             return Data()
@@ -212,32 +213,32 @@ enum SaverLocalization {
     }
 
     private static let simplified: [String: String] = [
-        "noConfiguration": "请在 WaifuX 设置 → 屏保中选择屏保壁纸",
-        "missingMedia": "屏保壁纸文件已丢失，请在 WaifuX 设置 → 屏保中重新选择",
+        "noConfiguration": "请在 WaifuX 壁纸详情页选择「更多 → 设为屏保」",
+        "missingMedia": "屏保壁纸文件已丢失，请在 WaifuX 壁纸详情页重新选择",
         "unplayableVideo": "此屏保视频无法播放，请重新烘焙后再试"
     ]
 
     private static let traditional: [String: String] = [
-        "noConfiguration": "請在 WaifuX 設定 → 螢幕保護程式選擇螢幕保護壁紙",
-        "missingMedia": "螢幕保護壁紙檔案已遺失，請在 WaifuX 設定 → 螢幕保護程式中重新選擇",
+        "noConfiguration": "請在 WaifuX 桌布詳情頁選擇「更多 → 設為螢幕保護程式」",
+        "missingMedia": "螢幕保護程式的桌布檔案已遺失，請在 WaifuX 桌布詳情頁重新選擇",
         "unplayableVideo": "此螢幕保護影片無法播放，請重新烘焙後再試"
     ]
 
     private static let spanish: [String: String] = [
-        "noConfiguration": "Elige un fondo en Ajustes de WaifuX → Salvapantallas",
-        "missingMedia": "Falta el archivo del salvapantallas. Elige otro en Ajustes de WaifuX → Salvapantallas",
+        "noConfiguration": "En WaifuX, abre los detalles de un fondo y elige Más → Usar como salvapantallas",
+        "missingMedia": "Falta el archivo del salvapantallas. Elige otro desde los detalles de un fondo en WaifuX",
         "unplayableVideo": "No se puede reproducir este vídeo de salvapantallas. Vuelve a renderizarlo e inténtalo de nuevo"
     ]
 
     private static let english: [String: String] = [
-        "noConfiguration": "Choose a screen saver wallpaper in WaifuX Settings → Screen Saver",
-        "missingMedia": "The screen saver wallpaper file is missing. Choose another one in WaifuX Settings → Screen Saver",
+        "noConfiguration": "In WaifuX, open a wallpaper and choose More → Set as Screen Saver",
+        "missingMedia": "The screen saver wallpaper file is missing. Choose another one from its details in WaifuX",
         "unplayableVideo": "This screen saver video cannot be played. Re-bake it and try again"
     ]
 
     private static let japanese: [String: String] = [
-        "noConfiguration": "WaifuX 設定 → スクリーンセーバーで壁紙を選択してください",
-        "missingMedia": "スクリーンセーバーの壁紙ファイルが見つかりません。WaifuX 設定で選び直してください",
+        "noConfiguration": "WaifuX の壁紙詳細で「その他 → スクリーンセーバーに設定」を選んでください",
+        "missingMedia": "スクリーンセーバーの壁紙ファイルが見つかりません。WaifuX の壁紙詳細で選び直してください",
         "unplayableVideo": "このスクリーンセーバー動画を再生できません。再ベイクしてお試しください"
     ]
 }

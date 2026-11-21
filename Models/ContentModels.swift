@@ -144,6 +144,8 @@ struct VideoSource: Codable {
     let label: String?
     /// 播放与下载共用解析时的请求上下文，避免防盗链校验结果不一致。
     var httpHeaders: [String: String]? = nil
+    /// 可选，兼容既有编码；仅经已验证的 MXdm 播放回退设置。
+    var usesMXdmDirectHLS: Bool? = nil
 }
 
 // MARK: - 观看进度

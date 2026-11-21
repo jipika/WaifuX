@@ -36,6 +36,11 @@ enum BackgroundAgentRegistrationError: LocalizedError {
     case launchdSpawnRejected(String)
     /// 已经换到备用注册，launchd 仍拉不起 Helper。
     case registrationRepairFailed(String)
+    /// 数据目录（~/Library/Application Support/WaifuX）不可达或不可写。
+    /// issue #128 真因：用户把该目录做成指向外置盘的符号链接，卷名改名后断链，
+    /// Helper 在 open(单实例锁) 一步 ENOENT 秒退，mach 端口永远没人监听。
+    /// 这是环境问题：注销/重注册救不回来，必须直接点名路径让用户修。
+    case dataDirectoryUnreachable(String)
 
     var errorDescription: String? {
         switch self {
@@ -55,6 +60,8 @@ enum BackgroundAgentRegistrationError: LocalizedError {
             return t("WaifuX 后台服务的系统登录项记录已损坏，系统无法启动它。请点「修复后台服务」，只重建 WaifuX 自己的记录，不影响其他应用")
         case .registrationRepairFailed:
             return t("WaifuX 已重建后台服务记录，系统仍无法启动它。请在设置 → 日志诊断里导出全部日志发给我们")
+        case .dataDirectoryUnreachable(let detail):
+            return String(format: t("WaifuX 数据目录不可达或不可写（%@）。若该目录是指向外置盘的符号链接，请确认磁盘已挂载、卷名未变；或移除符号链接，把数据放回内置盘的该路径后重启应用"), String(describing: detail))
         }
     }
 }
@@ -91,6 +98,33 @@ enum BackgroundAgentRegistration {
         guard executable.path.hasPrefix(root), FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw BackgroundAgentRegistrationError.missingComponent(executable.path)
         }
+    }
+
+    /// 数据目录可达性检查（issue #128 真因）：用户把 ~/Library/Application Support/WaifuX
+    /// 做成指向外置盘的符号链接、卷名改名后断链，Helper 在 open(单实例锁) 一步
+    /// ENOENT 秒退。注册修复救不了环境问题，bootstrap 早期直接点名路径。
+    /// 探针用 open(O_CREAT) + unlink，与 Helper 建锁同一路径语义：断链/只读/权限
+    /// 不足都会在这里以真实 errno 暴露，而不是绕到「mach service 不可达」。
+    static func validateDataDirectory(_ directory: URL) throws {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if !fm.fileExists(atPath: directory.path, isDirectory: &isDir) || !isDir.boolValue {
+            do {
+                try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            } catch {
+                throw BackgroundAgentRegistrationError.dataDirectoryUnreachable(
+                    "\(directory.path) — \(error.localizedDescription)")
+            }
+        }
+        let probe = directory.appendingPathComponent(".waifux-write-probe-\(UUID().uuidString)").path
+        let fd = open(probe, O_CREAT | O_WRONLY, 0o600)
+        guard fd >= 0 else {
+            let code = errno
+            throw BackgroundAgentRegistrationError.dataDirectoryUnreachable(
+                "\(directory.path) — \(String(cString: strerror(code))) (errno \(code))")
+        }
+        close(fd)
+        unlink(probe)
     }
 
     static func ensureEnabled(_ service: some BackgroundAgentServiceRegistration) throws {
@@ -218,9 +252,30 @@ enum BackgroundAgentRegistration {
         try Task.checkCancellation()
         if try await probe() { return }
         let evidence = failureEvidence()
+        // 没有任何 Helper 进程存活：除了 spawn 被拒，另一大类是 Helper 起来后
+        // 立刻自退——issue #128 真因即数据目录断链、open(锁) ENOENT。把数据目录
+        // 可达性直接查一遍，异常就点名路径，不再只留一句「未见进程」。
+        let fallback: String
+        if evidence.isEmpty {
+            let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("WaifuX", isDirectory: true)
+            do {
+                try validateDataDirectory(directory)
+                fallback = LocalizationService.shared.t("未见 WaifuXHelper 进程")
+            } catch let error as BackgroundAgentRegistrationError {
+                if case .dataDirectoryUnreachable(let detail) = error {
+                    fallback = LocalizationService.shared.t("数据目录不可达") + "：\(detail)"
+                } else {
+                    fallback = LocalizationService.shared.t("未见 WaifuXHelper 进程")
+                }
+            } catch {
+                fallback = LocalizationService.shared.t("未见 WaifuXHelper 进程")
+            }
+        } else {
+            fallback = evidence
+        }
         throw BackgroundAgentRegistrationError.launchdJobNotReady(
-            LocalizationService.shared.t("mach service 不可达") + "；"
-            + (evidence.isEmpty ? LocalizationService.shared.t("未见 WaifuXHelper 进程") : evidence))
+            LocalizationService.shared.t("mach service 不可达") + "；" + fallback)
     }
 
     /// 探针失败时的现场证据：同 uid 的 WaifuXHelper 进程（谁占着单实例锁）。
@@ -351,8 +406,10 @@ enum BackgroundAgentRegistration {
         enum Kind: Sendable {
             /// job state = spawn failed 且 last exit code = 78（EX_CONFIG，启动约束拒收）。
             case spawnRejected
-            /// runs > 0、last exit code = 0、job 不在运行：Helper 被拉起后立刻「成功退出」。
-            /// 生产 Helper 启动早期唯一的 exit(0) 是单实例锁被占（AgentMain）。
+            /// runs > 0、job 不在运行、最近一次是自行退出（非信号），且**另一个**
+            /// 同 uid WaifuXHelper 正占着单实例锁：新 Helper 每次被拉起都撞锁秒退。
+            /// 不看退出码：修复前的二进制撞锁 exit(0)，修复后的 exit(75)，
+            /// 进程表里的持锁者才是两种版本共有的判据（issue #128 测试包复测）。
             case cleanExitLoop
         }
         let kind: Kind
@@ -364,9 +421,14 @@ enum BackgroundAgentRegistration {
     ///
     /// 用户机原文（2026-11-05）：`job state = spawn failed`、`last exit code = 78: EX_CONFIG`、
     /// `runs = 61`，launchd 日志同时报 `copy_bundle_path(...) error 0x6f`。
-    /// issue #128 用户机（2026-11-17）：`runs = 8`、`last exit code = 0`、job 已退出——
-    /// 锁冲突循环，与 spawn failed 是两种病，修复手法不同（前者清占锁进程，后者换注册）。
-    nonisolated static func launchdFailureEvidence(_ description: String) -> LaunchdFailureEvidence? {
+    /// issue #128：撞锁循环在旧包是 `last exit code = 0`、新包是 `75: EX_TEMPFAIL`，
+    /// 单看退出码会漏掉新包——必须结合「别的 Helper 持锁」的进程表证据。
+    ///
+    /// - Parameter otherHolderSummary: 调用方在 MainActor 侧采集的「另一个持锁
+    ///   Helper」摘要（见 `BackgroundAgentClient.otherLockHolderSummary`）。为 nil
+    ///   时只判 spawnRejected；撞锁判定需要它，避免把正常空闲退出误判成冲突。
+    nonisolated static func launchdFailureEvidence(_ description: String,
+                                                   otherHolderSummary: String? = nil) -> LaunchdFailureEvidence? {
         var jobState: String?
         var lastExit: String?
         var runs: String?
@@ -388,11 +450,15 @@ enum BackgroundAgentRegistration {
             return LaunchdFailureEvidence(kind: .spawnRejected,
                 summary: "job state=spawn failed, last exit=\(lastExit), runs=\(runs ?? "?")")
         }
-        if let lastExit, lastExit == "0" || lastExit.hasPrefix("0:"),
+        // 自行退出（退出码 0 或 75 等，信号死亡写作 "(signal N)" 不在此列）+
+        // 另一个 Helper 持锁 = 撞锁循环。健康 Helper 空闲自退（exit 0）时没有
+        // 别的持锁者，不会命中；正在运行的 job 也不命中。
+        if let holder = otherHolderSummary,
+           let lastExit, !lastExit.hasPrefix("("),
            let runs, let runCount = Int(runs), runCount > 0,
            jobState != "running", topLevelState != "running" {
             return LaunchdFailureEvidence(kind: .cleanExitLoop,
-                summary: "job state=\(jobState ?? topLevelState ?? "?"), last exit=0, runs=\(runs)")
+                summary: "job state=\(jobState ?? topLevelState ?? "?"), last exit=\(lastExit), runs=\(runs), lock held by \(holder)")
         }
         return nil
     }

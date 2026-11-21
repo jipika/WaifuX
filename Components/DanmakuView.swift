@@ -1,255 +1,93 @@
 import SwiftUI
 
-// MARK: - 弹幕视图
-
-/// 弹幕显示视图（参考 Kazumi 的 canvas_danmaku）
-///
-/// 性能优化：
-/// - 使用 Canvas 替代 ForEach + SwiftUI 视图，避免每帧 view diff 开销
-/// - 位置按时间差实时计算，不存储可变位置状态
-/// - 100ms Timer 仅用于清理过期弹幕和触发重绘，不修改弹幕数据
+/// Draws only the current media-time window. Playback's existing time observer drives redraws;
+/// no independent timer or implicit animation can keep comments moving while paused.
 struct DanmakuView: View {
     let danmakuList: [Danmaku]
-    @Binding var isEnabled: Bool
-    @State var settings: DanmakuSettings = .default
+    let settings: DanmakuSettings
+    let currentTime: Double
+    let isPlaying: Bool
+    let playbackRate: Double
 
-    // 当前播放时间（秒）
-    @Binding var currentTime: Double
-
-    // 视图尺寸
-    @State private var viewSize: CGSize = .zero
-
-    // 活跃的弹幕项（只增删，不修改位置）
-    @State private var activeItems: [DanmakuItem] = []
-
-    // 轨道管理
-    @State private var scrollTracks: [Int: Double] = [:]  // 轨道索引: 最后弹幕的结束时间
-    @State private var topTracks: [Int: Bool] = [:]       // 轨道索引: 是否被占用
-    @State private var bottomTracks: [Int: Bool] = [:]    // 轨道索引: 是否被占用
-
-    // 定时器（仅用于清理过期弹幕；重绘由 TimelineView 驱动）
-    @State private var timer: Timer?
-
-    // 轨道配置
-    private let trackHeight: Double = 30
-    private let maxTracks = 15
+    @State private var timeline = AnimeDanmakuTimeline()
 
     var body: some View {
         GeometryReader { geometry in
-            // TimelineView 按固定间隔刷新其 content，从而驱动内部 Canvas 重绘。
-            // 这样滚动弹幕位置（由 currentTime 实时计算）能持续刷新，
-            // 而无需依赖 @State 变化触发 view diff。
-            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { _ in
-                // Canvas 绘制：直接在 GPU 层面绘制文字，避免 ForEach + SwiftUI View diff
-                Canvas { context, size in
-                    for item in activeItems {
-                        let position = computePosition(for: item, in: size)
-                        // 只绘制在可见区域内的弹幕
-                        guard position.x > -200, position.x < size.width + 200 else { continue }
-
-                        let resolved = context.resolve(Text(item.danmaku.text)
-                            .font(.system(size: settings.fontSize, weight: .medium))
-                            .foregroundColor(danmakuColor(for: item)))
-
-                        context.draw(resolved, at: position, anchor: .center)
+            Canvas { context, size in
+                let offset = settings.timeOffset.isFinite ? settings.timeOffset : 0
+                let mediaTime = currentTime - offset
+                let style = AnimeDanmakuTimeline.Style(settings: settings)
+                let opacity = settings.opacity.isFinite ? min(1, max(0, settings.opacity)) : 0.8
+                let weight = Self.fontWeight(settings.fontWeight)
+                let outline = settings.showBorder
+                    ? min(3, max(0.1, settings.borderWidth.isFinite ? settings.borderWidth : 1))
+                    : 0
+                // 不跟随倍速时：墙上年龄 = 媒体年龄 × 倍率；停留时长按墙上秒计（entry.duration），
+                // 因此媒体时间里的可见窗口为 duration / rate。
+                let rate = (playbackRate.isFinite && playbackRate > 0) ? playbackRate : 1
+                for entry in timeline.visibleEntries(at: mediaTime, lifetimeScale: 1 / rate) {
+                    let age = mediaTime - entry.start
+                    let effectiveAge = age * rate
+                    guard effectiveAge >= 0, effectiveAge < entry.duration else { continue }
+                    let color = settings.allowColor ? entry.danmaku.color : .white
+                    let position = CGPoint(x: entry.x(at: entry.start + effectiveAge, width: size.width), y: entry.y)
+                    // 描边：四向偏移绘制黑色底字，再叠加正文（canvas_danmaku 同款效果）。
+                    if outline > 0 {
+                        let strokeText = Text(entry.text)
+                            .font(.system(size: style.fontSize, weight: weight))
+                            .foregroundStyle(Color.black)
+                        var stroke = context
+                        stroke.opacity = opacity * 0.9
+                        let resolvedStroke = stroke.resolve(strokeText)
+                        for delta in [CGPoint(x: -outline, y: 0), CGPoint(x: outline, y: 0),
+                                      CGPoint(x: 0, y: -outline), CGPoint(x: 0, y: outline)] {
+                            stroke.draw(resolvedStroke,
+                                        at: CGPoint(x: position.x + delta.x, y: position.y + delta.y),
+                                        anchor: .center)
+                        }
                     }
+                    let text = Text(entry.text)
+                        .font(.system(size: style.fontSize, weight: weight))
+                        .foregroundStyle(Color(red: color.r, green: color.g, blue: color.b))
+                    var drawing = context
+                    drawing.opacity = opacity
+                    if outline == 0 {
+                        drawing.addFilter(.shadow(color: .black.opacity(0.9), radius: 1))
+                    }
+                    drawing.draw(drawing.resolve(text), at: position, anchor: .center)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
             .allowsHitTesting(false)
-            .onChange(of: geometry.size) { _, newSize in
-                viewSize = newSize
-                initializeTracks()
-            }
-            .onAppear {
-                viewSize = geometry.size
-                initializeTracks()
-                startTimer()
-            }
-            .onDisappear {
-                stopTimer()
-            }
-            .onChange(of: currentTime) { _, newTime in
-                updateDanmaku(for: newTime)
-            }
-            .onChange(of: isEnabled) { _, enabled in
-                if !enabled {
-                    activeItems.removeAll()
-                }
+            .accessibilityHidden(true)
+            .transaction { $0.animation = nil }
+            .onAppear { rebuild(size: geometry.size) }
+            .onChange(of: geometry.size) { _, _ in rebuild(size: geometry.size) }
+            .onChange(of: danmakuList) { _, _ in rebuild(size: geometry.size) }
+            .onChange(of: AnimeDanmakuTimeline.Style(settings: settings)) { _, _ in
+                rebuild(size: geometry.size)
             }
         }
     }
 
-    // MARK: - 位置计算（纯函数，不修改状态）
+    private func rebuild(size: CGSize) {
+        timeline = AnimeDanmakuTimeline(danmakuList: danmakuList, settings: settings,
+                                       width: size.width, height: size.height)
+    }
 
-    /// 根据弹幕创建时间和当前播放时间，实时计算滚动弹幕的 X 坐标
-    private func computePosition(for item: DanmakuItem, in size: CGSize) -> CGPoint {
-        switch item.danmaku.mode {
-        case .scroll:
-            let textWidth = estimateTextWidth(item.danmaku.text)
-            let startX = size.width + textWidth / 2
-            let endX = -textWidth / 2
-            let duration = Double(item.danmaku.text.count) * 0.15 / settings.speed + 5.0
-            let elapsed = currentTime - item.danmaku.time
-            let progress = max(0, elapsed) / duration
-            let x = startX + (endX - startX) * progress
-            return CGPoint(x: x, y: item.y)
-        case .top, .bottom:
-            return CGPoint(x: size.width / 2, y: item.y)
+    /// 1–9 字重档位映射（Kazumi danmakuFontWeight 同刻度）。
+    static func fontWeight(_ value: Int) -> Font.Weight {
+        switch value {
+        case ...1: return .ultraLight
+        case 2: return .thin
+        case 3: return .light
+        case 4: return .regular
+        case 5: return .medium
+        case 6: return .semibold
+        case 7: return .bold
+        case 8: return .heavy
+        default: return .black
         }
-    }
-
-    /// 计算弹幕颜色
-    private func danmakuColor(for item: DanmakuItem) -> Color {
-        let colorInfo = item.danmaku.color
-        return Color(red: colorInfo.r, green: colorInfo.g, blue: colorInfo.b)
-            .opacity(settings.opacity)
-    }
-
-    // MARK: - 轨道管理
-
-    private func initializeTracks() {
-        let trackCount = min(maxTracks, Int(viewSize.height / trackHeight))
-        scrollTracks = Dictionary(uniqueKeysWithValues: (0..<trackCount).map { ($0, 0) })
-        topTracks = Dictionary(uniqueKeysWithValues: (0..<trackCount).map { ($0, false) })
-        bottomTracks = Dictionary(uniqueKeysWithValues: (0..<trackCount).map { ($0, false) })
-    }
-
-    // MARK: - 弹幕更新
-
-    private func updateDanmaku(for time: Double) {
-        guard isEnabled else { return }
-
-        // 找到当前时间应该显示的弹幕
-        let windowStart = time - 1.0  // 提前1秒准备
-        let windowEnd = time + 0.5    // 允许0.5秒的延迟
-
-        let newDanmaku = danmakuList.filter { danmaku in
-            danmaku.time >= windowStart &&
-            danmaku.time <= windowEnd &&
-            !activeItems.contains(where: { $0.danmaku.time == danmaku.time && $0.danmaku.text == danmaku.text })
-        }
-
-        // 根据设置过滤
-        let filteredDanmaku = newDanmaku.filter { danmaku in
-            switch danmaku.mode {
-            case .scroll:
-                return settings.enableScroll
-            case .top:
-                return settings.enableTop
-            case .bottom:
-                return settings.enableBottom
-            }
-        }
-
-        // 添加到活跃列表
-        for danmaku in filteredDanmaku {
-            if let item = createDanmakuItem(danmaku: danmaku, currentTime: time) {
-                activeItems.append(item)
-            }
-        }
-
-        // 清理过期的弹幕
-        cleanupExpiredDanmaku(currentTime: time)
-    }
-
-    private func createDanmakuItem(danmaku: Danmaku, currentTime: Double) -> DanmakuItem? {
-        switch danmaku.mode {
-        case .scroll:
-            return createScrollItem(danmaku: danmaku)
-        case .top:
-            return createTopItem(danmaku: danmaku)
-        case .bottom:
-            return createBottomItem(danmaku: danmaku)
-        }
-    }
-
-    private func createScrollItem(danmaku: Danmaku) -> DanmakuItem? {
-        guard let trackIndex = findAvailableScrollTrack() else { return nil }
-
-        let duration = Double(danmaku.text.count) * 0.15 / settings.speed + 5.0
-        let y = Double(trackIndex) * trackHeight + trackHeight / 2
-
-        // 更新轨道状态（记录结束时间）
-        let endTime = Date().timeIntervalSince1970 + duration
-        scrollTracks[trackIndex] = endTime
-
-        return DanmakuItem(danmaku: danmaku, x: 0, y: y)
-    }
-
-    private func createTopItem(danmaku: Danmaku) -> DanmakuItem? {
-        guard let trackIndex = findAvailableFixedTrack(tracks: &topTracks) else { return nil }
-
-        let y = Double(trackIndex) * trackHeight + trackHeight / 2
-
-        // 3秒后释放轨道
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            topTracks[trackIndex] = false
-        }
-
-        return DanmakuItem(danmaku: danmaku, x: 0, y: y)
-    }
-
-    private func createBottomItem(danmaku: Danmaku) -> DanmakuItem? {
-        guard let trackIndex = findAvailableFixedTrack(tracks: &bottomTracks) else { return nil }
-
-        // 从底部往上计算
-        let y = viewSize.height - (Double(trackIndex) * trackHeight + trackHeight / 2)
-
-        // 3秒后释放轨道
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            bottomTracks[trackIndex] = false
-        }
-
-        return DanmakuItem(danmaku: danmaku, x: 0, y: y)
-    }
-
-    private func findAvailableScrollTrack() -> Int? {
-        let currentTime = Date().timeIntervalSince1970
-
-        // 找到最早可用的轨道
-        return scrollTracks
-            .filter { $0.value <= currentTime }
-            .min(by: { $0.value < $1.value })?
-            .key
-    }
-
-    private func findAvailableFixedTrack(tracks: inout [Int: Bool]) -> Int? {
-        return tracks.first { !$0.value }?.key
-    }
-
-    private func cleanupExpiredDanmaku(currentTime: Double) {
-        let duration = 10.0  // 弹幕最大存活时间
-
-        activeItems.removeAll { item in
-            let age = currentTime - item.danmaku.time
-            return age > duration
-        }
-    }
-
-    // MARK: - 定时器（仅用于清理过期弹幕；重绘由 TimelineView 驱动）
-
-    private func startTimer() {
-        Task { @MainActor in
-            // 100ms 定时器：清理过期弹幕（Canvas 重绘由 TimelineView 负责）
-            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-                Task { @MainActor in
-                    cleanupExpiredDanmaku(currentTime: currentTime)
-                }
-            }
-        }
-    }
-
-    private func stopTimer() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    // MARK: - 辅助方法
-
-    private func estimateTextWidth(_ text: String) -> Double {
-        let charWidth = settings.fontSize * 0.8
-        return Double(text.count) * charWidth
     }
 }
 
@@ -445,8 +283,10 @@ struct DanmakuToggleButton: View {
                 Danmaku(text: "顶部弹幕", time: 2, mode: .top, color: 0x00FF00),
                 Danmaku(text: "底部弹幕", time: 3, mode: .bottom, color: 0x0000FF),
             ],
-            isEnabled: .constant(true),
-            currentTime: .constant(0)
+            settings: .default,
+            currentTime: 2.5,
+            isPlaying: false,
+            playbackRate: 1
         )
     }
     .frame(width: 800, height: 400)

@@ -159,6 +159,30 @@ class HTMLXPathParser {
         return false
     }
 
+    /// New detector values are independent of the controls used for manual verification.
+    static func detectCaptcha(html: String, config: AntiCrawlerConfig) -> Bool {
+        guard config.enabled else { return false }
+        let value = config.captchaDetectValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty {
+            switch config.captchaDetectType {
+            case 1:
+                guard let document = try? HTML(html: html, encoding: .utf8) else { return false }
+                return document.xpath(value).first != nil
+            case 2: return html.contains(value)
+            case 3:
+                guard let regex = try? NSRegularExpression(pattern: value, options: [.dotMatchesLineSeparators]) else { return false }
+                return regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)) != nil
+            default: return false
+            }
+        }
+        return detectCaptcha(html: html, captchaImageXPath: config.captchaImage, captchaButtonXPath: config.captchaButton)
+    }
+
+    static func firstAttribute(html: String, xpath: String, attribute: String) -> String? {
+        guard let document = try? HTML(html: html, encoding: .utf8), let node = document.xpath(xpath).first else { return nil }
+        return node[attribute]
+    }
+
     // MARK: - 辅助方法
 
     /// 从指定元素中提取文本内容

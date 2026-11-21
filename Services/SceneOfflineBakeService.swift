@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CryptoKit
+import Darwin
 import Foundation
 import Kingfisher
 
@@ -147,6 +148,8 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
     /// Companion bakes are tied to the currently displayed realtime scene and can
     /// be cancelled when the user applies another wallpaper.
     let isCompanion: Bool?
+    let outputSize: OfflineBakePixelSize?
+    let forceRebake: Bool?
     let addedAt: Date
 
     static func scene(
@@ -159,7 +162,9 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
         renderer: SceneBakeRenderer,
         persistArtifactToItemID: String?,
         progressItemID: String?,
-        isCompanion: Bool = false
+        isCompanion: Bool = false,
+        outputSize: OfflineBakePixelSize? = nil,
+        forceRebake: Bool = false
     ) -> PersistentOfflineBakeJob {
         let normalizedRoot = contentRoot.standardizedFileURL.path
         let key = [
@@ -170,7 +175,7 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
             renderer.rawValue,
             String(fps),
             String(format: "%.3f", durationSeconds),
-        ].joined(separator: "|")
+        ].joined(separator: "|") + (outputSize.map { "|\($0.width)x\($0.height)" } ?? "")
         return PersistentOfflineBakeJob(
             id: id,
             key: key,
@@ -186,6 +191,8 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
             persistArtifactToItemID: persistArtifactToItemID,
             progressItemID: progressItemID,
             isCompanion: isCompanion,
+            outputSize: outputSize,
+            forceRebake: forceRebake,
             addedAt: .now
         )
     }
@@ -196,7 +203,9 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
         contentRoot: URL,
         outputURL: URL,
         durationSeconds: Double,
-        fps: Int32
+        fps: Int32,
+        outputSize: OfflineBakePixelSize? = nil,
+        forceRebake: Bool = false
     ) -> PersistentOfflineBakeJob {
         PersistentOfflineBakeJob(
             id: id,
@@ -213,6 +222,8 @@ struct PersistentOfflineBakeJob: Codable, Hashable, Sendable, Identifiable {
             persistArtifactToItemID: record.id,
             progressItemID: record.item.id,
             isCompanion: nil,
+            outputSize: outputSize,
+            forceRebake: forceRebake,
             addedAt: .now
         )
     }
@@ -1447,6 +1458,10 @@ enum SceneOfflineBakeService {
 
         let posterTargets = realtimePosterTargets(for: targetScreens)
         let displayIDs = posterTargets.map(\.displayID)
+        let targetSizes = Set(posterTargets.map(\.size))
+        let outputSize = targetSizes.count == 1 ? targetSizes.first.flatMap {
+            OfflineBakePixelSize(width: $0.width, height: $0.height)
+        } : nil
         let generation = companionBakeGeneration
         AppLogger.error(.wallpaper, "Scene companion poster scheduled", metadata: [
             "reason": reason,
@@ -1615,7 +1630,8 @@ enum SceneOfflineBakeService {
                     progressItemID: itemID,
                     displayTitle: displayTitle,
                     isCompanion: true,
-                    companionGeneration: generation
+                    companionGeneration: generation,
+                    outputSize: outputSize
                 )
                 guard generation == companionBakeGeneration else {
                     print("[SceneOfflineBake] realtime companion bake stale (\(reason)): superseded after bake")
@@ -2659,6 +2675,13 @@ enum SceneOfflineBakeService {
         return name.range(of: #"_\d+x\d+_\d+fps_\d+s"#, options: .regularExpression) != nil
     }
 
+    /// Current Web products omit the renderer marker and FPS from their names.
+    static func isNamedWebBakeProduct(_ name: String) -> Bool {
+        parseLeadingAnalysisId(from: name) != nil
+            && name.range(of: #"_\d+x\d+_\d+s(?:_rebake-[0-9A-Fa-f-]{36})?\.(?:mp4|json)(?:\.reuse\.json)?$"#,
+                          options: .regularExpression) != nil
+    }
+
     /// 从 bake 文件名解析前缀 UUID（兼容 `UUID_…` 与纯 UUID 段）。
     static func parseLeadingAnalysisId(from name: String) -> UUID? {
         let stem = (name as NSString).deletingPathExtension
@@ -2742,11 +2765,19 @@ enum SceneOfflineBakeService {
     /// `.waifux-optimization.json` 旁路文件。
     static func cleanupStaleBakeFiles(
         inDirectory directory: URL,
-        keeping keptURL: URL
+        keeping keptURL: URL,
+        preserving protectedPaths: Set<String> = []
     ) {
         let fm = FileManager.default
         let keptPath = keptURL.standardizedFileURL.path
-        let keptStem = keptURL.deletingPathExtension().lastPathComponent
+        var keptStems: Set<String> = [keptURL.deletingPathExtension().lastPathComponent]
+        let directoryPath = directory.standardizedFileURL.path
+        for path in protectedPaths {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            if url.deletingLastPathComponent().path == directoryPath {
+                keptStems.insert(url.deletingPathExtension().lastPathComponent)
+            }
+        }
         guard let entries = try? fm.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil,
@@ -2757,11 +2788,11 @@ enum SceneOfflineBakeService {
 
         for url in entries {
             let path = url.standardizedFileURL.path
-            if path == keptPath { continue }
+            if path == keptPath || protectedPaths.contains(path) { continue }
 
             let name = url.lastPathComponent
-            // 与当前成片配套的 bake sidecar 保留；optimization 履历不再写在媒体旁
-            if name == "\(keptStem).json" || name == "\(keptStem).mp4.reuse.json" { continue }
+            // Retain the metadata of the current output and any previous output still in use.
+            if keptStems.contains(where: { name == "\($0).json" || name == "\($0).mp4.reuse.json" }) { continue }
 
             // 历史遗留：媒体旁的 optimization 元数据一律清掉（新路径在 App Support）
             if name.hasSuffix(".waifux-optimization.json") {
@@ -2770,7 +2801,7 @@ enum SceneOfflineBakeService {
                 continue
             }
 
-            guard looksLikeBakeProductFilename(name) else { continue }
+            guard looksLikeBakeProductFilename(name) || isNamedWebBakeProduct(name) else { continue }
 
             let ext = url.pathExtension.lowercased()
             let isVideo = ext == "mp4"
@@ -2858,6 +2889,8 @@ enum SceneOfflineBakeService {
         displayTitle: String? = nil,
         isCompanion: Bool = false,
         companionGeneration: UInt? = nil,
+        outputSize: OfflineBakePixelSize? = nil,
+        forceRebake: Bool = false,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
         if BackgroundRuntimeRole.isRemoteUI {
@@ -2867,6 +2900,9 @@ enum SceneOfflineBakeService {
             values["itemID"] = persistArtifactToItemID
             values["progressItemID"] = progressItemID
             values["title"] = displayTitle
+            values["width"] = outputSize?.width
+            values["height"] = outputSize?.height
+            values["forceRebake"] = forceRebake
             let artifact = try await BackgroundRuntimeBridge.requestCodable("bake.scene.wait", arguments: BackgroundPropertyList.encode(values), resultKey: "artifact", as: SceneBakeArtifact.self)
             await progress?(1)
             return artifact
@@ -2887,6 +2923,9 @@ enum SceneOfflineBakeService {
                 itemID: trackedItemID ?? persistArtifactToItemID
             )
         }
+        let targetSize: OfflineBakePixelSize
+        if let outputSize { targetSize = outputSize }
+        else { targetSize = await MainActor.run { .forDisplay(NSScreen.main ?? NSScreen.screens.first) } }
         let persistentJob = PersistentOfflineBakeJob.scene(
             id: resumingJobID ?? UUID(),
             eligibility: eligibility,
@@ -2897,7 +2936,9 @@ enum SceneOfflineBakeService {
             renderer: renderer,
             persistArtifactToItemID: persistArtifactToItemID,
             progressItemID: trackedItemID,
-            isCompanion: isCompanion
+            isCompanion: isCompanion,
+            outputSize: targetSize,
+            forceRebake: forceRebake
         )
         let enqueueResult = await MainActor.run {
             SceneOfflineBakeProgressTracker.shared.enqueue(
@@ -2937,6 +2978,8 @@ enum SceneOfflineBakeService {
                 displayTitle: resolvedTitle,
                 isCompanion: isCompanion,
                 companionGeneration: companionGeneration,
+                outputSize: targetSize,
+                rebakeID: forceRebake ? jobID : nil,
                 progress: trackedProgress
             )
             guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
@@ -3003,7 +3046,9 @@ enum SceneOfflineBakeService {
                         progressItemID: job.progressItemID,
                         resumingJobID: job.id,
                         isCompanion: isCompanion,
-                        companionGeneration: isCompanion ? companionBakeGeneration : nil
+                        companionGeneration: isCompanion ? companionBakeGeneration : nil,
+                        outputSize: job.outputSize,
+                        forceRebake: job.forceRebake ?? false
                     )
                 } catch {
                     SceneOfflineBakeProgressTracker.shared.discardPersistedJob(
@@ -3038,16 +3083,15 @@ enum SceneOfflineBakeService {
         displayTitle: String?,
         isCompanion: Bool,
         companionGeneration: UInt?,
+        outputSize: OfflineBakePixelSize,
+        rebakeID: UUID?,
         progress: (@MainActor (Double) -> Void)?
     ) async throws -> SceneBakeArtifact {
         guard FileManager.default.fileExists(atPath: contentRoot.path) else {
             throw SceneOfflineBakeError.contentRootMissing
         }
-        let mainDisplaySize = mainDisplayPixelSize()
-        let w = max(64, mainDisplaySize.width)
-        let h = max(64, mainDisplaySize.height)
-        let evenW = (w / 2) * 2
-        let evenH = (h / 2) * 2
+        let evenW = outputSize.width
+        let evenH = outputSize.height
         let effectiveUserProperties = await MainActor.run {
             SceneConfigOverrideService.mergedPropertiesJSON(
                 userPropertiesJSON: SceneWallpaperPropertiesService.propertiesOverrideJSON(for: contentRoot.path),
@@ -3061,7 +3105,7 @@ enum SceneOfflineBakeService {
         let cacheDurationSeconds = durationSeconds
         // displayTitle 已在 bake() 主线程解析；此处仅回退 project.json，避免碰 @MainActor 媒体库
         let titleForName = displayTitle ?? projectTitle(at: contentRoot)
-        let outURL = cacheVideoURL(
+        let canonicalURL = cacheVideoURL(
             baseDir: sceneBakesRoot,
             itemID: cacheItemID,
             analysisId: eligibility.analysisId,
@@ -3072,6 +3116,7 @@ enum SceneOfflineBakeService {
             durationSeconds: cacheDurationSeconds,
             displayTitle: titleForName
         )
+        let outURL = rebakeID.map { rebakeOutputURL(for: canonicalURL, jobID: $0) } ?? canonicalURL
 
         try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
@@ -3099,6 +3144,8 @@ enum SceneOfflineBakeService {
                    let hit = await inspectBakedVideo(at: outURL, expectedWidth: evenW, expectedHeight: evenH) {
                     return (hit, outURL)
                 }
+                // A forced job may reuse only its own validated output after a checkpoint restore.
+                guard rebakeID == nil else { return (nil, outURL) }
                 for legacyOutURL in legacyCandidates {
                     guard matchingBake(legacyOutURL), let hit = await inspectBakedVideo(
                         at: legacyOutURL,
@@ -3131,7 +3178,6 @@ enum SceneOfflineBakeService {
             guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
                 return artifact
             }
-            cleanupStaleBakeFiles(inDirectory: resolvedCacheURL.deletingLastPathComponent(), keeping: resolvedCacheURL)
             if let itemID = persistArtifactToItemID {
                 await MainActor.run {
                     MediaLibraryService.shared.attachSceneBakeArtifact(
@@ -3144,6 +3190,8 @@ enum SceneOfflineBakeService {
                     itemID: itemID,
                     videoURL: URL(fileURLWithPath: artifact.videoPath)
                 )
+            } else {
+                cleanupStaleBakeFiles(inDirectory: resolvedCacheURL.deletingLastPathComponent(), keeping: resolvedCacheURL)
             }
             return artifact
         }
@@ -3177,7 +3225,6 @@ enum SceneOfflineBakeService {
         guard companionGeneration.map({ $0 == companionBakeGeneration }) ?? true else {
             return artifact
         }
-        cleanupStaleBakeFiles(inDirectory: outURL.deletingLastPathComponent(), keeping: outURL)
         if let itemID = persistArtifactToItemID {
             await MainActor.run {
                 MediaLibraryService.shared.attachSceneBakeArtifact(
@@ -3190,9 +3237,26 @@ enum SceneOfflineBakeService {
                 itemID: itemID,
                 videoURL: URL(fileURLWithPath: artifact.videoPath)
             )
+        } else {
+            cleanupStaleBakeFiles(inDirectory: outURL.deletingLastPathComponent(), keeping: outURL)
         }
 
         return artifact
+    }
+
+    static func rebakeOutputURL(for canonicalURL: URL, jobID: UUID) -> URL {
+        canonicalURL.deletingLastPathComponent().appendingPathComponent(
+            "\(canonicalURL.deletingPathExtension().lastPathComponent)_rebake-\(jobID.uuidString).mp4"
+        )
+    }
+
+    /// A verified temporary video is in the same directory as the destination.
+    /// A failed rename must never unlink the existing output.
+    static func publishVerifiedBake(at temporaryURL: URL, to outputURL: URL) throws {
+        try Task.checkCancellation()
+        guard Darwin.rename(temporaryURL.path, outputURL.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     private static func bakeWithWallpaperWgpu(
@@ -3216,7 +3280,7 @@ enum SceneOfflineBakeService {
 
         let tempURL = outURL.deletingLastPathComponent()
             .appendingPathComponent(".\(outURL.deletingPathExtension().lastPathComponent).\(UUID().uuidString).tmp.mp4")
-        try? FileManager.default.removeItem(at: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
 
         // wallpaper-wgpu bake <path> --size WxH --fps N --duration S --out <path> [--assets <path>] [--clean]
         var args: [String] = [
@@ -3600,12 +3664,9 @@ enum SceneOfflineBakeService {
         }
 
         guard await inspectBakedVideo(at: tempURL, expectedWidth: width, expectedHeight: height) != nil else {
-            try? FileManager.default.removeItem(at: tempURL)
-            try? FileManager.default.removeItem(at: outURL)
             throw SceneOfflineBakeError.bakeProcessFailed(LocalizationService.shared.t("bake 完成后未找到输出文件"))
         }
-        try? FileManager.default.removeItem(at: outURL)
-        try FileManager.default.moveItem(at: tempURL, to: outURL)
+        try publishVerifiedBake(at: tempURL, to: outURL)
 
         // 写入 sidecar JSON（动态文本 + 图片数据）
         let sidecarURL = outURL.deletingPathExtension().appendingPathExtension("json")
@@ -3649,19 +3710,24 @@ enum SceneOfflineBakeService {
     }
 
     /// 优先使用 `MediaDownloadRecord.sceneBakeEligibility`；缺失时在实际烘焙前现场分析。
-    /// 默认主屏逻辑分辨率 × scale。
+    /// 使用请求提交时指定的像素尺寸；无窗口的后台调用保留默认屏幕兜底。
     /// FPS 默认值取自用户设置 `scene_bake_fps`（回退 30），且不超过显示器最高刷新率。
     static func bake(
         record: MediaDownloadRecord,
         durationSeconds: Double? = nil,
         fps: Int32? = nil,
         renderer: SceneBakeRenderer = .wallpaperWgpu,
+        outputSize: OfflineBakePixelSize? = nil,
+        forceRebake: Bool = false,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
         if BackgroundRuntimeRole.isRemoteUI {
             var values: [String: Any] = ["record": try JSONEncoder().encode(record), "renderer": renderer.rawValue]
             values["duration"] = durationSeconds
             values["fps"] = fps.map { Int($0) }
+            values["width"] = outputSize?.width
+            values["height"] = outputSize?.height
+            values["forceRebake"] = forceRebake
             let artifact = try await BackgroundRuntimeBridge.requestCodable("bake.record.wait", arguments: BackgroundPropertyList.encode(values), resultKey: "artifact", as: SceneBakeArtifact.self)
             await progress?(1)
             return artifact
@@ -3717,6 +3783,8 @@ enum SceneOfflineBakeService {
             persistArtifactToItemID: record.id,
             progressItemID: record.item.id,
             displayTitle: record.item.title,
+            outputSize: outputSize,
+            forceRebake: forceRebake,
             progress: progress
         )
     }

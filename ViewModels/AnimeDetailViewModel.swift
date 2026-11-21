@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import OSLog
 
 // MARK: - 源搜索状态 (简化版，与 Kazumi 对齐)
 
@@ -26,11 +27,8 @@ struct SourceSearchItem: Identifiable, Equatable {
         if src.hasPrefix("http") {
             return src
         }
-        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if src.hasPrefix("/") {
-            return base + src
-        }
-        return base + "/" + src
+        guard let base = URL(string: baseURL) else { return src }
+        return URL(string: src, relativeTo: base)?.absoluteURL.absoluteString ?? src
     }
 }
 
@@ -41,7 +39,12 @@ struct SourceSearchResult: Identifiable {
     let rule: AnimeRule
     var status: SourceQueryStatus = .idle
     var selectedItem: SourceSearchItem?  // 用户选择的结果
-    var detail: AnimeDetail?             // 解析后的剧集列表
+    var roads: [AnimeDetail] = []
+    var selectedRoadIndex = 0
+    var detail: AnimeDetail? {
+        get { roads.indices.contains(selectedRoadIndex) ? roads[selectedRoadIndex] : nil }
+        set { roads = newValue.map { [$0] } ?? []; selectedRoadIndex = 0 }
+    }
     var searchItems: [SourceSearchItem]? // 搜索结果列表（用于返回重新选择）
 }
 
@@ -63,6 +66,8 @@ struct CaptchaVerificationSession: Identifiable {
 
 @MainActor
 class AnimeDetailViewModel: ObservableObject {
+    private static let logger = Logger(subsystem: "com.waifux.app", category: "AnimeSourceDiscovery")
+
     // MARK: - 输入数据
     let anime: AnimeSearchResult
 
@@ -79,16 +84,49 @@ class AnimeDetailViewModel: ObservableObject {
     @Published var currentPlayURL: URL?
     @Published private(set) var currentHTTPHeaders: [String: String] = [:]
     @Published private(set) var playbackID = UUID()
+    @Published private var observedPlayerState: (id: UUID, state: PlaybackState)?
+
+    /// Do not carry a state across retries, route changes, or episode changes.
+    var currentPlayerState: PlaybackState {
+        guard let observedPlayerState, observedPlayerState.id == playbackID else { return .idle }
+        return observedPlayerState.state
+    }
+
     @Published private(set) var currentSourceID: String?
     @Published private(set) var resolvingDownloads = Set<String>()
     @Published private(set) var downloadErrors: [String: String] = [:]
     private let playbackExtractor = AnimeVideoExtractor()
+    private var directHLSRelay: MXdmDirectHLS?
     private var downloadExtractors: [String: AnimeVideoExtractor] = [:]
     private var playbackRequestID = UUID()
+    private var sourceRequestIDs: [String: UUID] = [:]
     private var candidateIndex = 0
     private var automaticRecoveryCount = 0
     private var recoveryStartTime: TimeInterval?
     private var hasPlaybackPosition = false
+    private var readyForSync = false
+    /// 每个源最近一次真实起播成功的剧集（内存态；用于「可播放」标记与排序）。
+    private var verifiedPlaybackEpisodes: [String: Set<String>] = [:]
+    private var pendingRemoteSeek: PlaybackSeekRequest?
+    private var currentRoadID: String?
+    private let progressSessionID = UUID()
+    private var playbackTransitionTask: Task<Void, Never>?
+    private var finishedPlaybackID: UUID?
+    private var didSkipOpening = false
+    private var didSkipEnding = false
+    private var attemptedRoadIDs = Set<String>()
+    @Published private(set) var seekRequest: PlaybackSeekRequest?
+    @Published var showDanmakuSourcePicker = false
+    @Published var danmakuError: String?
+    /// 当前集的弹幕来源是否为用户手动指定（面板展示「手动指定/自动匹配」）。
+    @Published private(set) var danmakuManualSourceActive = false
+    let syncPlay = AnimeSyncPlayService()
+
+    struct PlaybackSeekRequest: Identifiable {
+        let id = UUID()
+        let time: Double
+        let resume: Bool
+    }
     @Published var currentStartTime: TimeInterval = 0
     @Published var isPlaying: Bool = false
     @Published var currentEpisode: AnimeDetail.AnimeEpisodeItem?
@@ -119,7 +157,31 @@ class AnimeDetailViewModel: ObservableObject {
         var colorEnhancement: Bool
         var autoPlayNext: Bool
         var skipOpeningEnding: Bool
-        
+        var openingSeconds: Double = 85
+        var endingSeconds: Double = 85
+
+        enum CodingKeys: String, CodingKey {
+            case superResolution, aiDenoise, colorEnhancement, autoPlayNext, skipOpeningEnding
+            case openingSeconds, endingSeconds
+        }
+
+        init(superResolution: Bool, aiDenoise: Bool, colorEnhancement: Bool, autoPlayNext: Bool,
+             skipOpeningEnding: Bool, openingSeconds: Double = 85, endingSeconds: Double = 85) {
+            self.superResolution = superResolution; self.aiDenoise = aiDenoise
+            self.colorEnhancement = colorEnhancement; self.autoPlayNext = autoPlayNext
+            self.skipOpeningEnding = skipOpeningEnding
+            self.openingSeconds = openingSeconds; self.endingSeconds = endingSeconds
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            superResolution = false; aiDenoise = false; colorEnhancement = false
+            autoPlayNext = try values.decodeIfPresent(Bool.self, forKey: .autoPlayNext) ?? true
+            skipOpeningEnding = try values.decodeIfPresent(Bool.self, forKey: .skipOpeningEnding) ?? false
+            openingSeconds = min(300, max(0, try values.decodeIfPresent(Double.self, forKey: .openingSeconds) ?? 85))
+            endingSeconds = min(300, max(0, try values.decodeIfPresent(Double.self, forKey: .endingSeconds) ?? 85))
+        }
+
         static let `default` = PlayerEnhancementSettings(
             superResolution: false,
             aiDenoise: false,
@@ -160,6 +222,21 @@ class AnimeDetailViewModel: ObservableObject {
         loadEnhancementSettings()
         self.aliasSearchText = anime.title
         loadFavoriteStatus()
+        syncPlay.onRemotePlayback = { [weak self] playing, position in
+            guard let self, self.currentPlayURL != nil, position.isFinite, position >= 0 else { return }
+            let request = PlaybackSeekRequest(time: position, resume: playing)
+            if self.readyForSync { self.seekRequest = request }
+            else { self.pendingRemoteSeek = request }
+        }
+        syncPlay.onRemoteEpisode = { [weak self] number in
+            guard let self, self.currentEpisode?.episodeNumber != number else { return }
+            self.playbackTransitionTask?.cancel()
+            self.playbackTransitionTask = Task { [weak self] in
+                guard let self, !Task.isCancelled else { return }
+                self.playbackTransitionTask = nil
+                await self.playEpisode(number: number)
+            }
+        }
     }
 
     // MARK: - 加载数据
@@ -183,23 +260,49 @@ class AnimeDetailViewModel: ObservableObject {
         // await searchAllSources()
     }
 
+    /// 播放器窗口入口：规则装载与全源检索在同一任务里串行完成。
+    /// 旧路径「开窗即并发 searchAllSources」会在规则未就绪时静默跳过，
+    /// 且规则随后到达也不会补发检索，右栏因此永远停在分析中。
+    func loadRulesAndSearchAllSources() async {
+        // 先占位规则事务，详情 sheet 并发的 loadData 会合流到同一事务而不是重复重建。
+        // 已有源（窗口重聚焦等重复入口）不重装规则，避免重置检索状态。
+        if sourceResults.isEmpty {
+            await loadRules()
+        }
+        await searchAllSources()
+        // Bangumi 详情仅用于展示与弹幕映射，不阻塞源检索。
+        if bangumiDetail == nil, !isLoadingBangumi {
+            await loadBangumiDetail()
+        }
+    }
+
     // MARK: - 加载规则
     /// 加载规则：先尝试本地，如果失败则从远程加载
     private func loadRules() async {
-        isLoadingRules = true
-        defer { isLoadingRules = false }
-        
-        // 首先尝试从本地加载已安装的规则
-        var rules = await AnimeRuleStore.shared.loadAllRules()
-        print("[AnimeDetailViewModel] 本地规则数量: \(rules.count)")
-
-        // 本地无缓存时全量从 Kazumi 同步覆盖（与 App 启动后台任务一致）
-        if rules.isEmpty {
-            print("[AnimeDetailViewModel] 本地无规则，从 Kazumi 全量同步…")
-            await AnimeRuleStore.shared.ensureDefaultRulesCopied()
-            rules = await AnimeRuleStore.shared.loadAllRules()
-            print("[AnimeDetailViewModel] 同步后规则数量: \(rules.count)")
+        // 详情 sheet 与播放器窗口可能同时请求装载；共享同一事务，避免重复重建 sourceResults。
+        if let rulesLoadTask {
+            await rulesLoadTask.value
+            return
         }
+        let task = Task { await self.performRulesLoad() }
+        rulesLoadTask = task
+        await task.value
+        rulesLoadTask = nil
+    }
+
+    private var rulesLoadTask: Task<Void, Never>?
+
+    private func performRulesLoad() async {
+        isLoadingRules = true
+        Self.logger.notice("rules_load_begin existing_sources=\(self.sourceResults.count, privacy: .public)")
+        defer {
+            isLoadingRules = false
+            Self.logger.notice("rules_load_end visible_sources=\(self.sourceResults.count, privacy: .public) cancelled=\(Task.isCancelled, privacy: .public)")
+        }
+
+        // 与启动检查合并，首次详情搜索使用已完成事务的新规则；离线失败仍保留旧快照。
+        await AnimeRuleStore.shared.syncOnLaunchInBackground()
+        let rules = await AnimeRuleStore.shared.loadAllRules()
 
         // loadAllRules / 远程加载已排除 deprecated
         self.availableRules = rules
@@ -270,10 +373,13 @@ class AnimeDetailViewModel: ObservableObject {
         print("[AnimeDetailViewModel] 关键词: \(searchQuery)")
 
         guard sourceResults.firstIndex(where: { $0.id == rule.id }) != nil else { return }
+        let requestID = UUID()
+        sourceRequestIDs[rule.id] = requestID
 
         // 更新状态为加载中
         await MainActor.run {
-            guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+            guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
             var updatedResult = sourceResults[currentIndex]
             updatedResult.status = .loading
             updatedResult.selectedItem = nil
@@ -299,7 +405,8 @@ class AnimeDetailViewModel: ObservableObject {
             }
 
             await MainActor.run {
-                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                 var updatedResult = sourceResults[currentIndex]
                 if items.isEmpty {
                     updatedResult.status = .noResult
@@ -310,7 +417,7 @@ class AnimeDetailViewModel: ObservableObject {
                     sourceResults[currentIndex] = updatedResult
                     // 可选：自动查询剧集
                     Task {
-                        await self.queryEpisodes(for: items[0], in: rule)
+                        await self.queryEpisodes(for: items[0], in: rule, expectedRequestID: requestID)
                     }
                 } else {
                     // 多个结果，需要用户选择
@@ -322,7 +429,8 @@ class AnimeDetailViewModel: ObservableObject {
 
         } catch let error as AnimeParserError {
             await MainActor.run {
-                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                 switch error {
                 case .captchaRequired:
                     // 仅标记为需要验证码，不弹窗（在播放器中切换源时才弹窗）
@@ -346,7 +454,8 @@ class AnimeDetailViewModel: ObservableObject {
         } catch {
             let errorString = error.localizedDescription.lowercased()
             await MainActor.run {
-                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                 var updatedResult = sourceResults[currentIndex]
                 // 优化：避免误判，只匹配明确的验证码关键词
                 if errorString.contains("captcha") ||
@@ -361,26 +470,28 @@ class AnimeDetailViewModel: ObservableObject {
             }
         }
 
-        // 检查是否所有源都完成初始搜索（仅对不自动查询剧集的终端状态）
-        // queryEpisodes 成功后会自行调用 checkAndFreezeInitialOrder
+        // queryEpisodes 成功后会自行冻结；过期搜索不能影响当前状态。
+        guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID else { return }
         checkAndFreezeInitialOrder()
     }
 
     /// 第二步：用选中的结果获取剧集列表
     /// 参考 Kazumi Plugin.querychapterRoads: 用第三方源详情页 URL 解析剧集
-    func queryEpisodes(for item: SourceSearchItem, in rule: AnimeRule, clearCookies: Bool = false) async {
-        let detailURL = item.fullURL(baseURL: rule.baseURL)
+    func queryEpisodes(for item: SourceSearchItem, in rule: AnimeRule, expectedRequestID: UUID? = nil) async {
+        if let expectedRequestID, sourceRequestIDs[rule.id] != expectedRequestID { return }
+        guard !Task.isCancelled else { return }
+        let requestID = UUID()
+        sourceRequestIDs[rule.id] = requestID
+        let detailURL = rule.chapterMode == .api ? item.src : item.fullURL(baseURL: rule.baseURL)
 
         print("[AnimeDetailViewModel] ========== 解析剧集 ==========")
         print("[AnimeDetailViewModel] 选中项: '\(item.name)'")
-        print("[AnimeDetailViewModel] 详情页 URL: \(detailURL)")
-        if clearCookies {
-            print("[AnimeDetailViewModel] 将清除旧 Cookie 后重试")
-        }
+        print("[AnimeDetailViewModel] 详情来源 host=\(URL(string: detailURL)?.host ?? "api")")
 
         // 更新状态为加载中，同时保存 selectedItem（即使出错也需要保存，用于验证码验证后重试）
         await MainActor.run {
-            guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+            guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
             var updatedResult = sourceResults[currentIndex]
             updatedResult.status = .loading
             updatedResult.selectedItem = item
@@ -388,32 +499,14 @@ class AnimeDetailViewModel: ObservableObject {
         }
 
         do {
-            // 使用 querychapterRoads 解析第三方源详情页
-            // 如果需要清除 Cookie（验证码验证后），传入 clearOldCookies: true
-            let details: [AnimeDetail]
-            if clearCookies {
-                // 临时清除 Cookie 后重试
-                let cookieURL = URL(string: detailURL)!
-                HTTPCookieStorage.shared.cookies?.forEach { cookie in
-                    if cookie.domain.contains(cookieURL.host ?? "") {
-                        HTTPCookieStorage.shared.deleteCookie(cookie)
-                    }
-                }
-                details = try await AnimeParser.shared.querychapterRoads(
-                    detailURL: detailURL,
-                    rule: rule
-                )
-            } else {
-                details = try await AnimeParser.shared.querychapterRoads(
-                    detailURL: detailURL,
-                    rule: rule
-                )
-            }
+            // 重新请求使用已同步的验证Cookie，API的source可为裸ID。
+            let details = try await AnimeParser.shared.querychapterRoads(detailURL: detailURL, rule: rule)
 
             if details.isEmpty {
                 print("[AnimeDetailViewModel] ⚠️ 未找到播放列表")
                 await MainActor.run {
-                    guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                    guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                     var updatedResult = sourceResults[currentIndex]
                     updatedResult.status = .noResult
                     sourceResults[currentIndex] = updatedResult
@@ -429,10 +522,13 @@ class AnimeDetailViewModel: ObservableObject {
 
             // 更新 sourceResults 中的数据
             await MainActor.run {
-                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                 var updatedResult = sourceResults[currentIndex]
                 updatedResult.selectedItem = item
-                updatedResult.detail = firstDetail
+                let previousRoadID = updatedResult.detail?.id
+                updatedResult.roads = details
+                updatedResult.selectedRoadIndex = details.firstIndex(where: { $0.id == previousRoadID }) ?? 0
                 updatedResult.status = .success
                 sourceResults[currentIndex] = updatedResult
             }
@@ -442,7 +538,8 @@ class AnimeDetailViewModel: ObservableObject {
 
         } catch let error as AnimeParserError {
             await MainActor.run {
-                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                 var updatedResult = sourceResults[currentIndex]
                 switch error {
                 case .captchaRequired:
@@ -461,7 +558,8 @@ class AnimeDetailViewModel: ObservableObject {
             checkAndFreezeInitialOrder()
         } catch {
             await MainActor.run {
-                guard let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
+                guard !Task.isCancelled, sourceRequestIDs[rule.id] == requestID,
+                  let currentIndex = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
                 var updatedResult = sourceResults[currentIndex]
                 updatedResult.status = .error(error.localizedDescription)
                 sourceResults[currentIndex] = updatedResult
@@ -478,6 +576,7 @@ class AnimeDetailViewModel: ObservableObject {
 
     /// 重置源选择，返回到搜索结果列表
     func resetSourceSelection(for rule: AnimeRule) {
+        sourceRequestIDs[rule.id] = UUID()
         guard let index = sourceResults.firstIndex(where: { $0.id == rule.id }) else { return }
         var updatedResult = sourceResults[index]
         // 如果有保存的搜索结果，恢复到 needsSelection 状态
@@ -531,7 +630,7 @@ class AnimeDetailViewModel: ObservableObject {
         if shouldFreeze {
             // 仅对已完成的源排序冻结（未完成的排在后面保持原位）
             let sorted = activeSources.sorted { a, b in
-                priorityForFreezing(a.status) < priorityForFreezing(b.status)
+                sourceAvailabilityPriority(a) < sourceAvailabilityPriority(b)
             }
             self.frozenSourceOrder = sorted.map { $0.id }
             self.isInitialLoadComplete = true
@@ -539,16 +638,23 @@ class AnimeDetailViewModel: ObservableObject {
         }
     }
 
-    /// 排序优先级（仅用于初始冻结排序）
-    private func priorityForFreezing(_ status: SourceQueryStatus) -> Int {
-        switch status {
-        case .success: return 0
-        case .needsSelection: return 1
-        case .captcha: return 2
-        case .error: return 3
-        case .noResult: return 4
-        case .loading: return 5
-        case .idle: return 6
+    /// 该源本次会话内是否真实起播成功过（自动检测的「可播放」依据）
+    func hasVerifiedPlayback(for sourceID: String) -> Bool {
+        !(verifiedPlaybackEpisodes[sourceID] ?? []).isEmpty
+    }
+
+    /// 源可用性排序：可播放 > 有剧集 > 需选择 > 需验证 > 检索中 > 失败 > 无结果 > 未检索。
+    /// 冻结排序与右栏实时排序共用，保证两处口径一致。
+    func sourceAvailabilityPriority(_ source: SourceSearchResult) -> Int {
+        if hasVerifiedPlayback(for: source.id) { return 0 }
+        switch source.status {
+        case .success: return source.roads.contains { !$0.episodes.isEmpty } ? 1 : 6
+        case .needsSelection: return 2
+        case .captcha: return 3
+        case .loading: return 4
+        case .error: return 5
+        case .noResult: return 6
+        case .idle: return 7
         }
     }
     
@@ -591,8 +697,17 @@ class AnimeDetailViewModel: ObservableObject {
     
     /// 搜索所有可用源（用户手动触发）
     func searchAllSources() async {
-        guard !sourceResults.isEmpty else { return }
+        if sourceResults.isEmpty {
+            // 规则尚未就绪：等待装载完成后补发检索，而不是静默放弃。
+            Self.logger.notice("source_search_deferred_until_rules rules_loading=\(self.isLoadingRules, privacy: .public)")
+            await loadRules()
+        }
+        guard !sourceResults.isEmpty else {
+            Self.logger.error("source_search_skipped_no_rules rules_loading=\(self.isLoadingRules, privacy: .public)")
+            return
+        }
 
+        Self.logger.notice("source_search_begin count=\(self.sourceResults.count, privacy: .public)")
         print("[AnimeDetailViewModel] ========== 开始查询所有源 ==========")
 
         // 并发查询所有源
@@ -604,6 +719,7 @@ class AnimeDetailViewModel: ObservableObject {
             }
         }
 
+        Self.logger.notice("source_search_end sources=\(self.sourceResults.count, privacy: .public) initial_load_complete=\(self.isInitialLoadComplete, privacy: .public)")
         print("[AnimeDetailViewModel] ========== 所有源查询完成 ==========")
     }
 
@@ -678,7 +794,7 @@ class AnimeDetailViewModel: ObservableObject {
 
         guard let url = URL(string: verifyURL), url.scheme == "http" || url.scheme == "https" else { return }
 
-        print("[AnimeDetailViewModel] 打开验证码验证页面: \(url)")
+        print("[AnimeDetailViewModel] 打开验证码验证页面 host=\(url.host ?? "unknown")")
         captchaVerificationSession = CaptchaVerificationSession(
             rule: rule,
             startURL: url,
@@ -702,40 +818,31 @@ class AnimeDetailViewModel: ObservableObject {
         captchaVerificationSession = nil
     }
 
-    func completeCaptchaVerificationAndContinue() async {
-        guard let session = captchaVerificationSession else { return }
+    func completeCaptchaVerificationAndContinue(session: CaptchaVerificationSession) async {
+        guard captchaVerificationSession?.id == session.id else { return }
         let replayEp = session.replayEpisode
-        let replayIdx = session.replaySourceIndex
         let rule = session.rule
         let selectedItem = session.selectedSearchItem
 
         print("[AnimeDetailViewModel] 验证码验证完成，同步 Cookie...")
         
-        // 等待一小段时间确保 Cookie 已写入
-        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
-        
-        // 同步 WebView Cookie 到共享存储
         await WebViewCookieSync.syncWKWebsiteDataStoreToSharedHTTPCookieStorage()
-        
-        // 关闭验证码弹窗
+        guard !Task.isCancelled, captchaVerificationSession?.id == session.id else { return }
         captchaVerificationSession = nil
-        
-        // 再等待一小段时间确保同步完成
-        try? await Task.sleep(nanoseconds: 300_000_000) // 0.3秒
 
-        if let ep = replayEp, let idx = replayIdx {
+        if let ep = replayEp,
+           let idx = sourceResults.firstIndex(where: { $0.id == rule.id }) {
             // 播放阶段的验证码验证完成，重新尝试播放
             print("[AnimeDetailViewModel] 重新尝试播放...")
             if session.isDownload {
-                await downloadEpisode(ep, from: idx)
+                AnimeDownloadEngine.shared.resume(episodeId: ep.id, sourceId: rule.id)
             } else {
                 await playEpisode(ep, from: idx)
             }
         } else if let item = selectedItem {
             // 剧集列表阶段的验证码验证完成，重新获取剧集列表
-            // 传入 clearCookies: true 确保使用新验证的 Cookie
             print("[AnimeDetailViewModel] 重新获取剧集列表...")
-            await queryEpisodes(for: item, in: rule, clearCookies: true)
+            await queryEpisodes(for: item, in: rule)
         } else {
             // 搜索阶段的验证码验证完成，重新搜索
             print("[AnimeDetailViewModel] 重新搜索源...")
@@ -745,12 +852,97 @@ class AnimeDetailViewModel: ObservableObject {
 
     // MARK: - 播放剧集
 
+    func selectRoad(_ roadIndex: Int, sourceID: String) {
+        guard let sourceIndex = sourceResults.firstIndex(where: { $0.id == sourceID }),
+              sourceResults[sourceIndex].roads.indices.contains(roadIndex) else { return }
+        sourceResults[sourceIndex].selectedRoadIndex = roadIndex
+        selectedSourceIndex = sourceIndex
+    }
+
+    var canSwitchPlaybackRoad: Bool {
+        guard let id = currentSourceID, let source = sourceResults.first(where: { $0.id == id }),
+              let episode = currentEpisode else { return false }
+        return source.roads.contains { road in
+            !attemptedRoadIDs.contains(road.id) && road.episodes.contains { $0.episodeNumber == episode.episodeNumber }
+        }
+    }
+
+    func switchToNextPlaybackRoad() async {
+        guard let id = currentSourceID, let index = sourceResults.firstIndex(where: { $0.id == id }),
+              let episode = currentEpisode else { return }
+        let source = sourceResults[index]
+        for (roadIndex, road) in source.roads.enumerated() where !attemptedRoadIDs.contains(road.id) {
+            guard let match = road.episodes.first(where: { $0.episodeNumber == episode.episodeNumber }) else { continue }
+            attemptedRoadIDs.insert(road.id)
+            recoveryStartTime = hasPlaybackPosition ? currentTime : currentStartTime
+            sourceResults[index].selectedRoadIndex = roadIndex
+            automaticRecoveryCount = 0
+            await playEpisode(match, from: index, isRecovery: true)
+            return
+        }
+    }
+
+    func playEpisode(number: Int) async {
+        guard let id = currentSourceID, let index = sourceResults.firstIndex(where: { $0.id == id }),
+              let episode = (sourceResults[index].roads.first(where: { $0.id == currentRoadID }) ?? sourceResults[index].detail)?.episodes.first(where: { $0.episodeNumber == number }) else { return }
+        await playEpisode(episode, from: index)
+    }
+
+    func playNextEpisode() async {
+        guard let current = currentEpisode else { return }
+        if currentPlayURL?.isFileURL == true {
+            let records = AnimeDownloadStore.shared.records.values.filter {
+                $0.animeId == anime.id && $0.sourceId == currentSourceID && $0.fileExists && $0.episodeNumber > current.episodeNumber
+            }.sorted { $0.episodeNumber < $1.episodeNumber }
+            if let next = records.first { playLocalEpisode(next) }
+            return
+        }
+        guard let id = currentSourceID, let index = sourceResults.firstIndex(where: { $0.id == id }) else { return }
+        let episodes = sourceResults[index].roads.first(where: { $0.id == currentRoadID })?.episodes ?? sourceResults[index].detail?.episodes ?? []
+        if let next = episodes.filter({ $0.episodeNumber > current.episodeNumber }).min(by: { $0.episodeNumber < $1.episodeNumber }) {
+            await playEpisode(next, from: index)
+        }
+    }
+
+    private var hasNextEpisode: Bool {
+        guard let current = currentEpisode else { return false }
+        if currentPlayURL?.isFileURL == true {
+            return AnimeDownloadStore.shared.records.values.contains {
+                $0.animeId == anime.id && $0.sourceId == currentSourceID && $0.fileExists && $0.episodeNumber > current.episodeNumber
+            }
+        }
+        guard let source = sourceResults.first(where: { $0.id == currentSourceID }) else { return false }
+        return (source.roads.first(where: { $0.id == currentRoadID }) ?? source.detail)?.episodes.contains {
+            $0.episodeNumber > current.episodeNumber
+        } ?? false
+    }
+
+    @discardableResult
+    private func scheduleNextEpisode() -> Bool {
+        guard hasNextEpisode else { return false }
+        guard finishedPlaybackID != playbackID else { return true }
+        finishedPlaybackID = playbackID
+        let expectedID = playbackID
+        playbackTransitionTask?.cancel()
+        playbackTransitionTask = Task { [weak self] in
+            guard let self, !Task.isCancelled, self.playbackID == expectedID else { return }
+            self.playbackTransitionTask = nil
+            await self.playNextEpisode()
+        }
+        return true
+    }
+
     func playEpisode(_ episode: AnimeDetail.AnimeEpisodeItem, from sourceIndex: Int, isRecovery: Bool = false) async {
         guard sourceResults.indices.contains(sourceIndex) else { return }
         let rule = sourceResults[sourceIndex].rule
         let resumeTime = isRecovery ? (recoveryStartTime ?? currentTime) : nil
         stopPlayback()
-        if !isRecovery { automaticRecoveryCount = 0 }
+        if !isRecovery {
+            automaticRecoveryCount = 0
+            attemptedRoadIDs.removeAll()
+        }
+        currentRoadID = sourceResults[sourceIndex].roads.first(where: { $0.episodes.contains(where: { $0.id == episode.id }) })?.id
+        if let currentRoadID { attemptedRoadIDs.insert(currentRoadID) }
         recoveryStartTime = resumeTime
         let requestID = playbackRequestID
         currentEpisode = episode
@@ -760,7 +952,7 @@ class AnimeDetailViewModel: ObservableObject {
         videoError = nil
         defer { if playbackRequestID == requestID { isLoadingVideo = false } }
 
-        let result = await playbackExtractor.extractVideoSources(from: episode.url, rule: rule)
+        let result = await playbackExtractor.extractVideoSources(from: episode.url, rule: rule, allowDirectMXdmHLS: true)
         guard playbackRequestID == requestID, !Task.isCancelled else { return }
         switch result {
         case .success(let sources):
@@ -768,7 +960,7 @@ class AnimeDetailViewModel: ObservableObject {
             candidateIndex = 0
             if let first = sources.first, let url = URL(string: first.url) {
                 currentHTTPHeaders = first.httpHeaders ?? AnimeVideoExtractor.requestHeaders(for: url, rule: rule, pageURL: episode.url)
-                setupPlayer(with: url, episode: episode, rule: rule)
+                await setupPlayer(with: url, episode: episode, rule: rule, useDirectHLS: first.usesMXdmDirectHLS == true)
             } else {
                 videoError = t("未找到可播放的视频")
             }
@@ -799,12 +991,15 @@ class AnimeDetailViewModel: ObservableObject {
             let source = videoSources[candidateIndex]
             if let url = URL(string: source.url) {
                 currentHTTPHeaders = source.httpHeaders ?? [:]
-                setupPlayer(with: url, episode: episode, rule: sourceResults[index].rule)
+                await setupPlayer(with: url, episode: episode, rule: sourceResults[index].rule, useDirectHLS: source.usesMXdmDirectHLS == true)
                 return
             }
         }
         if automatically {
-            guard automaticRecoveryCount < 1 else { return }
+            guard automaticRecoveryCount < 1 else {
+                if canSwitchPlaybackRoad { await switchToNextPlaybackRoad() }
+                return
+            }
             automaticRecoveryCount += 1
         } else {
             automaticRecoveryCount = 0
@@ -867,70 +1062,54 @@ class AnimeDetailViewModel: ObservableObject {
             episode: episode,
             sourceId: record.sourceId,
             sourceName: record.sourceName,
-            coverURL: anime.coverURL
+            coverURL: anime.coverURL,
+            sessionID: progressSessionID
         )
 
         loadDanmaku(for: episode)
     }
 
-    /// 下载独立解析；当前正在播放的同一集直接复用已解析的源与请求头。
+    func downloadEpisodes(_ episodes: [AnimeDetail.AnimeEpisodeItem], from sourceIndex: Int) {
+        guard sourceResults.indices.contains(sourceIndex) else { return }
+        let source = sourceResults[sourceIndex]
+        let downloadAnime = downloadContext(for: source)
+        for episode in episodes {
+            AnimeDownloadEngine.shared.enqueueEpisode(anime: downloadAnime, source: source.rule, episode: episode)
+        }
+    }
+
+    /// 下载任务在解析前即落盘；解析、暂停和恢复统一由下载引擎持有。
     func downloadEpisode(_ episode: AnimeDetail.AnimeEpisodeItem, from sourceIndex: Int) async {
         guard sourceResults.indices.contains(sourceIndex) else { return }
-        let rule = sourceResults[sourceIndex].rule
-        let recordID = AnimeDownloadRecord.recordID(ruleId: rule.id, episodeId: episode.id)
-        guard !AnimeDownloadStore.shared.isDownloaded(episodeId: episode.id, sourceId: rule.id),
-              !AnimeDownloadEngine.shared.isDownloading(episodeId: episode.id, sourceId: rule.id),
-              !resolvingDownloads.contains(recordID) else { return }
-        resolvingDownloads.insert(recordID)
-        downloadErrors.removeValue(forKey: recordID)
-        defer {
-            resolvingDownloads.remove(recordID)
-            downloadExtractors.removeValue(forKey: recordID)
-        }
-        let result: VideoExtractionResult
-        if currentEpisode?.id == episode.id, currentSourceID == rule.id,
-           let url = currentPlayURL, !url.isFileURL {
-            var source = videoSources.indices.contains(candidateIndex) ? videoSources[candidateIndex]
-                : VideoSource(quality: "Auto", url: url.absoluteString, type: AnimeDownloadEngine.isHLSURL(url) ? "m3u8" : "mp4", label: nil)
-            source.httpHeaders = currentHTTPHeaders
-            result = .success([source])
-        } else {
-            let extractor = AnimeVideoExtractor()
-            downloadExtractors[recordID] = extractor
-            result = await extractor.extractVideoSources(from: episode.url, rule: rule)
-        }
-        guard !Task.isCancelled, resolvingDownloads.contains(recordID) else { return }
-        switch result {
-        case .success(let sources):
-            guard let first = sources.first, let url = URL(string: first.url) else {
-                downloadErrors[recordID] = t("无法解析视频地址，下载失败")
-                return
-            }
-            AnimeDownloadEngine.shared.enqueue(
-                anime: anime, source: rule, episode: episode, videoURL: url,
-                isHLS: first.type.lowercased().contains("m3u8") || AnimeDownloadEngine.isHLSURL(url),
-                httpHeaders: first.httpHeaders ?? AnimeVideoExtractor.requestHeaders(for: url, rule: rule, pageURL: episode.url)
-            )
-        case .error(let message):
-            downloadErrors[recordID] = String(format: t("下载解析失败：%@"), String(describing: message))
-        case .captcha:
-            downloadErrors[recordID] = "请完成验证后重试下载"
-            presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex, forDownload: true)
-        case .timeout:
-            downloadErrors[recordID] = t("下载解析超时，请重试")
-        }
+        let source = sourceResults[sourceIndex]
+        AnimeDownloadEngine.shared.enqueueEpisode(anime: downloadContext(for: source), source: source.rule, episode: episode)
+    }
+
+    private func downloadContext(for source: SourceSearchResult) -> AnimeSearchResult {
+        let detailURL = source.selectedItem.map {
+            source.rule.chapterMode == .api ? $0.src : $0.fullURL(baseURL: source.rule.baseURL)
+        } ?? ""
+        return AnimeSearchResult(id: anime.id, title: anime.title, coverURL: anime.coverURL,
+                                 detailURL: detailURL, sourceId: source.id, sourceName: source.rule.name,
+                                 latestEpisode: anime.latestEpisode, rating: anime.rating)
     }
 
     /// 设置播放器并恢复进度
     /// 清理播放器但不重置 currentEpisode（用于切换剧集时）
     private func cleanupPlayerOnly() {
-        PlaybackProgressCache.shared.stopTracking()
+        directHLSRelay?.stop()
+        directHLSRelay = nil
+        PlaybackProgressCache.shared.stopTracking(sessionID: progressSessionID)
+        readyForSync = false
+        currentTime = 0
+        totalDuration = 0
+        currentProgress = 0
         currentPlayURL = nil
         currentStartTime = 0
         isPlaying = false
         isBuffering = false
         // 恢复系统息屏/休眠
-        SleepPreventer.shared.stopPreventingSleep()
+        SleepPreventer.shared.stopPreventingSleep(sessionID: progressSessionID)
         // 清理所有播放器相关的 Combine 订阅，防止切换剧集时堆积
         cancellables.removeAll()
         // 注意：不重置 currentEpisode，保留当前播放的剧集信息
@@ -939,13 +1118,33 @@ class AnimeDetailViewModel: ObservableObject {
         danmakuTask?.cancel()
         danmakuTask = nil
         danmakuList = []
+        danmakuManualSourceActive = false
     }
 
     /// 使用原生播放器设置播放器
-    private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, rule: AnimeRule) {
-        
-        // 使用 cleanupPlayerOnly 而不是 stopPlayback，避免 currentEpisode 被清空
+    private func setupPlayer(with url: URL, episode: AnimeDetail.AnimeEpisodeItem, rule: AnimeRule, useDirectHLS: Bool) async {
         cleanupPlayerOnly()
+        let playURL: URL
+        if useDirectHLS {
+            let requestID = playbackRequestID
+            do {
+                let relay = try MXdmDirectHLS(headers: currentHTTPHeaders)
+                directHLSRelay = relay
+                playURL = try await relay.start(at: url)
+                guard playbackRequestID == requestID, directHLSRelay === relay, !Task.isCancelled else {
+                    relay.stop()
+                    return
+                }
+                // Only the relay needs the origin headers; never send them to the loopback URL.
+                currentHTTPHeaders = [:]
+            } catch {
+                guard playbackRequestID == requestID else { return }
+                directHLSRelay?.stop()
+                directHLSRelay = nil
+                videoError = t("页面加载失败，请重试或切换线路")
+                return
+            }
+        } else { playURL = url }
         
         // 恢复播放进度
         var startTime: TimeInterval = 0
@@ -961,12 +1160,17 @@ class AnimeDetailViewModel: ObservableObject {
         hasPlaybackPosition = false
         self.currentStartTime = recoveryStartTime ?? startTime
         recoveryStartTime = nil
-        self.currentPlayURL = url
+        self.currentPlayURL = playURL
         playbackID = UUID()
-        self.isPlaying = true
+        self.isPlaying = false
         self.isBuffering = true
-        
-        print("[AnimeDetailViewModel] 开始播放: \(url.absoluteString)")
+        self.videoError = nil
+        finishedPlaybackID = nil
+        didSkipOpening = false
+        didSkipEnding = false
+        seekRequest = nil
+
+        print("[AnimeDetailViewModel] 开始播放 host=\(url.host ?? "local")")
 
         // 开始跟踪播放进度
         PlaybackProgressCache.shared.startTracking(
@@ -975,7 +1179,8 @@ class AnimeDetailViewModel: ObservableObject {
             episode: episode,
             sourceId: rule.id,
             sourceName: rule.name,
-            coverURL: anime.coverURL
+            coverURL: anime.coverURL,
+            sessionID: progressSessionID
         )
 
         // 加载弹幕
@@ -985,12 +1190,18 @@ class AnimeDetailViewModel: ObservableObject {
     // MARK: - 播放器状态回调（由 View 调用）
 
     func handlePlayerState(_ state: PlaybackState) {
+        observedPlayerState = (playbackID, state)
         switch state {
         case .readyToPlay:
+            readyForSync = true
+            if let pendingRemoteSeek {
+                seekRequest = pendingRemoteSeek
+                self.pendingRemoteSeek = nil
+            }
             print("[AnimeDetailViewModel] ✅ 播放器状态: readyToPlay")
             isBuffering = false
             videoError = nil // 播放成功时清除之前的错误提示
-            SleepPreventer.shared.startPreventingSleep()
+            SleepPreventer.shared.startPreventingSleep(sessionID: progressSessionID)
         case .buffering:
             print("[AnimeDetailViewModel] ⏳ 播放器状态: buffering")
             isBuffering = true
@@ -998,38 +1209,59 @@ class AnimeDetailViewModel: ObservableObject {
             print("[AnimeDetailViewModel] ⏸️ 播放器状态: paused")
             isPlaying = false
             isBuffering = false
-            SleepPreventer.shared.stopPreventingSleep()
+            SleepPreventer.shared.stopPreventingSleep(sessionID: progressSessionID)
         case .failed(let msg):
+            readyForSync = false
             print("[AnimeDetailViewModel] ❌ 播放器状态: error - \(msg)")
-            videoError = "视频播放失败：\(msg)"
-            isBuffering = false
+            videoError = msg
             isPlaying = false
             isBuffering = false
-            SleepPreventer.shared.stopPreventingSleep()
+            SleepPreventer.shared.stopPreventingSleep(sessionID: progressSessionID)
         case .idle, .loading:
             break
         case .playing:
+            readyForSync = true
             isPlaying = true
             isBuffering = false
             videoError = nil // 播放成功时清除之前的错误提示
-            SleepPreventer.shared.startPreventingSleep()
+            if let sourceID = currentSourceID, let episode = currentEpisode, currentPlayURL?.isFileURL != true {
+                verifiedPlaybackEpisodes[sourceID, default: []].insert(episode.id)
+            }
+            SleepPreventer.shared.startPreventingSleep(sessionID: progressSessionID)
         case .finished:
             isPlaying = false
             isBuffering = false
-            SleepPreventer.shared.stopPreventingSleep()
+            SleepPreventer.shared.stopPreventingSleep(sessionID: progressSessionID)
+            if totalDuration > 0 { handlePlayerProgress(currentTime: totalDuration, totalTime: totalDuration) }
+            if enhancementSettings.autoPlayNext { scheduleNextEpisode() }
         }
+        publishSyncPlayState(force: true)
+    }
+
+    private func publishSyncPlayState(force: Bool = false) {
+        guard readyForSync, let episode = currentEpisode else { return }
+        syncPlay.bangumiID = bangumiDetail?.id
+        syncPlay.updateLocalPlayback(isPlaying: isPlaying, position: currentTime,
+                                    episodeNumber: episode.episodeNumber, title: anime.title, force: force)
+    }
+
+    func consumeSeekRequest(_ id: UUID) {
+        if seekRequest?.id == id { seekRequest = nil }
     }
 
     func handlePlayerProgress(currentTime: TimeInterval, totalTime: TimeInterval) {
-        guard currentTime.isFinite, totalTime.isFinite else { return }
+        guard currentEpisode != nil, currentTime.isFinite, totalTime.isFinite,
+              currentTime >= 0, totalTime >= 0 else { return }
+        // 续播seek尚未落地时的初始零点不覆盖已有续播位置。
+        if !hasPlaybackPosition, currentStartTime > 0, currentTime == 0 { return }
         if currentTime > 0 || (currentStartTime == 0 && totalTime > 0) { hasPlaybackPosition = true }
         self.currentTime = currentTime
         self.totalDuration = totalTime
-        let progress = totalTime > 0 ? currentTime / totalTime : 0
+        let progress = totalTime > 0 ? min(1, currentTime / totalTime) : 0
         
         // 同时更新 AnimeProgressStore（每5%或完成时保存一次）
         if let currentEpisode = currentEpisode {
-            let shouldSave = Int(progress * 20) > Int(self.currentProgress * 20) || progress >= 0.95
+            let shouldSave = Int(progress * 20) != Int(self.currentProgress * 20)
             if shouldSave {
                 AnimeProgressStore.shared.updateProgress(
                     animeId: anime.id,
@@ -1046,13 +1278,32 @@ class AnimeDetailViewModel: ObservableObject {
         self.currentProgress = progress
         
         // 更新进度缓存
-        PlaybackProgressCache.shared.updateProgress(currentTime: currentTime, duration: totalTime)
+        PlaybackProgressCache.shared.updateProgress(currentTime: currentTime, duration: totalTime, sessionID: progressSessionID)
+        publishSyncPlayState()
+        guard enhancementSettings.skipOpeningEnding, totalTime > 0,
+              isPlaying || isBuffering else { return }
+        let opening = enhancementSettings.openingSeconds
+        let ending = enhancementSettings.endingSeconds
+        // 短片不应用固定时长，避免把整段内容跳光。
+        guard totalTime > opening + ending + 60 else { return }
+        if !didSkipOpening {
+            didSkipOpening = true
+            if currentTime < opening, opening > 0 {
+                seekRequest = PlaybackSeekRequest(time: opening, resume: isPlaying || isBuffering)
+            }
+        }
+        if !didSkipEnding, ending > 0, currentTime >= totalTime - ending, currentTime < totalTime - 0.5 {
+            didSkipEnding = true
+            if !enhancementSettings.autoPlayNext || !scheduleNextEpisode() {
+                seekRequest = PlaybackSeekRequest(time: totalTime, resume: false)
+            }
+        }
     }
 
     func handlePlayerFinish(error: Error?) {
         isPlaying = false
         isBuffering = false
-        SleepPreventer.shared.stopPreventingSleep()
+        SleepPreventer.shared.stopPreventingSleep(sessionID: progressSessionID)
         if let error = error {
             videoError = String(format: t("播放失败: %@"), String(describing: error.localizedDescription))
             print("[AnimeDetailViewModel] ❌ 播放完成(出错): \(error.localizedDescription)")
@@ -1065,13 +1316,24 @@ class AnimeDetailViewModel: ObservableObject {
 
     /// 停止播放并保存进度
     func stopPlayback() {
+        playbackTransitionTask?.cancel()
+        playbackTransitionTask = nil
+        playbackID = UUID()
         playbackRequestID = UUID()
         playbackExtractor.cancel()
+        directHLSRelay?.stop()
+        directHLSRelay = nil
         isLoadingVideo = false
         currentSourceID = nil
-        hasPlaybackPosition = false
+        currentRoadID = nil
+        readyForSync = false
+        pendingRemoteSeek = nil
+        seekRequest = nil
+        finishedPlaybackID = nil
+        didSkipOpening = false
+        didSkipEnding = false
         // 保存最终进度到 AnimeProgressStore
-        if let currentEpisode = currentEpisode {
+        if let currentEpisode = currentEpisode, hasPlaybackPosition {
             AnimeProgressStore.shared.updateProgress(
                 animeId: anime.id,
                 animeTitle: anime.title,
@@ -1083,33 +1345,44 @@ class AnimeDetailViewModel: ObservableObject {
             )
         }
         
-        PlaybackProgressCache.shared.stopTracking()
+        PlaybackProgressCache.shared.stopTracking(sessionID: progressSessionID)
+        readyForSync = false
+        currentTime = 0
+        totalDuration = 0
+        currentProgress = 0
         currentPlayURL = nil
         currentStartTime = 0
         isPlaying = false
         isBuffering = false
         // 恢复系统息屏/休眠
-        SleepPreventer.shared.stopPreventingSleep()
+        SleepPreventer.shared.stopPreventingSleep(sessionID: progressSessionID)
         // 清理所有播放器相关的 Combine 订阅
         cancellables.removeAll()
         currentEpisode = nil
         currentTime = 0
         totalDuration = 0
         currentProgress = 0
+        hasPlaybackPosition = false
 
         // 取消弹幕加载
         danmakuTask?.cancel()
         danmakuTask = nil
         danmakuList = []
+        danmakuManualSourceActive = false
     }
 
     /// 前台窗口释放时使用：保留收藏/偏好等持久状态，清掉播放页的大对象和临时数据。
     func releaseForegroundMemory() {
+        Self.logger.notice("source_state_release sources=\(self.sourceResults.count, privacy: .public) requests=\(self.sourceRequestIDs.count, privacy: .public)")
+        playbackTransitionTask?.cancel()
+        playbackTransitionTask = nil
+        syncPlay.disconnect()
         stopPlayback()
         downloadExtractors.values.forEach { $0.cancel() }
         downloadExtractors.removeAll()
         resolvingDownloads.removeAll()
 
+        sourceRequestIDs.removeAll()
         availableRules.removeAll(keepingCapacity: false)
         sourceResults.removeAll(keepingCapacity: false)
         videoSources.removeAll(keepingCapacity: false)
@@ -1134,6 +1407,9 @@ class AnimeDetailViewModel: ObservableObject {
         totalDuration = 0
         isInitialLoadComplete = false
         frozenSourceOrder.removeAll(keepingCapacity: false)
+        verifiedPlaybackEpisodes.removeAll(keepingCapacity: false)
+        rulesLoadTask?.cancel()
+        rulesLoadTask = nil
     }
 
     // MARK: - 弹幕功能
@@ -1143,76 +1419,133 @@ class AnimeDetailViewModel: ObservableObject {
         // 取消之前的任务
         danmakuTask?.cancel()
         danmakuList = []
+        danmakuError = nil
 
         guard danmakuSettings.isEnabled else { return }
 
+        // 未配置弹弹play开放平台凭证时给出可行动的提示，而不是伪装成网络失败。
+        guard DanmakuCredentials.isConfigured else {
+            danmakuError = t("anime.player.danmakuAuthMissing")
+            return
+        }
+
         danmakuTask = Task {
+            let manualID = await AnimeDanmakuCache.shared.manualEpisodeID(animeId: anime.id, episodeNumber: episode.episodeNumber)
+            guard !Task.isCancelled, currentEpisode?.id == episode.id else { return }
+            danmakuManualSourceActive = manualID != nil
             await fetchDanmakuInternal(episode: episode)
         }
     }
 
+    /// 凭证补齐后重试当前集弹幕（设置页保存凭证后调用）。
+    func retryDanmakuLoad() {
+        guard let episode = currentEpisode else { return }
+        loadDanmaku(for: episode)
+    }
+
     private func fetchDanmakuInternal(episode: AnimeDetail.AnimeEpisodeItem) async {
+        let expectedPlaybackID = playbackID
         isLoadingDanmaku = true
-        defer { isLoadingDanmaku = false }
-
+        danmakuError = nil
+        defer { if playbackID == expectedPlaybackID { isLoadingDanmaku = false } }
         do {
-            // 1. 首先尝试通过 Bangumi ID 获取
-            if let bangumiId = Int(anime.id) {
-                let danmaku = try await DanmakuService.shared.fetchDanmakuByBangumiId(
-                    bangumiId: bangumiId,
-                    episodeNumber: episode.episodeNumber
-                )
-
-                if !danmaku.isEmpty {
-                    await MainActor.run {
-                        if danmakuSettings.enableDeduplication {
-                            self.danmakuList = danmaku.deduplicated(timeWindow: 5.0)
-                        } else {
-                            self.danmakuList = danmaku
-                        }
+            var comments: [Danmaku] = []
+            if let cached = await AnimeDanmakuCache.shared.cached(animeId: anime.id, episodeNumber: episode.episodeNumber) {
+                comments = cached
+            } else if let manualID = await AnimeDanmakuCache.shared.manualEpisodeID(animeId: anime.id, episodeNumber: episode.episodeNumber) {
+                comments = try await DanmakuService.shared.getDanmaku(episodeId: manualID)
+            } else {
+                // Bangumi 详情可能仍在加载：短暂等待映射依据就绪，避免落到标题搜索匹配错番。
+                if bangumiDetail == nil, isLoadingBangumi, Int(anime.id) != nil {
+                    for _ in 0..<20 {
+                        try Task.checkCancellation()
+                        if bangumiDetail != nil || !isLoadingBangumi { break }
+                        try await Task.sleep(nanoseconds: 100_000_000)
                     }
-                    print("[AnimeDetailViewModel] 加载弹幕成功: \(self.danmakuList.count) 条")
-                    return
+                }
+                if let bangumiID = bangumiDetail?.id ?? Int(anime.id.replacingOccurrences(of: "bangumi_", with: "")) {
+                    comments = (try? await DanmakuService.shared.fetchDanmakuByBangumiId(
+                        bangumiId: bangumiID, episodeNumber: episode.episodeNumber)) ?? []
+                }
+                try Task.checkCancellation()
+                if comments.isEmpty {
+                    comments = try await DanmakuService.shared.fetchDanmakuSmart(
+                        animeTitle: cleanedDanmakuSearchTitle, episodeNumber: episode.episodeNumber)
                 }
             }
-
-            // 2. 通过标题搜索获取
-            let danmaku = try await DanmakuService.shared.fetchDanmakuSmart(
-                animeTitle: anime.title,
-                episodeNumber: episode.episodeNumber
-            )
-
-            await MainActor.run {
-                if danmakuSettings.enableDeduplication {
-                    self.danmakuList = danmaku.deduplicated(timeWindow: 5.0)
-                } else {
-                    self.danmakuList = danmaku
-                }
+            guard !Task.isCancelled, playbackID == expectedPlaybackID, currentEpisode?.id == episode.id else { return }
+            danmakuList = comments
+            if danmakuSettings.cacheEnabled, !comments.isEmpty {
+                await AnimeDanmakuCache.shared.store(comments, animeId: anime.id, episodeNumber: episode.episodeNumber)
             }
-            print("[AnimeDetailViewModel] 加载弹幕成功: \(self.danmakuList.count) 条")
-
+            if comments.isEmpty { danmakuError = t("anime.player.danmakuNoMatch") }
         } catch {
-            print("[AnimeDetailViewModel] 加载弹幕失败: \(error)")
-            // 弹幕加载失败不影响播放
+            guard !Task.isCancelled, playbackID == expectedPlaybackID else { return }
+            danmakuError = (error as? DanmakuError) == .authenticationRequired
+                ? t("anime.player.danmakuAuthMissing")
+                : t("anime.player.danmakuLoadFailed")
+        }
+    }
+
+    /// 弹弹play标题搜索用的净化标题（去标点/季数后缀，提高命中率）。
+    private var cleanedDanmakuSearchTitle: String {
+        cleanSearchQuery(anime.title)
+    }
+
+    func selectDanmakuEpisode(_ selected: DanmakuEpisode) {
+        guard let episode = currentEpisode else { return }
+        showDanmakuSourcePicker = false
+        guard DanmakuCredentials.isConfigured else {
+            danmakuError = t("anime.player.danmakuAuthMissing")
+            return
+        }
+        danmakuTask?.cancel()
+        danmakuTask = Task { [weak self] in
+            guard let self else { return }
+            let expectedID = self.playbackID
+            guard !Task.isCancelled, self.currentEpisode?.id == episode.id else { return }
+            self.danmakuList = []
+            self.danmakuError = nil
+            self.isLoadingDanmaku = true
+            defer { if self.playbackID == expectedID { self.isLoadingDanmaku = false } }
+            do {
+                await AnimeDanmakuCache.shared.setManualEpisodeID(selected.episodeId, animeId: self.anime.id, episodeNumber: episode.episodeNumber)
+                guard !Task.isCancelled, self.playbackID == expectedID else { return }
+                self.danmakuManualSourceActive = true
+                let comments = try await DanmakuService.shared.getDanmaku(episodeId: selected.episodeId)
+                guard !Task.isCancelled, self.playbackID == expectedID else { return }
+                await AnimeDanmakuCache.shared.store(comments, animeId: self.anime.id, episodeNumber: episode.episodeNumber)
+                guard !Task.isCancelled, self.playbackID == expectedID else { return }
+                self.danmakuList = comments
+                self.danmakuError = comments.isEmpty ? t("anime.player.danmakuNoMatch") : nil
+            } catch {
+                guard !Task.isCancelled, self.playbackID == expectedID else { return }
+                self.danmakuError = (error as? DanmakuError) == .authenticationRequired
+                    ? t("anime.player.danmakuAuthMissing")
+                    : t("anime.player.danmakuLoadFailed")
+            }
         }
     }
 
     /// 切换弹幕开关
     func toggleDanmaku() {
-        danmakuSettings.isEnabled.toggle()
-
-        if danmakuSettings.isEnabled, let episode = currentEpisode {
-            // 开启时加载弹幕
-            loadDanmaku(for: episode)
-        } else {
-            // 关闭时清空弹幕
-            danmakuList = []
-        }
+        var settings = danmakuSettings
+        settings.isEnabled.toggle()
+        updateDanmakuSettings(settings)
     }
 
     /// 更新弹幕设置
     func updateDanmakuSettings(_ settings: DanmakuSettings) {
+        let wasEnabled = danmakuSettings.isEnabled
         danmakuSettings = settings
+        if settings.isEnabled && !wasEnabled, let episode = currentEpisode {
+            loadDanmaku(for: episode)
+        } else if !settings.isEnabled {
+            danmakuTask?.cancel()
+            isLoadingDanmaku = false
+            danmakuList = []
+            danmakuError = nil
+        }
 
         // 保存到 UserDefaults
         if let encoded = try? JSONEncoder().encode(settings) {
@@ -1247,7 +1580,7 @@ class AnimeDetailViewModel: ObservableObject {
     // MARK: - 获取当前选中的源结果
 
     var currentSourceResult: SourceSearchResult? {
-        guard selectedSourceIndex < sourceResults.count else { return nil }
+        guard sourceResults.indices.contains(selectedSourceIndex) else { return nil }
         return sourceResults[selectedSourceIndex]
     }
 

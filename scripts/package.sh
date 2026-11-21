@@ -212,9 +212,17 @@ if [[ "$PKG_ARCH" == "universal" ]]; then
 else
   ARCH_OVERRIDES=(ARCHS="$PKG_ARCH" ONLY_ACTIVE_ARCH=NO)
 fi
+# 弹弹play开放平台凭证：CI 通过环境变量注入（GitHub Secrets），写入 Info.plist 供签名请求使用。
+# 本地未设置时保持空值，用户可在 App 设置页填写（存 Keychain）。
+DANDAN_OVERRIDES=()
+if [[ -n "${WAIFUX_DANDAN_APPID:-}" && -n "${WAIFUX_DANDAN_APPSECRET:-}" ]]; then
+  DANDAN_OVERRIDES=(WAIFUX_DANDAN_APPID="$WAIFUX_DANDAN_APPID" WAIFUX_DANDAN_APPSECRET="$WAIFUX_DANDAN_APPSECRET")
+  echo "🔑 已注入弹弹play开放平台凭证（值不回显）"
+fi
 # 内嵌 assets 的 zip_data.o / zip_accessor.o 是 universal（含双架构切片），两个架构都正常链接。
 xcodebuild -scheme WaifuX -configuration Release clean archive \
   "${ARCH_OVERRIDES[@]}" \
+  "${DANDAN_OVERRIDES[@]}" \
   -derivedDataPath "$BUILD_DIR" \
   CODE_SIGN_IDENTITY="-" \
   CODE_SIGNING_REQUIRED=NO \

@@ -78,21 +78,32 @@ struct AnimePlayerWindow: View {
             }
         }
         .ignoresSafeArea()
-        .onReceive(NotificationCenter.default.publisher(for: .playerDidEnterFullScreen)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .playerDidEnterFullScreen)) { notification in
+            guard notification.object as? String == viewModel.anime.id else { return }
             isPlayerFullscreen = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: .playerDidExitFullScreen)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .playerDidExitFullScreen)) { notification in
+            guard notification.object as? String == viewModel.anime.id else { return }
             isPlayerFullscreen = false
             withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
                 isRightPanelCollapsed = false
             }
         }
-        // 验证码 WebView Sheet
+        // 弹幕源手动匹配 Sheet
+        .sheet(isPresented: $viewModel.showDanmakuSourcePicker) {
+            AnimeDanmakuSourceView(animeTitle: viewModel.anime.title) { selected in
+                viewModel.selectDanmakuEpisode(selected)
+            }
+        }
+        // 别名检索 Sheet（查源失败/无结果时使用其他标题重搜）
+        .sheet(isPresented: $viewModel.showAliasSearchSheet) {
+            AliasSearchSheet(viewModel: viewModel)
+        }
         .sheet(item: $viewModel.captchaVerificationSession) { session in
             LiquidGlassCaptchaSheet(
                 session: session,
                 onCancel: { viewModel.cancelCaptchaVerification() },
-                onVerified: { Task { await viewModel.completeCaptchaVerificationAndContinue() } }
+                onVerified: { Task { await viewModel.completeCaptchaVerificationAndContinue(session: session) } }
             )
         }
     }
@@ -144,7 +155,7 @@ private struct PlayerSection: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     @Binding var isRightPanelCollapsed: Bool
     @Binding var isPlayerFullscreen: Bool
-    @StateObject var player: NativeVideoPlayer
+    @ObservedObject var player: NativeVideoPlayer
     @State private var isControlBarVisible = true
     @State private var hideControlBarWorkItem: DispatchWorkItem?
 
@@ -185,20 +196,31 @@ private struct PlayerSection: View {
                                     await viewModel.retryPlayback(automatically: true)
                                 }
                             }
-                            if state == .readyToPlay {
-                                SleepPreventer.shared.startPreventingSleep()
-                            }
                         }
                         .onReceive(player.currentTimePublisher) { newTime in
                             guard player.playbackID == viewModel.playbackID, !player.isSeeking else { return }
                             viewModel.handlePlayerProgress(currentTime: newTime, totalTime: player.totalDuration)
                         }
+                        .onChange(of: viewModel.seekRequest?.id) { _, _ in
+                            guard player.playbackID == viewModel.playbackID,
+                                  let request = viewModel.seekRequest else { return }
+                            player.seek(to: request.time, resumeAfterSeek: request.resume)
+                            viewModel.consumeSeekRequest(request.id)
+                        }
+                        .overlay {
+                            if viewModel.danmakuSettings.isEnabled {
+                                AnimeDanmakuPlaybackOverlay(viewModel: viewModel, player: player)
+                                    .allowsHitTesting(false)
+                            }
+                        }
                         .overlay(alignment: .bottom) {
                             // 播放控制栏直接覆盖在播放器上，确保在 AppKit 视图之上渲染
                             PlayerControlOverlay(
+                                animeId: viewModel.anime.id,
                                 player: player,
                                 isPlayerFullscreen: isPlayerFullscreen,
-                                isControlBarVisible: isControlBarVisible
+                                isControlBarVisible: isControlBarVisible,
+                                viewModel: viewModel
                             )
                         }
                         .overlay(alignment: .trailing) {
@@ -220,7 +242,10 @@ private struct PlayerSection: View {
 
             // 错误提示覆盖层
             if let error = viewModel.videoError {
-                ErrorOverlay(error: error) {
+                ErrorOverlay(error: error, diagnostic: player.currentDiagnostic?.safeSummary,
+                             onSwitchRoad: viewModel.canSwitchPlaybackRoad ? {
+                                 Task { await viewModel.switchToNextPlaybackRoad() }
+                             } : nil) {
                     Task { await viewModel.retryPlayback() }
                 }
             }
@@ -229,7 +254,7 @@ private struct PlayerSection: View {
             if !isPlayerFullscreen {
                 VStack(spacing: 0) {
                     HStack {
-                        PlayerCustomTitleBar(title: viewModel.anime.title)
+                        PlayerCustomTitleBar(animeId: viewModel.anime.id, title: viewModel.anime.title)
                         Spacer()
                     }
                     .padding(.horizontal, 20)
@@ -237,6 +262,19 @@ private struct PlayerSection: View {
                     Spacer()
                 }
             }
+        }
+        .overlay(alignment: .bottomLeading) {
+            AnimePlaybackAccessories(
+                syncPlay: viewModel.syncPlay,
+                episodeNumber: viewModel.currentEpisode?.episodeNumber,
+                hasVideo: viewModel.currentPlayURL != nil && !viewModel.isLoadingVideo && viewModel.videoError == nil,
+                player: player
+            )
+            .padding(.leading, 28)
+            .padding(.bottom, 22)
+            .opacity(isControlBarVisible ? 1 : 0)
+            .allowsHitTesting(isControlBarVisible)
+            .animation(.easeOut(duration: 0.25), value: isControlBarVisible)
         }
         // 鼠标在播放器上移动时显示控制栏，根据当前状态决定是否自动隐藏
         .onHover { hovering in
@@ -294,19 +332,25 @@ private struct PlayerSection: View {
 
 // MARK: - 播放控制栏覆盖层
 private struct PlayerControlOverlay: View {
+    let animeId: String
     @ObservedObject var player: NativeVideoPlayer
     let isPlayerFullscreen: Bool
     let isControlBarVisible: Bool
+    var viewModel: AnimeDetailViewModel? = nil
     @State private var currentState: PlaybackState = .idle
     @State private var currentTime: TimeInterval = 0
     @State private var sliderValue: Float = 0
     @State private var wasPlayingBeforeDrag = false
     @State private var isDraggingSlider = false
+    @State private var showDanmakuSettings = false
 
-    init(player: NativeVideoPlayer, isPlayerFullscreen: Bool, isControlBarVisible: Bool) {
+    init(animeId: String, player: NativeVideoPlayer, isPlayerFullscreen: Bool, isControlBarVisible: Bool,
+         viewModel: AnimeDetailViewModel? = nil) {
+        self.animeId = animeId
         self.player = player
         self.isPlayerFullscreen = isPlayerFullscreen
         self.isControlBarVisible = isControlBarVisible
+        self.viewModel = viewModel
     }
 
     var body: some View {
@@ -393,6 +437,39 @@ private struct PlayerControlOverlay: View {
                     HStack {
                         Spacer()
                         HStack(spacing: 16) {
+                            // 弹幕开关（Kazumi 同款控制栏入口）
+                            if let viewModel {
+                                Button {
+                                    viewModel.toggleDanmaku()
+                                } label: {
+                                    Image(systemName: viewModel.danmakuSettings.isEnabled ? "text.bubble.fill" : "text.bubble")
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(viewModel.danmakuSettings.isEnabled ? LiquidGlassColors.primaryPink : .white.opacity(0.85))
+                                        .frame(width: 24, height: 22)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .focusable(false)
+                                .help(t("anime.player.danmakuToggle"))
+
+                                Button {
+                                    showDanmakuSettings = true
+                                } label: {
+                                    Image(systemName: "slider.horizontal.3")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.white.opacity(0.85))
+                                        .frame(width: 22, height: 22)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .focusable(false)
+                                .help(t("anime.player.danmakuSettingsButton"))
+                                .popover(isPresented: $showDanmakuSettings, arrowEdge: .top) {
+                                    AnimeDanmakuSettingsPanel(viewModel: viewModel)
+                                        .frame(width: 340, height: 520)
+                                }
+                            }
+
                             // 倍速菜单
                             Menu {
                                 Button("0.5x") { player.playbackRate = 0.5 }
@@ -432,7 +509,7 @@ private struct PlayerControlOverlay: View {
 
                             // 全屏（系统全屏）
                             Button {
-                                NotificationCenter.default.post(name: .togglePlayerFullScreen, object: nil)
+                                NotificationCenter.default.post(name: .togglePlayerFullScreen, object: animeId)
                             } label: {
                                 Image(systemName: isPlayerFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                                     .font(.system(size: 15))
@@ -608,6 +685,8 @@ private struct BufferingOverlay: View {
 // MARK: - 错误覆盖层
 private struct ErrorOverlay: View {
     let error: String
+    var diagnostic: String? = nil
+    var onSwitchRoad: (() -> Void)? = nil
     let onRetry: () -> Void
 
     var body: some View {
@@ -628,8 +707,21 @@ private struct ErrorOverlay: View {
                 .lineLimit(3)
                 .padding(.horizontal, 20)
 
-            Button(t("retry"), action: onRetry)
-                .buttonStyle(.borderedProminent)
+            HStack {
+                Button(t("retry"), action: onRetry)
+                    .buttonStyle(.borderedProminent)
+                if let onSwitchRoad {
+                    Button(t("anime.player.switchRoad"), action: onSwitchRoad)
+                        .buttonStyle(.bordered)
+                }
+            }
+            if let diagnostic {
+                DisclosureGroup(t("anime.player.diagnostics")) {
+                    Text(diagnostic).font(.caption.monospaced()).textSelection(.enabled)
+                        .foregroundStyle(.white.opacity(0.65))
+                }
+                .frame(maxWidth: 440)
+            }
         }
         .padding(32)
         .background(
@@ -727,25 +819,10 @@ private struct RightPanel: View {
                 return idxA < idxB
             }
         } else {
-            // 尚未冻结：实时排序（绿色 > 橙色 > 蓝色 > 其他）
+            // 尚未冻结：实时排序，与冻结口径一致（可播放 > 有剧集 > 待选择 > 验证 > 失败…）
             return sources.sorted { a, b in
-                let priorityA = sortPriority(for: a.status)
-                let priorityB = sortPriority(for: b.status)
-                return priorityA < priorityB
+                viewModel.sourceAvailabilityPriority(a) < viewModel.sourceAvailabilityPriority(b)
             }
-        }
-    }
-
-    // 排序优先级: 数字越小越靠前
-    private func sortPriority(for status: SourceQueryStatus) -> Int {
-        switch status {
-        case .success: return 0      // 绿色 - 最前面
-        case .needsSelection: return 1  // 橙色
-        case .captcha: return 2     // 蓝色
-        case .loading: return 3
-        case .error: return 4
-        case .noResult: return 5
-        case .idle: return 6
         }
     }
 
@@ -761,10 +838,11 @@ private struct RightPanel: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
 
-            // 分隔线
-            GlassDivider()
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
+            if selectedTab != .sources {
+                GlassDivider()
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+            }
 
             // 内容区域
             Group {
@@ -776,7 +854,7 @@ private struct RightPanel: View {
                 case .danmaku:
                     DanmakuSettingsView(viewModel: viewModel)
                 case .enhancement:
-                    EnhancementSettingsView(viewModel: viewModel)
+                    AnimePlaybackSettingsView(viewModel: viewModel)
                 }
             }
         }
@@ -786,6 +864,7 @@ private struct RightPanel: View {
 
 // MARK: - 播放器自定义标题栏
 private struct PlayerCustomTitleBar: View {
+    let animeId: String
     let title: String
 
     var body: some View {
@@ -794,7 +873,7 @@ private struct PlayerCustomTitleBar: View {
             CustomWindowControls(
                 onClose: { NSApp.keyWindow?.performClose(nil) },
                 onMinimize: { NSApp.keyWindow?.performMiniaturize(nil) },
-                onMaximize: { NotificationCenter.default.post(name: .togglePlayerFullScreen, object: nil) }
+                onMaximize: { NotificationCenter.default.post(name: .togglePlayerFullScreen, object: animeId) }
             )
 
             // 窗口标题
@@ -1211,225 +1290,267 @@ private struct DownloadingTaskRow: View {
     }
 }
 
-// MARK: - 源内容视图（B站风格）
+// MARK: - 选集侧栏
 private struct SourcesContentView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     let sources: [SourceSearchResult]
-    @State private var selectedSourceIndex: Int = 0
+    @State private var selectedSourceID: String?
+
+    private var selectedSource: SourceSearchResult? {
+        let preferredID = selectedSourceID ?? viewModel.currentSourceID
+        return sources.first(where: { $0.id == preferredID }) ?? sources.first
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            // 规则加载中显示加载动画，避免用户看到突然变化
-            if viewModel.isLoadingRules {
+            if viewModel.isLoadingRules && sources.isEmpty {
                 LoadingStateView(message: t("animePlayer.loadingSources"))
-            } else if !viewModel.isInitialLoadComplete {
-                // 初始排序尚未冻结：所有源还在搜索或解析集数中，显示统一加载状态
-                LoadingStateView(message: t("animePlayer.parsingSources"))
             } else if sources.isEmpty {
                 EmptyStateView(
                     icon: "exclamationmark.triangle.fill",
                     title: t("player.noRulesAvailable"),
                     message: t("player.installRulesFirst")
                 )
-            } else {
-                // 源选择器（水平滚动标签）
-                SourceTabSelector(
-                    sources: sources,
-                    selectedIndex: $selectedSourceIndex
-                )
-                .padding(.top, 12)
-                .padding(.horizontal, 20)
+            } else if let source = selectedSource,
+                      let index = viewModel.sourceResults.firstIndex(where: { $0.id == source.id }) {
+                SourceSearchProgressHeader(viewModel: viewModel, sources: sources)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
 
-                // 源内容
-                if selectedSourceIndex < sources.count {
-                    let source = sources[selectedSourceIndex]
-                    SourceDetailView(
-                        viewModel: viewModel,
-                        source: source,
-                        sourceIndex: viewModel.sourceResults.firstIndex(where: { $0.id == source.id }) ?? 0
-                    )
-                    .frame(maxWidth: .infinity)
+                EpisodeSourceToolbar(viewModel: viewModel, sources: sources, source: source) { id in
+                    selectedSourceID = id
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+
+                SourceDetailView(viewModel: viewModel, source: source, sourceIndex: index)
+                    .frame(maxWidth: .infinity)
+            } else {
+                LoadingStateView(message: t("animePlayer.parsingSources"))
             }
         }
         .frame(maxWidth: .infinity)
+        .onChange(of: viewModel.currentSourceID) { _, id in
+            if let id, sources.contains(where: { $0.id == id }) { selectedSourceID = id }
+        }
+        .onAppear { autoSelectFirstAvailableIfNeeded() }
+        .onChange(of: viewModel.isInitialLoadComplete) { _, _ in autoSelectFirstAvailableIfNeeded() }
+    }
+
+    /// 检索完成后默认选中第一个有剧集的源（排序已把可用源排前），避免停在失败源上。
+    private func autoSelectFirstAvailableIfNeeded() {
+        guard selectedSourceID == nil, viewModel.currentSourceID == nil,
+              viewModel.isInitialLoadComplete else { return }
+        if let best = sources.first(where: { $0.roads.contains { !$0.episodes.isEmpty } }) {
+            selectedSourceID = best.id
+        }
     }
 }
 
-// MARK: - 源标签选择器（支持拖拽滚动）
-private struct SourceTabSelector: View {
+// MARK: - 源检索进度（自动检测可用源的全局摘要）
+private struct SourceSearchProgressHeader: View {
+    @ObservedObject var viewModel: AnimeDetailViewModel
     let sources: [SourceSearchResult]
-    @Binding var selectedIndex: Int
-    @State private var dragOffset: CGFloat = 0
-    @State private var scrollOffset: CGFloat = 0
+
+    private var finishedCount: Int {
+        sources.filter { source in
+            switch source.status {
+            case .idle, .loading: return false
+            case .success, .needsSelection, .noResult, .error, .captcha: return true
+            }
+        }.count
+    }
+
+    private var availableCount: Int {
+        sources.filter { $0.roads.contains { !$0.episodes.isEmpty } }.count
+    }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(Array(sources.enumerated()), id: \.element.id) { index, source in
-                        SourceTabButton(
-                            source: source,
-                            isSelected: selectedIndex == index
-                        ) {
-                            selectedIndex = index
-                        }
-                        .id(index)
-                    }
-                }
-                .padding(.horizontal, 4)
-                .offset(x: dragOffset)
+        HStack(spacing: 8) {
+            if finishedCount < sources.count {
+                ProgressView().controlSize(.mini)
+                Text(String(format: t("anime.player.sourceStatus.searchingProgress"), finishedCount, sources.count))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(LiquidGlassColors.textTertiary)
+            } else {
+                Image(systemName: availableCount > 0 ? "checkmark.circle.fill" : "exclamationmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(availableCount > 0 ? LiquidGlassColors.onlineGreen : LiquidGlassColors.warningOrange)
+                Text(String(format: t("anime.player.sourceStatus.availableCount"), availableCount))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(LiquidGlassColors.textTertiary)
             }
-            .contentMargins(0, for: .scrollContent)
-            .simultaneousGesture(
-                DragGesture()
-                    .onChanged { value in
-                        dragOffset = value.translation.width
-                    }
-                    .onEnded { value in
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            dragOffset = 0
-                        }
-                    }
-            )
-            .onChange(of: selectedIndex) { _, newValue in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(newValue, anchor: .center)
-                }
+            Spacer()
+            if finishedCount < sources.count {
+                Text(String(format: t("anime.player.sourceStatus.availableCount"), availableCount))
+                    .font(.system(size: 11))
+                    .foregroundStyle(LiquidGlassColors.textTertiary)
             }
         }
-        .frame(height: 40)
+        .frame(height: 18)
     }
 }
 
-// MARK: - 源标签按钮（B站风格）
-private struct SourceTabButton: View {
+private struct EpisodeSourceToolbar: View {
+    @ObservedObject var viewModel: AnimeDetailViewModel
+    let sources: [SourceSearchResult]
     let source: SourceSearchResult
-    let isSelected: Bool
-    let action: () -> Void
-    @State private var isHovered = false
+    let onSelectSource: (String) -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                // 状态指示器
-                Circle()
-                    .fill(statusColor)
+        HStack(spacing: 6) {
+            HStack(spacing: 4) {
+                // Outside the native menu label so AppKit cannot discard the status dot.
+                Circle().fill(status(for: source).color)
                     .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+                    .allowsHitTesting(false)
+                sourceMenu
+            }
+            .padding(.leading, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text(source.rule.name)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+            if source.roads.count > 1 {
+                roadMenu
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .foregroundStyle(isSelected ? .white : .white.opacity(0.6))
-            .padding(.horizontal, 14)
-            .frame(height: 34)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isSelected ? Color.white.opacity(0.12) : Color.clear)
+
+            AnimeEpisodeActionsMenu(
+                sourceID: source.id,
+                episodes: source.detail?.episodes ?? [],
+                onBackToSearch: backToSearchAction,
+                viewModel: viewModel
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(isSelected ? Color.white.opacity(0.2) : Color.clear, lineWidth: 1)
-            )
-            // 修复毛边：裁剪到圆角形状
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.15)) {
-                isHovered = hovering
-            }
-        }
+        .foregroundStyle(.white.opacity(0.9))
+        .frame(height: 30)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .liquidGlassSurface(.prominent, in: Capsule(style: .continuous))
+        .glassContainer(spacing: 10)
     }
 
-    private var statusColor: Color {
-        switch source.status {
-        case .success: return Color(hex: "34D399") // 绿色
-        case .needsSelection: return Color(hex: "F59E0B") // 橙色 - 需要选择
-        case .captcha: return Color(hex: "00AEEC") // 蓝色 - 需要验证码
-        case .loading: return Color(hex: "FBBF24")
-        case .error: return Color(hex: "EF4444")
-        case .idle, .noResult: return Color.white.opacity(0.3)
-        }
-    }
-}
-
-// MARK: - 源状态指示器
-private struct SourceStatusIndicator: View {
-    let status: SourceQueryStatus
-    @State private var isBlinking = false
-
-    var body: some View {
-        Circle()
-            .fill(indicatorColor)
-            .frame(width: 6, height: 6)
-            .opacity(isBlinking ? 0.3 : 1.0)
-            .onAppear {
-                guard status == .loading else { return }
-                RepeatForeverAnimationTracker.shared.enter("SourceBlink")
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                    isBlinking = true
+    private var sourceMenu: some View {
+        Menu {
+            ForEach(sources) { item in
+                let title = sourceTitle(for: item)
+                let state = status(for: item)
+                Button { onSelectSource(item.id) } label: {
+                    // 菜单项内用 SF Symbol 着色点：AppKit 菜单不渲染自定义 Shape。
+                    HStack(spacing: 6) {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 6))
+                            .foregroundStyle(state.color)
+                        if item.id == source.id { Label(title, systemImage: "checkmark") }
+                        else { Text(title) }
+                    }
                 }
             }
-            .onDisappear {
-                RepeatForeverAnimationTracker.shared.exit("SourceBlink")
-            }
-            .onChange(of: status) { _, newStatus in
-                guard newStatus != .loading, isBlinking else { return }
-                // 用无动画事务摘掉 repeatForever，停止闪烁
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    isBlinking = false
-                }
-                RepeatForeverAnimationTracker.shared.exit("SourceBlink")
-            }
-    }
-
-    private var indicatorColor: Color {
-        switch status {
-        case .success: return LiquidGlassColors.onlineGreen // 绿色
-        case .needsSelection: return Color(hex: "F59E0B") // 橙色 - 需要选择
-        case .captcha: return Color(hex: "00AEEC") // 蓝色 - 需要验证码
-        case .loading: return LiquidGlassColors.warningOrange
-        case .error: return Color(hex: "FF6B6B")
-        case .idle, .noResult: return LiquidGlassColors.textQuaternary
-        }
-    }
-}
-
-// MARK: - 源返回按钮
-private struct SourceBackButton: View {
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button {
-            action()
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.left")
-                    .font(.system(size: 12, weight: .semibold))
-                Text(t("player.backToSearch"))
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .foregroundStyle(isHovered ? Color(hex: "00AEEC") : .white.opacity(0.7))
-            .padding(.horizontal, 12)
-            .frame(height: 32)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.white.opacity(isHovered ? 0.1 : 0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-            )
+            selectorLabel(source.rule.name)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.15)) {
-                isHovered = hovering
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .accessibilityLabel(t("anime.player.source"))
+        .accessibilityValue(sourceTitle(for: source))
+        .help(sourceTitle(for: source))
+    }
+
+    private var roadMenu: some View {
+        let title = source.detail?.title ?? t("anime.player.road")
+        return Menu {
+            ForEach(Array(source.roads.enumerated()), id: \.element.id) { index, road in
+                Button { viewModel.selectRoad(index, sourceID: source.id) } label: {
+                    if index == source.selectedRoadIndex { Label(road.title, systemImage: "checkmark") }
+                    else { Text(road.title) }
+                }
             }
+        } label: {
+            selectorLabel(title)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .accessibilityLabel(t("anime.player.road"))
+        .accessibilityValue(title)
+        .help(title)
+    }
+
+    private func selectorLabel(_ title: String) -> some View {
+        HStack(spacing: 5) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .fixedSize()
+        }
+        .frame(height: 30)
+        .contentShape(Rectangle())
+    }
+
+    private var backToSearchAction: (() -> Void)? {
+        guard case .success = source.status, source.searchItems != nil else { return nil }
+        return { viewModel.resetSourceSelection(for: source.rule) }
+    }
+
+    private func sourceTitle(for item: SourceSearchResult) -> String {
+        let state = status(for: item)
+        let detail = state.episode.map { String(format: t("anime.player.sourceStatus.episodeNumber"), $0) + " · " + t(state.key) } ?? t(state.key)
+        return item.rule.name + " — " + detail
+    }
+
+    private func status(for item: SourceSearchResult) -> (key: String, color: Color, episode: Int?) {
+        // Report the actual current attempt only for its own online episode and source.
+        if item.id == viewModel.currentSourceID, viewModel.currentPlayURL?.isFileURL != true,
+           let current = viewModel.currentEpisode,
+           item.roads.contains(where: { road in road.episodes.contains { $0.id == current.id && $0.url == current.url } }) {
+            let number = current.episodeNumber
+            if viewModel.isLoadingVideo {
+                return ("anime.player.sourceStatus.loadingVideo", LiquidGlassColors.textQuaternary, number)
+            }
+            if let session = viewModel.captchaVerificationSession, session.rule.id == item.id,
+               session.replayEpisode?.id == current.id {
+                return ("anime.player.sourceStatus.verification", LiquidGlassColors.warningOrange, number)
+            }
+            if viewModel.videoError != nil {
+                return ("anime.player.sourceStatus.playbackFailed", Color(hex: "FF6B6B"), number)
+            }
+            if viewModel.currentPlayURL != nil {
+                switch viewModel.currentPlayerState {
+                case .loading:
+                    return ("anime.player.sourceStatus.loadingVideo", LiquidGlassColors.textQuaternary, number)
+                case .playing:
+                    return ("anime.player.sourceStatus.playing", LiquidGlassColors.onlineGreen, number)
+                case .buffering:
+                    return ("anime.player.sourceStatus.buffering", LiquidGlassColors.warningOrange, number)
+                case .paused:
+                    return ("anime.player.sourceStatus.paused", LiquidGlassColors.textQuaternary, number)
+                case .finished:
+                    return ("anime.player.sourceStatus.finished", LiquidGlassColors.textQuaternary, number)
+                case .idle, .readyToPlay, .failed:
+                    break
+                }
+            }
+        }
+
+        switch item.status {
+        case .success:
+            if item.roads.contains(where: { !$0.episodes.isEmpty }) {
+                // 本会话真实起播成功过 → 绿色「可播放」；否则灰点「有剧集，未验播」。
+                if viewModel.hasVerifiedPlayback(for: item.id) {
+                    return ("anime.player.sourceStatus.verified", LiquidGlassColors.onlineGreen, nil)
+                }
+                return ("anime.player.sourceStatus.episodesUnverified", LiquidGlassColors.textQuaternary, nil)
+            }
+            return ("player.noEpisodes", Color(hex: "FF6B6B"), nil)
+        case .needsSelection: return ("anime.player.sourceStatus.chooseTitle", LiquidGlassColors.warningOrange, nil)
+        case .captcha: return ("anime.player.sourceStatus.verification", LiquidGlassColors.warningOrange, nil)
+        case .error: return ("anime.player.sourceStatus.searchFailed", Color(hex: "FF6B6B"), nil)
+        case .noResult: return ("anime.player.sourceStatus.noMatch", Color(hex: "FF6B6B"), nil)
+        case .idle: return ("anime.player.sourceStatus.notSearched", LiquidGlassColors.textQuaternary, nil)
+        case .loading: return ("animePlayer.searching", LiquidGlassColors.textQuaternary, nil)
         }
     }
 }
@@ -1450,27 +1571,14 @@ private struct SourceDetailView: View {
 
         case .success:
             if let episodes = source.detail?.episodes, !episodes.isEmpty {
-                VStack(spacing: 0) {
-                    // 返回按钮（如果有搜索结果可返回）
-                    if source.searchItems != nil {
-                        SourceBackButton {
-                            viewModel.resetSourceSelection(for: source.rule)
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.top, 8)
+                EpisodeListView(
+                    episodes: episodes,
+                    sourceId: source.rule.id,
+                    viewModel: viewModel,
+                    onSelect: { episode in
+                        Task { await viewModel.playEpisode(episode, from: sourceIndex) }
                     }
-
-                    EpisodeListView(
-                        episodes: episodes,
-                        sourceId: source.rule.id,
-                        viewModel: viewModel,
-                        onSelect: { episode in
-                            Task {
-                                await viewModel.playEpisode(episode, from: sourceIndex)
-                            }
-                        }
-                    )
-                }
+                )
             } else {
                 EmptyStateView(
                     icon: "film.fill",
@@ -1486,7 +1594,7 @@ private struct SourceDetailView: View {
             )
 
         case .error(let message):
-            StatusView(message: message, color: Color(hex: "FF6B6B"))
+            SourceSearchFailureView(message: message, rule: source.rule, viewModel: viewModel)
 
         case .needsSelection(let items):
             NeedsSelectionView(
@@ -1531,6 +1639,75 @@ private struct StatusView: View {
                 .padding(.horizontal, 24)
         }
         .padding(.top, 60)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+}
+
+// MARK: - 查源失败视图（Kazumi 同款：重试 / 别名 / 打开网站）
+private struct SourceSearchFailureView: View {
+    let message: String
+    let rule: AnimeRule
+    @ObservedObject var viewModel: AnimeDetailViewModel
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(Color(hex: "FF6B6B").opacity(0.9))
+                .padding(.top, 48)
+
+            Text(t("anime.player.sourceStatus.searchFailed"))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(LiquidGlassColors.textPrimary)
+
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(LiquidGlassColors.textTertiary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .frame(maxWidth: 260)
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await viewModel.retrySearch(for: rule) }
+                } label: {
+                    Text(t("anime.player.sourceStatus.retrySearch"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(LiquidGlassColors.textPrimary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 30)
+                        .liquidGlassSurface(.prominent, in: Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    viewModel.showAliasSearch(for: rule)
+                } label: {
+                    Text(t("anime.player.sourceStatus.searchAlias"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(LiquidGlassColors.textPrimary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 30)
+                        .liquidGlassSurface(.regular, in: Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                if let url = URL(string: rule.baseURL) { NSWorkspace.shared.open(url) }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "safari")
+                        .font(.system(size: 11))
+                    Text(t("anime.player.sourceStatus.openWebsite"))
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .foregroundStyle(LiquidGlassColors.accentCyan)
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
@@ -1748,315 +1925,12 @@ private struct EpisodeRow: View {
     }
 }
 
-// MARK: - 弹幕设置视图（B站风格）
+// MARK: - 弹幕设置视图（Kazumi 分区结构 + 液态玻璃）
 private struct DanmakuSettingsView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
 
     var body: some View {
-        ScrollView(showsIndicators: true) {
-            VStack(spacing: 20) {
-                // 主开关（B站风格大按钮）
-                BilibiliStyleToggleCard(
-                    icon: "text.bubble.fill",
-                    iconColor: Color(hex: "00AEEC"),
-                    title: t("danmaku.enableDanmaku"),
-                    subtitle: t("danmaku.showRealtimeComments"),
-                    isOn: binding(for: \.isEnabled)
-                )
-
-                // 外观设置
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(t("player.appearance"))
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
-
-                    VStack(spacing: 0) {
-                        BilibiliSliderRow(
-                            title: t("player.opacity"),
-                            value: binding(for: \.opacity),
-                            range: 0.1...1.0,
-                            format: { "\(Int($0 * 100))%" }
-                        )
-
-                        BilibiliSliderRow(
-                            title: t("danmaku.fontSize"),
-                            value: binding(for: \.fontSize),
-                            range: 12...24,
-                            format: { "\(Int($0))" }
-                        )
-
-                        BilibiliSliderRow(
-                            title: t("player.scrollSpeed"),
-                            value: binding(for: \.speed),
-                            range: 0.5...2.0,
-                            format: { String(format: "%.1fx", $0) }
-                        )
-                    }
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(10)
-                    .padding(.horizontal, 20)
-                }
-
-                // 去重设置
-                BilibiliStyleToggleCard(
-                    icon: "checkmark.circle.fill",
-                    iconColor: Color(hex: "34D399"),
-                    title: t("player.enableDeduplication"),
-                    subtitle: t("player.hideDuplicate"),
-                    isOn: binding(for: \.enableDeduplication)
-                )
-
-                // 弹幕类型
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(t("danmaku.type"))
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
-
-                    VStack(spacing: 0) {
-                        BilibiliToggleRow(title: t("danmaku.top"), isOn: binding(for: \.enableTop))
-                        BilibiliToggleRow(title: t("danmaku.bottom"), isOn: binding(for: \.enableBottom))
-                        BilibiliToggleRow(title: t("danmaku.scroll"), isOn: binding(for: \.enableScroll), isLast: true)
-                    }
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(10)
-                    .padding(.horizontal, 20)
-                }
-            }
-            .padding(.vertical, 16)
-            .padding(.bottom, 32)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func binding(for keyPath: WritableKeyPath<DanmakuSettings, Bool>) -> Binding<Bool> {
-        Binding(
-            get: { viewModel.danmakuSettings[keyPath: keyPath] },
-            set: { newValue in
-                var settings = viewModel.danmakuSettings
-                settings[keyPath: keyPath] = newValue
-                viewModel.updateDanmakuSettings(settings)
-            }
-        )
-    }
-
-    private func binding(for keyPath: WritableKeyPath<DanmakuSettings, Double>) -> Binding<Double> {
-        Binding(
-            get: { viewModel.danmakuSettings[keyPath: keyPath] },
-            set: { newValue in
-                var settings = viewModel.danmakuSettings
-                settings[keyPath: keyPath] = newValue
-                viewModel.updateDanmakuSettings(settings)
-            }
-        )
-    }
-}
-
-// MARK: - 增强设置视图（B站风格）
-private struct EnhancementSettingsView: View {
-    @ObservedObject var viewModel: AnimeDetailViewModel
-
-    var body: some View {
-        ScrollView(showsIndicators: true) {
-            VStack(spacing: 20) {
-                // 画质增强
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(t("player.imageEnhancement"))
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
-
-                    VStack(spacing: 0) {
-                        BilibiliToggleRow(title: t("player.superResolution"), isOn: binding(for: \.superResolution))
-                        BilibiliToggleRow(title: t("player.aiDenoise"), isOn: binding(for: \.aiDenoise))
-                        BilibiliToggleRow(title: t("player.colorEnhance"), isOn: binding(for: \.colorEnhancement), isLast: true)
-                    }
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(10)
-                    .padding(.horizontal, 20)
-                }
-
-                // 播放设置
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(t("player.playbackSettings"))
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 20)
-
-                    VStack(spacing: 0) {
-                        BilibiliToggleRow(title: t("player.autoPlayNext"), isOn: binding(for: \.autoPlayNext))
-                        BilibiliToggleRow(title: t("player.skipOpEd"), isOn: binding(for: \.skipOpeningEnding), isLast: true)
-                    }
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(10)
-                    .padding(.horizontal, 20)
-                }
-            }
-            .padding(.vertical, 16)
-            .padding(.bottom, 32)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func binding(for keyPath: WritableKeyPath<AnimeDetailViewModel.PlayerEnhancementSettings, Bool>) -> Binding<Bool> {
-        Binding(
-            get: { viewModel.enhancementSettings[keyPath: keyPath] },
-            set: { newValue in
-                var settings = viewModel.enhancementSettings
-                settings[keyPath: keyPath] = newValue
-                viewModel.updateEnhancementSettings(settings)
-            }
-        )
-    }
-}
-
-// MARK: - B站风格切换卡片
-private struct BilibiliStyleToggleCard: View {
-    let icon: String
-    let iconColor: Color
-    let title: String
-    let subtitle: String
-    @Binding var isOn: Bool
-    @State private var isHovered = false
-
-    var body: some View {
-        HStack(spacing: 14) {
-            // 图标
-            Image(systemName: icon)
-                .font(.system(size: 20))
-                .foregroundStyle(iconColor)
-                .frame(width: 40, height: 40)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(iconColor.opacity(0.15))
-                )
-
-            // 文字
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-
-                Text(subtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-
-            Spacer()
-
-            // 开关
-            BilibiliToggle(isOn: $isOn)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(isHovered ? Color.white.opacity(0.06) : Color.white.opacity(0.04))
-        )
-        .padding(.horizontal, 20)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.2)) {
-                isHovered = hovering
-            }
-        }
-    }
-}
-
-// MARK: - B站风格滑块行
-private struct BilibiliSliderRow: View {
-    let title: String
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    let format: (Double) -> String
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Text(title)
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.8))
-
-                Spacer()
-
-                Text(format(value))
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color(hex: "00AEEC"))
-                    .monospacedDigit()
-            }
-
-            Slider(value: $value, in: range)
-                .tint(Color(hex: "00AEEC"))
-                .focusable(false)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-}
-
-// MARK: - B站风格切换行
-private struct BilibiliToggleRow: View {
-    let title: String
-    @Binding var isOn: Bool
-    var isLast: Bool = false
-
-    var body: some View {
-        HStack {
-            Text(title)
-                .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.85))
-
-            Spacer()
-
-            BilibiliToggle(isOn: $isOn)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(
-            Rectangle()
-                .fill(Color.white.opacity(0.02))
-        )
-        .overlay(alignment: .bottom) {
-            if !isLast {
-                GlassDivider()
-                    .padding(.leading, 16)
-            }
-        }
-    }
-}
-
-// MARK: - B站风格开关
-private struct BilibiliToggle: View {
-    @Binding var isOn: Bool
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: {
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                isOn.toggle()
-            }
-        }) {
-            ZStack {
-                // 背景轨道
-                Capsule()
-                    .fill(isOn ? Color(hex: "00AEEC") : Color.white.opacity(0.2))
-                    .frame(width: 48, height: 26)
-
-                // 滑块
-                Circle()
-                    .fill(.white)
-                    .frame(width: 22, height: 22)
-                    .shadow(color: .black.opacity(0.2), radius: 2, x: 0, y: 1)
-                    .offset(x: isOn ? 10 : -10)
-            }
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(isHovered ? 1.05 : 1.0)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.15)) {
-                isHovered = hovering
-            }
-        }
+        AnimeDanmakuSettingsPanel(viewModel: viewModel)
     }
 }
 
@@ -2508,7 +2382,7 @@ private struct CaptchaRequiredView: View {
 }
 
 // MARK: - 验证码弹窗
-private struct LiquidGlassCaptchaSheet: View {
+struct LiquidGlassCaptchaSheet: View {
     let session: CaptchaVerificationSession
     let onCancel: () -> Void
     let onVerified: () -> Void
@@ -2653,7 +2527,7 @@ private struct LiquidGlassCaptchaSheet: View {
             // WebView
             CaptchaVerificationWebView(
                 url: session.startURL,
-                customUserAgent: session.rule.userAgent
+                customUserAgent: AnimeVideoExtractor.effectiveUserAgent(rule: session.rule)
             )
             .frame(minHeight: 480)
         }
@@ -2694,7 +2568,6 @@ private struct LiquidGlassCaptchaSheet: View {
 
             // 右侧：完成验证按钮 - 简化样式
             Button {
-                dismiss()
                 onVerified()
             } label: {
                 HStack(spacing: 6) {

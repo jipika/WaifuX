@@ -59,6 +59,10 @@ enum WallpaperAgentRecoveryTargetPolicy {
             && path == executable && signatureValid && startSeconds > 0
     }
 
+    static func predatesLegacyFault(birth: TimeInterval, cutoff: TimeInterval, now: TimeInterval) -> Bool {
+        birth.isFinite && cutoff.isFinite && now.isFinite && birth > 0 && birth < cutoff && cutoff <= now - 60
+    }
+
     private static func isOurDesktop(_ desktop: [String: Any]) -> Bool {
         guard let content = desktop["Content"] as? [String: Any],
               let choices = content["Choices"] as? [[String: Any]], choices.count == 1,
@@ -112,13 +116,38 @@ enum WallpaperAgentRecoveryExecutor {
         return WallpaperAgentRecoveryTargetPolicy.isSelected(root: root, scope: scope)
     }
 
+    enum RestartResult: Equatable {
+        case guarded
+        case legacyTargetUnproven
+        case reservationFailed
+        case cancelledBeforeSignal
+        case signalFailed(Int32)
+        case sent
+    }
+
     /// SIGTERM targets one revalidated Apple executable owned by this login user.
-    /// launchd recreates its runtime; the caller must still verify fresh rendering.
     static func restartCurrentUserAgent(shouldContinue: () -> Bool) -> Bool {
+        attemptRestart(shouldContinue: shouldContinue) == .sent
+    }
+
+    /// The optional legacy cutoff allows an old ambiguous marker to be reconsidered only
+    /// if this exact Agent was already running when the extension last rendered.
+    static func attemptRestart(shouldContinue: () -> Bool, legacyCutoff: TimeInterval? = nil,
+                               reserve: (() -> Bool)? = nil) -> RestartResult {
         guard shouldContinue(), sessionAllowsRecovery(), getuid() == geteuid(),
-              let target = currentTarget(), appleSignatureIsValid(),
-              shouldContinue(), sessionAllowsRecovery(), currentTarget() == target else { return false }
-        return Darwin.kill(target.pid, SIGTERM) == 0
+               let target = currentTarget(), appleSignatureIsValid(),
+               shouldContinue(), sessionAllowsRecovery(), currentTarget() == target else { return .guarded }
+        if let legacyCutoff {
+            let birth = Double(target.startSeconds) + Double(target.startMicroseconds) / 1_000_000
+            guard WallpaperAgentRecoveryTargetPolicy.predatesLegacyFault(birth: birth, cutoff: legacyCutoff,
+                         now: Date().timeIntervalSince1970) else { return .legacyTargetUnproven }
+        }
+        if let reserve {
+            guard reserve() else { return .reservationFailed }
+            guard shouldContinue(), sessionAllowsRecovery(), currentTarget() == target else { return .cancelledBeforeSignal }
+        }
+        if Darwin.kill(target.pid, SIGTERM) == 0 { return .sent }
+        return .signalFailed(errno)
     }
 
     static func currentAgentPID() -> Int32? { currentTarget()?.pid }

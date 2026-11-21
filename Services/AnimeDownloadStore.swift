@@ -1,10 +1,11 @@
 import Foundation
+import Combine
 
 // MARK: - 动漫下载记录
 //
 // 一条记录 = 一集已缓存的本地视频。ID 采用 "\(ruleId)__\(episodeId)"（与
 // PlaybackProgressCache 的 progressId 拼法一致），保证同一集在不同源之间互不覆盖。
-// 只存终态记录；下载中的任务状态由引擎层内存态管理，不进持久化。
+// 只存终态记录；未完成任务由引擎的独立去敏队列快照管理。
 
 struct AnimeDownloadRecord: Identifiable, Codable, Equatable {
     let id: String
@@ -22,10 +23,12 @@ struct AnimeDownloadRecord: Identifiable, Codable, Equatable {
     var downloadedAt: Date
     /// 文件字节数（用于展示与完整性校验）
     var fileSizeBytes: Int64
-    /// 下载时的原始视频 URL（重新下载/校验时参考）
+    /// 旧记录兼容字段。新下载不保存媒体 URL，避免签名令牌落盘。
     var originalURL: String?
     /// 关联的下载文件夹（暂为 nil，保留与媒体库一致的结构）
     var folderID: String?
+    /// 原始任务身份的不可逆哈希；恢复后的页面 URL 改签名时仍可命中原集任务。
+    var taskIdentity: String?
 
     init(
         anime: AnimeSearchResult,
@@ -47,8 +50,9 @@ struct AnimeDownloadRecord: Identifiable, Codable, Equatable {
         self.localFilePath = localFilePath
         self.downloadedAt = .now
         self.fileSizeBytes = fileSizeBytes
-        self.originalURL = originalURL
+        self.originalURL = nil // 保留初始化参数以兼容旧调用方；不持久化媒体签名 URL。
         self.folderID = nil
+        self.taskIdentity = AnimeDownloadTaskDescriptor.identity(sourceID: source.id, episodeID: episode.id)
     }
 
     static func recordID(ruleId: String, episodeId: String) -> String {
@@ -142,7 +146,9 @@ final class AnimeDownloadStore: ObservableObject {
     // MARK: - 查询
 
     func record(for episodeId: String, sourceId: String) -> AnimeDownloadRecord? {
-        records[AnimeDownloadRecord.recordID(ruleId: sourceId, episodeId: episodeId)]
+        if let exact = records[AnimeDownloadRecord.recordID(ruleId: sourceId, episodeId: episodeId)] { return exact }
+        let identity = AnimeDownloadTaskDescriptor.identity(sourceID: sourceId, episodeID: episodeId)
+        return records.values.first { $0.taskIdentity == identity }
     }
 
     /// 该集是否有可用缓存（记录存在且文件还在）
@@ -210,7 +216,7 @@ final class AnimeDownloadStore: ObservableObject {
         cache.delete(key: "\(downloadCategory)/\(record.id)")
         syncIndex()
         if deleteFile {
-            deletePhysicalFile(record.localFilePath)
+            deletePhysicalFile(record)
         }
     }
 
@@ -222,11 +228,17 @@ final class AnimeDownloadStore: ObservableObject {
         }
     }
 
-    private func deletePhysicalFile(_ path: String) {
+    private func deletePhysicalFile(_ record: AnimeDownloadRecord) {
         let fm = FileManager.default
-        guard fm.fileExists(atPath: path) else { return }
-        if fm.isDeletableFile(atPath: path) {
-            try? fm.removeItem(atPath: path)
-        }
+        let file = record.localFileURL.standardizedFileURL
+        // 同时接受旧记录文件名与新任务文件名；只删除 Anime 目录中的哈希产物。
+        let legacyName = AnimeDownloadTaskDescriptor.digest(record.id) + ".mp4"
+        let taskID = AnimeDownloadTaskDescriptor.identity(sourceID: record.sourceId, episodeID: record.episodeId)
+        let currentName = AnimeDownloadTaskDescriptor.digest(record.taskIdentity ?? taskID) + ".mp4"
+        guard [legacyName, currentName].contains(file.lastPathComponent),
+              file.deletingLastPathComponent().lastPathComponent == "Anime",
+              file.resolvingSymlinksInPath() == file,
+              fm.fileExists(atPath: file.path), fm.isDeletableFile(atPath: file.path) else { return }
+        try? fm.removeItem(at: file)
     }
 }

@@ -1,6 +1,37 @@
 import AppKit
 import CoreGraphics
 
+/// Encoder dimensions captured before the bake is queued or sent to the Helper.
+struct OfflineBakePixelSize: Codable, Hashable, Sendable {
+    let width: Int
+    let height: Int
+
+    init?(width: Int?, height: Int?) {
+        guard let width, let height, width >= 64, height >= 64,
+              width.isMultiple(of: 2), height.isMultiple(of: 2) else { return nil }
+        self.width = width
+        self.height = height
+    }
+
+    @MainActor
+    static func forDisplay(_ screen: NSScreen?) -> Self {
+        let frame = screen?.frame ?? CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let size = WallpaperPosterGeometry.evenPixelSize(
+            widthPoints: frame.width, heightPoints: frame.height, scale: screen?.backingScaleFactor ?? 1
+        )
+        return Self(width: size.width, height: size.height)!
+    }
+
+    /// Fit a preset in the same long/short edge budget without upscaling or rounding the ratio.
+    func fittingRatio(_ horizontal: Int, _ vertical: Int) -> Self {
+        guard horizontal > 0, vertical > 0 else { return self }
+        let long = max(width, height) / max(horizontal, vertical)
+        let short = min(width, height) / min(horizontal, vertical)
+        let scale = min(long, short) / 2 * 2
+        return Self(width: horizontal * scale, height: vertical * scale) ?? self
+    }
+}
+
 struct WallpaperPosterPixelSize: Hashable, Sendable {
     let width: Int
     let height: Int

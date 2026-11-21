@@ -67,6 +67,8 @@ enum WebOfflineBakeService {
         record: MediaDownloadRecord,
         durationSeconds: Double? = nil,
         resumingJobID: UUID? = nil,
+        outputSize: OfflineBakePixelSize? = nil,
+        forceRebake: Bool = false,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
         let contentRoot = WorkshopService.resolveWallpaperEngineProjectRoot(startingAt: record.localFileURL)
@@ -75,12 +77,14 @@ enum WebOfflineBakeService {
         }
         let analysisId = stableAnalysisId(for: contentRoot)
         let effectiveDuration = resolvedDuration(requested: durationSeconds)
-        let targetSize = mainDisplayPixelSize()
+        let targetSize: OfflineBakePixelSize
+        if let outputSize { targetSize = outputSize }
+        else { targetSize = await MainActor.run { .forDisplay(NSScreen.main ?? NSScreen.screens.first) } }
         let effectiveUserProperties = try await MainActor.run {
             try WebWallpaperDesignService.shared.effectivePropertiesJSON(for: contentRoot.path)
         }
         let displayTitle = record.item.title
-        let cacheURL = await MainActor.run {
+        let canonicalURL = await MainActor.run {
             makeCacheURL(
                 root: DownloadPathManager.shared.sceneBakesFolderURL,
                 itemID: record.id,
@@ -95,7 +99,8 @@ enum WebOfflineBakeService {
         let reusableArtifact = await MainActor.run {
             WebOfflineBakeService.usableCurrentArtifact(from: record)
         }
-        if let existing = reusableArtifact {
+        if !forceRebake, let existing = reusableArtifact,
+           existing.width == targetSize.width, existing.height == targetSize.height {
             _ = await ensureSceneBakePosterAndNotify(
                 itemID: record.item.id, videoURL: URL(fileURLWithPath: existing.videoPath)
             )
@@ -114,9 +119,11 @@ enum WebOfflineBakeService {
             id: resumingJobID ?? UUID(),
             record: record,
             contentRoot: contentRoot,
-            outputURL: cacheURL,
+            outputURL: canonicalURL,
             durationSeconds: effectiveDuration,
-            fps: automaticFrameRateJobSentinel
+            fps: automaticFrameRateJobSentinel,
+            outputSize: targetSize,
+            forceRebake: forceRebake
         )
         let enqueueResult = await MainActor.run {
             SceneOfflineBakeProgressTracker.shared.enqueue(
@@ -128,6 +135,7 @@ enum WebOfflineBakeService {
             throw SceneOfflineBakeError.concurrentBakeInProgress
         }
         let jobID = enqueueResult.jobID
+        let cacheURL = forceRebake ? SceneOfflineBakeService.rebakeOutputURL(for: canonicalURL, jobID: jobID) : canonicalURL
 
         await OfflineBakeSerialQueue.shared.waitForTurn(jobID: jobID)
         await MainActor.run {
@@ -177,10 +185,9 @@ enum WebOfflineBakeService {
             guard SystemMemoryPressure.hasRoomForSceneOfflineBake() else {
                 throw SceneOfflineBakeError.insufficientMemory
             }
-            try? FileManager.default.removeItem(at: cacheURL)
             let temporaryURL = cacheURL.deletingLastPathComponent()
                 .appendingPathComponent(".web-bake-\(UUID().uuidString).tmp.mp4")
-            try? FileManager.default.removeItem(at: temporaryURL)
+            defer { try? FileManager.default.removeItem(at: temporaryURL) }
 
             var arguments = [
                 "bake",
@@ -213,8 +220,7 @@ enum WebOfflineBakeService {
                 try? FileManager.default.removeItem(at: temporaryURL)
                 throw CancellationError()
             }
-            try? FileManager.default.removeItem(at: cacheURL)
-            try FileManager.default.moveItem(at: temporaryURL, to: cacheURL)
+            try SceneOfflineBakeService.publishVerifiedBake(at: temporaryURL, to: cacheURL)
             let artifact = SceneBakeArtifact(
                 analysisId: analysisId,
                 videoPath: cacheURL.path,
@@ -261,7 +267,9 @@ enum WebOfflineBakeService {
         return try await bake(
             record: record,
             durationSeconds: job.durationSeconds,
-            resumingJobID: job.id
+            resumingJobID: job.id,
+            outputSize: job.outputSize,
+            forceRebake: job.forceRebake ?? false
         )
     }
 
