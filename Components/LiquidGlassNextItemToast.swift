@@ -289,18 +289,36 @@ public struct LiquidGlassNextItemToast: View {
     }
 
     // MARK: - 缩略图视图（结构体版本）
+    /// 本地资源优先：已下载/本地导入的项走库封面解析链（烘焙封面 → 视频帧/高清 poster →
+    /// 抽帧 → 工程 preview.* → 本地原图），解析不出才回退线上 URL；未下载项直接线上。
+    /// 解析复用库列表的后台读取器，不在 body 做磁盘 I/O。
     private struct ThumbnailView: View {
         let item: NextItemPreviewable
+
+        @State private var resolvedLocalCover: URL?
+        @State private var resolveTask: Task<Void, Never>?
+        @State private var coverRefreshTick = 0
 
         private static let thumbSize = CGSize(width: 56, height: 56)
         private static var downsampleSize: CGSize {
             CGSize(width: thumbSize.width * 2, height: thumbSize.height * 2)
         }
 
+        private var onlineURL: URL? { item.previewThumbnailURL }
+
+        private var displayURL: URL? { resolvedLocalCover ?? onlineURL }
+
+        private var prefersAnimated: Bool {
+            if let local = resolvedLocalCover {
+                return MediaItem.urlLooksLikeGIF(local)
+            }
+            return item.previewThumbnailPrefersAnimatedPlayback
+        }
+
         var body: some View {
             ZStack {
-                if let url = item.previewThumbnailURL {
-                    if item.previewThumbnailPrefersAnimatedPlayback {
+                if let url = displayURL {
+                    if prefersAnimated {
                         KFMediaCoverImage(
                             url: url,
                             animated: true,
@@ -313,6 +331,7 @@ public struct LiquidGlassNextItemToast: View {
                         )
                     } else {
                         KFImage(url)
+                            .setProcessor(DownsamplingImageProcessor(size: Self.downsampleSize))
                             .fade(duration: 0.3)
                             .placeholder { _ in
                                 PlaceholderView()
@@ -330,6 +349,80 @@ public struct LiquidGlassNextItemToast: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
             )
+            .task(id: item.previewId) {
+                await resolveLocalCover()
+            }
+            .onDisappear {
+                resolveTask?.cancel()
+                resolveTask = nil
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .libraryMediaThumbnailsDidChange)) { note in
+                guard let ids = note.userInfo?["itemIDs"] as? [String],
+                      ids.contains(item.previewId) else { return }
+                coverRefreshTick &+= 1
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .sceneOfflineBakeThumbnailDidUpdate)) { note in
+                guard (note.object as? String) == item.previewId else { return }
+                coverRefreshTick &+= 1
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .localMediaPosterDidUpdate)) { note in
+                guard (note.object as? String) == item.previewId else { return }
+                coverRefreshTick &+= 1
+            }
+            .onChange(of: coverRefreshTick) { _, _ in
+                applyCachedLocalCoverIfAvailable()
+            }
+        }
+
+        private func localContext() -> (item: MediaItem, localURL: URL)? {
+            if let media = item as? MediaItem {
+                guard let local = MediaLibraryService.shared.localFileURLIfAvailable(for: media) else { return nil }
+                return (media, local)
+            }
+            if let wallpaper = item as? Wallpaper {
+                guard let local = WallpaperLibraryService.shared.localFileURLIfAvailable(for: wallpaper),
+                      local.isFileURL else { return nil }
+                let media = MediaItem(
+                    slug: wallpaper.id,
+                    title: wallpaper.id,
+                    pageURL: local,
+                    thumbnailURL: local,
+                    resolutionLabel: wallpaper.resolution,
+                    collectionTitle: nil,
+                    sourceName: "local"
+                )
+                return (media, local)
+            }
+            return nil
+        }
+
+        private func resolveLocalCover() async {
+            let itemID = item.previewId
+            resolveTask?.cancel()
+            guard let context = localContext() else {
+                resolvedLocalCover = nil
+                return
+            }
+            let cache = LibraryMediaThumbnailCache.shared
+            // 列表已解析过的封面直接同步命中；否则走后台读取器，首帧保持线上/占位。
+            if let cached = cache.cachedResolution(for: context.item, localFileURL: context.localURL),
+               let url = cached.thumbnailURL {
+                resolvedLocalCover = url
+                return
+            }
+            let result = await cache.resolve(for: context.item, localFileURL: context.localURL)
+            guard !Task.isCancelled, item.previewId == itemID else { return }
+            resolvedLocalCover = result.thumbnailURL
+        }
+
+        /// 通知驱动的刷新只读同步缓存：后台解析完成会发通知，这里直接取结果，
+        /// 不再 enqueue 全量 resolve，避免 lookupOnly 通知与刷新互相触发成循环。
+        private func applyCachedLocalCoverIfAvailable() {
+            guard let context = localContext(),
+                  let url = LibraryMediaThumbnailCache.shared
+                    .cachedResolution(for: context.item, localFileURL: context.localURL)?.thumbnailURL,
+                  url != resolvedLocalCover else { return }
+            resolvedLocalCover = url
         }
     }
 
@@ -596,6 +689,30 @@ private struct FallbackDarkLiquidGlass: View {
             x: 0,
             y: isHovered ? 10 : 6
         )
+    }
+}
+
+// MARK: - 下一张弹窗本地优先预加载
+/// 详情页 toast 的预加载入口：本地有资源时预热本地文件（与弹窗封面同一解析链），
+/// 没有本地资源才预热线上 URL。
+@MainActor
+func preloadNextItemCoverLocallyFirst(_ item: NextItemPreviewable?, namespace: String) {
+    guard let item else { return }
+    let localURL: URL?
+    switch item {
+    case let media as MediaItem:
+        localURL = MediaLibraryService.shared.localFileURLIfAvailable(for: media)
+    case let wallpaper as Wallpaper:
+        localURL = WallpaperLibraryService.shared.localFileURLIfAvailable(for: wallpaper)
+    default:
+        localURL = nil
+    }
+    if let localURL, localURL.isFileURL {
+        ForegroundPrefetchManager.shared.start(urls: [localURL], namespace: namespace)
+        return
+    }
+    if let remote = item.previewThumbnailURL {
+        ForegroundPrefetchManager.shared.start(urls: [remote], namespace: namespace)
     }
 }
 

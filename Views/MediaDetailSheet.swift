@@ -580,18 +580,16 @@ struct MediaDetailSheet: View {
                                 navigateToPreviousMedia()
                             },
                             onPreload: { _ in
-                                // 预加载下一张媒体
-                                if let nextMedia = nextItemDataSource.nextItem as? MediaItem {
-                                    // 预加载图片
-                                    let imageURL = nextMedia.posterURL ?? nextMedia.thumbnailURL
-                                    ForegroundPrefetchManager.shared.start(
-                                        urls: [imageURL],
-                                        namespace: prefetchNamespace
-                                    )
-                                    // 预加载视频（如果存在）
-                                    if let videoURL = nextMedia.previewVideoURL {
-                                        VideoPreloader.shared.preload(url: videoURL)
-                                    }
+                                // 预加载下一张媒体：本地有资源先暖本地封面，没有才走线上
+                                preloadNextItemCoverLocallyFirst(
+                                    nextItemDataSource.nextItem,
+                                    namespace: prefetchNamespace
+                                )
+                                // 未下载项才预加载线上预览视频；已下载项播放走本地文件
+                                if let nextMedia = nextItemDataSource.nextItem as? MediaItem,
+                                   MediaLibraryService.shared.localFileURLIfAvailable(for: nextMedia) == nil,
+                                   let videoURL = nextMedia.previewVideoURL {
+                                    VideoPreloader.shared.preload(url: videoURL)
                                 }
                             }
                         )

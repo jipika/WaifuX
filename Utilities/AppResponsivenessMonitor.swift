@@ -221,18 +221,96 @@ enum AppResponsivenessMonitor {
                 ])
                 return
             }
-            // 报告头部的 Call graph 段即主线程（Thread_0）调用栈，截取足够定位的头部。
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
             let callGraphStart = lines.firstIndex { $0.contains("Call graph") } ?? 0
-            let stackLines = lines.dropFirst(callGraphStart)
-                .prefix(60)
-                .joined(separator: "\n")
+            let stack = condensedMainThreadStack(Array(lines.dropFirst(callGraphStart)))
             try? FileManager.default.removeItem(atPath: samplePath)
             AppLogger.error(.ui, "Main thread stall sample", metadata: [
                 "stallMS": String(format: "%.0f", stallMS),
-                "stack": String(stackLines.prefix(3000))
+                "stack": stack
             ])
         }
+    }
+
+    /// 把 `sample` 的树状 Call graph 压成「权重 + 帧名」的线性链，保留最深的诊断帧。
+    ///
+    /// 旧实现取前 60 行再按 3000 字符硬截。sample 的树前缀（`+ ! : |` 缩进）随深度
+    /// 线性增长，加上 dyld / NSApplication / CFRunLoop / mach_msg 这些无信息量的样板帧，
+    /// 3000 字符恰好耗尽在真正有用的帧之前：#130/#132/#133 三份用户栈全部停在
+    /// `_layoutViewTree` 或 `mshMIGPerform`，看不到下层是约束循环还是无障碍 XPC。
+    ///
+    /// 这里剥掉树前缀与地址、丢掉样板帧，只留 `权重 帧名 (模块)`，同样的预算能多
+    /// 容纳数倍深度；并按权重剪掉噪声分支，优先保留采样占比高的那条路径。
+    static func condensedMainThreadStack(_ lines: [String], budget: Int = 3000) -> String {
+        struct Frame {
+            let weight: Int
+            let label: String
+            let depth: Int
+        }
+
+        // 只取主线程段：遇到下一个 Thread_ 标题即停。
+        var frames: [Frame] = []
+        var sawThread = false
+        for raw in lines {
+            let line = String(raw)
+            if line.contains("Thread_") {
+                if sawThread { break }
+                sawThread = true
+                continue
+            }
+            if line.hasPrefix("Total number") || line.hasPrefix("Binary Images") { break }
+            // 树前缀只由空格与 + ! : | 组成；帧正文从第一个字母/符号开始。
+            guard let bodyStart = line.firstIndex(where: { !$0.isWhitespace && !"+!:|".contains($0) }) else { continue }
+            let prefix = line[line.startIndex..<bodyStart]
+            let body = String(line[bodyStart...])
+            // 权重是正文开头的十进制数（可能带 ",N" 形式的叶子计数）。
+            let digits = body.prefix { $0.isNumber }
+            guard let weight = Int(digits), !digits.isEmpty else { continue }
+            var label = String(body.dropFirst(digits.count)).trimmingCharacters(in: .whitespaces)
+            if let comma = label.firstIndex(of: ","), label[comma...].dropFirst().first?.isNumber == true {
+                label = String(label[label.startIndex..<comma])
+            }
+            // 去掉十六进制地址尾巴，保留符号名与所属模块。
+            if let bracket = label.lastIndex(of: "[") { label = String(label[label.startIndex..<bracket]) }
+            label = label.trimmingCharacters(in: .whitespaces)
+            guard !label.isEmpty else { continue }
+            frames.append(Frame(weight: weight, label: label, depth: prefix.count))
+        }
+
+        // 剪掉样板帧：它们每份栈都一样，占预算却不提供定位信息。
+        let boilerplate = [
+            "start ", "main ", "static WaifuXApp.main()", "-[NSApplication run]",
+            "_nextEventMatchingEventMask", "_DPSNextEvent", "_BlockUntilNextEventMatchingListInModeWithFilter",
+            "ReceiveNextEventCommon", "RunCurrentEventLoopInMode", "CFRunLoopRunSpecific",
+            "__CFRunLoopRun ", "__CFRunLoopServiceMachPort", "mach_msg", "voucher_mach_msg_adopt",
+            "_dispatch_set_priority_and_mach_voucher_slow", "_pthread_set_properties_self", "__bsdthread_ctl",
+            "_voucher_create_with_mach_voucher", "_os_object_alloc_realized",
+        ]
+        let kept = frames.filter { frame in
+            !boilerplate.contains { frame.label.hasPrefix($0) }
+        }
+        guard !kept.isEmpty else { return "(no main-thread frames parsed)" }
+
+        // 不做权重剪枝：sample 树里深层帧权重天然递减（分支收窄），但诊断价值最高
+        // ——`_XCopyAttributeValue` 只占 3% 采样，却是「卡在无障碍 XPC」的唯一证据。
+        // 剥掉树前缀/地址/样板帧后按原序保留全部帧；若仍超预算，从**浅层**开始丢，
+        // 因为根因永远在最深处（旧实现恰好相反：留头丢尾，把根因全丢了）。
+        let entries = kept.map { "\($0.weight) \($0.label)" }
+        var start = 0
+        var used = entries.reduce(0) { $0 + $1.count + 1 }
+        while used > budget, start < entries.count - 1 {
+            used -= entries[start].count + 1
+            start += 1
+        }
+        var out = Array(entries[start...])
+        if start > 0 { out.insert("(+\(start) shallower frames omitted)", at: 0) }
+        // 单帧本身超预算的极端情况：硬截并显式标注，不静默丢证据。
+        var text = out.joined(separator: " <- ")
+        if text.count > budget {
+            text = String(text.suffix(budget - 24))
+            text = "(truncated head)… " + text
+        }
+        return text
     }
 
     private static func flushSnapshotIfNeeded(trigger: String, force: Bool = false) {

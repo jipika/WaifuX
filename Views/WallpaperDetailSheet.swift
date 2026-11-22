@@ -260,14 +260,11 @@ struct WallpaperDetailSheet: View {
                                 navigateToPreviousWallpaper()
                             },
                             onPreload: { _ in
-                                // 预加载下一张壁纸的主图（完整分辨率）
-                                if let nextWallpaper = nextItemDataSource.nextItem as? Wallpaper,
-                                   let imageURL = nextWallpaper.fullImageURL ?? nextWallpaper.thumbURL {
-                                    ForegroundPrefetchManager.shared.start(
-                                        urls: [imageURL],
-                                        namespace: prefetchNamespace
-                                    )
-                                }
+                                // 预加载下一张壁纸：本地有资源先暖本地文件，没有才走线上
+                                preloadNextItemCoverLocallyFirst(
+                                    nextItemDataSource.nextItem,
+                                    namespace: prefetchNamespace
+                                )
                             }
                         )
                         .padding(.trailing, 28)
