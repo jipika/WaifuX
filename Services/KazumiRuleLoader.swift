@@ -97,6 +97,8 @@ actor KazumiRuleLoader {
         let useWebview: Bool?
         let multiSource: Bool?
         let muliSources: Bool?
+        let useLegacyParser: Bool?
+        let adBlocker: Bool?
         let userAgent: String?
         let referer: String?
         let headers: [String: String]?
@@ -116,6 +118,7 @@ actor KazumiRuleLoader {
                          version: input.version ?? "1.0", baseURL: input.baseURL ?? "", headers: input.headers,
                          userAgent: input.userAgent, referer: input.referer, searchURL: input.searchURL ?? "",
                          useWebview: input.useWebview, multiSources: input.multiSource ?? input.muliSources ?? false,
+                         useLegacyParser: input.useLegacyParser, adBlocker: input.adBlocker,
                          xpath: xpath, antiCrawlerConfig: input.antiCrawlerConfig ?? AntiCrawlerConfig(enabled: input.antiCrawler ?? false),
                          searchMode: input.searchMode ?? .xpath, chapterMode: input.chapterMode ?? .xpath,
                          searchApiConfig: input.searchApiConfig, chapterApiConfig: input.chapterApiConfig)

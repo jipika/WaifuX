@@ -695,6 +695,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         AnimeDownloadStore.shared.restoreSavedData()
         AnimeProgressStore.shared.restoreSavedData()
         PlaybackProgressCache.shared.restoreSavedData()
+        AnimeSourceReputationStore.shared.prune()
         AnimeDownloadEngine.shared.restoreSavedTasks()
         AnimeDownloadEngine.shared.onNeedsVerification = { rule, episode in
             AnimeWindowManager.shared.presentDownloadVerification(rule: rule, episode: episode)
@@ -1728,11 +1729,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // 设置窗口复用 AppDelegate 作为 delegate，windowShouldClose 据此区分处理
         settingsWindow.delegate = self
 
-        settingsWindow.contentView = EdgeToEdgeHostingView(
+        let settingsHosting = EdgeToEdgeHostingView(
             rootView: SettingsView(viewModel: settingsViewModel!).defaultAppStorage(WaifuXPreferences.shared)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea()
         )
+        // #130/#132：设置窗固定 680×520（min=max），用普通容器承载宿主，
+        // 尺寸单向传递，避免 SwiftUI 内容反推窗口约束形成布局循环。
+        settingsHosting.sizingOptions = []
+        let settingsContainer = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 520))
+        settingsHosting.frame = settingsContainer.bounds
+        settingsHosting.autoresizingMask = [.width, .height]
+        settingsContainer.addSubview(settingsHosting)
+        settingsWindow.contentView = settingsContainer
 
         let windowController = NSWindowController(window: settingsWindow)
         settingsWindowController = windowController

@@ -37,9 +37,11 @@ final class MediaGridCell: ExploreGridItem {
 
     private static let maxDecodeEdge: CGFloat = 1600
     private static let minDecodeEdge: CGFloat = 640
-    private static let maxAnimatedGIFBytes: Int64 = 32 * 1024 * 1024
-    private static let maxAnimatedGIFPixelCount = 32_000_000
-    private static let maxAnimatedGIFFrameCount = Int.max
+    // 统一预算（与详情 / 库卡片一致）：probe 缓存 key 含这三个参数，
+    // 各页错开任何一项都会互不命中，同一 GIF「网格会动、详情不动」。
+    private static let maxAnimatedGIFBytes = AnimatedImageProbeCache.defaultMaxAnimatedGIFBytes
+    private static let maxAnimatedGIFPixelCount = AnimatedImageProbeCache.defaultMaxPixelCount
+    private static let maxAnimatedGIFFrameCount = AnimatedImageProbeCache.defaultMaxFrameCount
     private var currentMedia: MediaItem?
 
     private let bottomBar: NSView = {

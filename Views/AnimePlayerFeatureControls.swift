@@ -169,80 +169,74 @@ struct AnimePlaybackSettingsView: View {
     }
 }
 
-/// 弹幕面板（Kazumi 分区结构：来源 / 屏蔽 / 显示 / 样式），液态玻璃分组卡片。
+/// 弹幕面板（Kazumi 分区结构：来源 / 屏蔽 / 显示 / 样式）。
+/// 与 AnimePlaybackSettingsView 同款原生 grouped Form 控件；
 /// 所有行控件写入同一份 DanmakuSettings，播放中的弹幕层即时生效。
 struct AnimeDanmakuSettingsPanel: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
     @State private var blockedText = ""
 
     var body: some View {
-        ScrollView(showsIndicators: true) {
-            VStack(alignment: .leading, spacing: 18) {
-                statusHeader
-
-                if viewModel.danmakuError != nil || !DanmakuCredentials.isConfigured {
-                    issueBanner
+        Form {
+            Section {
+                Toggle(isOn: boolBinding(\.isEnabled)) {
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t("danmaku.title"))
+                            Text(statusSubtitle)
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if viewModel.isLoadingDanmaku {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
                 }
+            }
 
-                sourceSection
-                shieldSection
-                displaySection
-                styleSection
+            if viewModel.danmakuError != nil || !DanmakuCredentials.isConfigured {
+                Section {
+                    Label {
+                        Text(viewModel.danmakuError ?? t("anime.player.danmakuAuthMissing"))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    HStack(spacing: 12) {
+                        if viewModel.currentEpisode != nil {
+                            Button(t("anime.player.danmakuReload")) { viewModel.retryDanmakuLoad() }
+                                .buttonStyle(.link)
+                        }
+                        Button(t("anime.player.chooseDanmaku")) { viewModel.showDanmakuSourcePicker = true }
+                            .buttonStyle(.link)
+                            .disabled(viewModel.currentEpisode == nil)
+                    }
+                    .font(.caption)
+                }
+            }
 
+            sourceSection
+            shieldSection
+            displaySection
+            styleSection
+
+            Section {
                 Button {
                     viewModel.updateDanmakuSettings(viewModel.danmakuSettings.resettingAppearance())
                 } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 12, weight: .semibold))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(t("anime.player.danmakuResetDefaults"))
-                                .font(.system(size: 13, weight: .medium))
-                            Text(t("anime.player.danmakuResetHint"))
-                                .font(.system(size: 11))
-                                .foregroundStyle(LiquidGlassColors.textTertiary)
-                        }
-                        Spacer()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(t("anime.player.danmakuResetDefaults"))
+                        Text(t("anime.player.danmakuResetHint"))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    .foregroundStyle(LiquidGlassColors.textPrimary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .liquidGlassSurface(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
-            .padding(.bottom, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear { blockedText = viewModel.danmakuSettings.blockedKeywords.joined(separator: ", ") }
-    }
-
-    // MARK: 状态头
-
-    private var statusHeader: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "text.bubble.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(LiquidGlassColors.primaryPink)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(t("danmaku.title"))
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(LiquidGlassColors.textPrimary)
-                Text(statusSubtitle)
-                    .font(.system(size: 11))
-                    .foregroundStyle(LiquidGlassColors.textTertiary)
-            }
-            Spacer()
-            if viewModel.isLoadingDanmaku {
-                ProgressView().controlSize(.small)
-            }
-            LiquidGlassSwitch(isOn: boolBinding(\.isEnabled))
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .liquidGlassSurface(.prominent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var statusSubtitle: String {
@@ -254,197 +248,105 @@ struct AnimeDanmakuSettingsPanel: View {
         return t("anime.player.danmakuSourceName")
     }
 
-    private var issueBanner: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12))
-                    .foregroundStyle(LiquidGlassColors.warningOrange)
-                Text(viewModel.danmakuError ?? t("anime.player.danmakuAuthMissing"))
-                    .font(.system(size: 12))
-                    .foregroundStyle(LiquidGlassColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: 8) {
-                if viewModel.currentEpisode != nil {
-                    Button(t("anime.player.danmakuReload")) { viewModel.retryDanmakuLoad() }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(LiquidGlassColors.accentCyan)
-                }
-                Button(t("anime.player.chooseDanmaku")) { viewModel.showDanmakuSourcePicker = true }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(LiquidGlassColors.accentCyan)
-                    .disabled(viewModel.currentEpisode == nil)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlassSurface(.regular, tint: LiquidGlassColors.warningOrange.opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
     // MARK: 弹幕来源
 
     private var sourceSection: some View {
-        DanmakuPanelSection(title: t("anime.player.danmakuSectionSource")) {
-            DanmakuPanelRow {
-                HStack(spacing: 8) {
-                    Image(systemName: "dot.radiowaves.left.and.right")
-                        .font(.system(size: 13))
-                        .foregroundStyle(LiquidGlassColors.accentCyan)
-                    Text(t("anime.player.danmakuSourceName"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(LiquidGlassColors.textPrimary)
+        Section(t("anime.player.danmakuSectionSource")) {
+            LabeledContent(t("anime.player.danmakuSourceName")) {
+                Text(viewModel.danmakuManualSourceActive ? t("anime.player.danmakuManualMatched") : t("anime.player.danmakuAutoMatched"))
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                viewModel.showDanmakuSourcePicker = true
+            } label: {
+                HStack {
+                    Text(t("anime.player.chooseDanmaku"))
                     Spacer()
-                    Text(viewModel.danmakuManualSourceActive ? t("anime.player.danmakuManualMatched") : t("anime.player.danmakuAutoMatched"))
-                        .font(.system(size: 11))
-                        .foregroundStyle(LiquidGlassColors.textTertiary)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
+                .contentShape(Rectangle())
             }
-            DanmakuPanelDivider()
-            DanmakuPanelRow {
-                Button {
-                    viewModel.showDanmakuSourcePicker = true
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(t("anime.player.chooseDanmaku"))
-                            .font(.system(size: 13, weight: .medium))
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(LiquidGlassColors.textTertiary)
-                    }
-                    .foregroundStyle(viewModel.currentEpisode == nil ? LiquidGlassColors.textTertiary : LiquidGlassColors.textPrimary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(viewModel.currentEpisode == nil)
-            }
-            DanmakuPanelDivider()
-            DanmakuPanelRow {
+            .buttonStyle(.plain)
+            .disabled(viewModel.currentEpisode == nil)
+            Stepper(value: doubleBinding(\.timeOffset), in: -120...120, step: 0.5) {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(t("anime.player.danmakuTimeOffset"))
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(LiquidGlassColors.textPrimary)
                         Text(t("anime.player.danmakuOffsetHint"))
-                            .font(.system(size: 11))
-                            .foregroundStyle(LiquidGlassColors.textTertiary)
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Stepper(value: doubleBinding(\.timeOffset), in: -120...120, step: 0.5) {
-                        Text(String(format: t("anime.player.danmakuTimeOffsetValue"), viewModel.danmakuSettings.timeOffset))
-                            .font(.system(size: 12, weight: .medium).monospacedDigit())
-                            .foregroundStyle(LiquidGlassColors.accentCyan)
-                            .frame(minWidth: 52, alignment: .trailing)
-                    }
-                    .fixedSize()
+                    Text(String(format: t("anime.player.danmakuTimeOffsetValue"), viewModel.danmakuSettings.timeOffset))
+                        .monospacedDigit().foregroundStyle(.secondary)
                 }
             }
-            DanmakuPanelDivider()
-            DanmakuPanelToggleRow(title: t("anime.player.cacheDanmaku"), isOn: boolBinding(\.cacheEnabled), isLast: true)
+            Toggle(t("anime.player.cacheDanmaku"), isOn: boolBinding(\.cacheEnabled))
         }
     }
 
     // MARK: 弹幕屏蔽
 
     private var shieldSection: some View {
-        DanmakuPanelSection(title: t("anime.player.danmakuSectionShield")) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "nosign")
-                        .font(.system(size: 12))
-                        .foregroundStyle(LiquidGlassColors.warningOrange)
-                    Text(t("anime.player.danmakuShieldKeywords"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(LiquidGlassColors.textPrimary)
-                    Spacer()
-                    Button(t("anime.player.applyBlockedKeywords")) { saveBlockedWords() }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(LiquidGlassColors.accentCyan)
-                }
-                TextField(t("anime.player.blockedKeywords"), text: $blockedText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(2...4)
-                    .font(.system(size: 12))
-                    .foregroundStyle(LiquidGlassColors.textPrimary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
-                    )
-                    .onSubmit { saveBlockedWords() }
-                Text(t("anime.player.danmakuShieldHint"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(LiquidGlassColors.textTertiary)
+        Section(t("anime.player.danmakuSectionShield")) {
+            HStack {
+                Text(t("anime.player.danmakuShieldKeywords"))
+                Spacer()
+                Button(t("anime.player.applyBlockedKeywords")) { saveBlockedWords() }
+                    .buttonStyle(.link)
+                    .font(.caption)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            TextField(t("anime.player.blockedKeywords"), text: $blockedText, axis: .vertical)
+                .lineLimit(2...4)
+                .onSubmit { saveBlockedWords() }
+            Text(t("anime.player.danmakuShieldHint"))
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 
     // MARK: 弹幕显示
 
     private var displaySection: some View {
-        DanmakuPanelSection(title: t("anime.player.danmakuSectionDisplay")) {
+        Section(t("anime.player.danmakuSectionDisplay")) {
             DanmakuPanelSliderRow(title: t("anime.player.danmakuArea"),
                                   value: doubleBinding(\.area), range: 0.25...1.0, step: 0.125,
                                   valueText: "\(Int(viewModel.danmakuSettings.area * 100))%")
-            DanmakuPanelDivider()
             DanmakuPanelSliderRow(title: t("anime.player.danmakuDuration"),
                                   value: doubleBinding(\.durationSeconds), range: 2...16, step: 1,
                                   valueText: String(format: t("anime.player.danmakuDurationValue"), viewModel.danmakuSettings.durationSeconds))
-            DanmakuPanelDivider()
             DanmakuPanelSliderRow(title: t("anime.player.danmakuLineHeight"),
                                   value: doubleBinding(\.lineHeight), range: 1.0...2.5, step: 0.1,
                                   valueText: String(format: "%.1f", viewModel.danmakuSettings.lineHeight))
-            DanmakuPanelDivider()
             DanmakuPanelToggleRow(title: t("anime.player.danmakuFollowSpeed"),
                                   subtitle: t("anime.player.danmakuFollowSpeedHint"),
                                   isOn: boolBinding(\.followSpeed))
-            DanmakuPanelDivider()
-            DanmakuPanelToggleRow(title: t("danmaku.top"), isOn: boolBinding(\.enableTop))
-            DanmakuPanelDivider()
-            DanmakuPanelToggleRow(title: t("danmaku.bottom"), isOn: boolBinding(\.enableBottom))
-            DanmakuPanelDivider()
-            DanmakuPanelToggleRow(title: t("danmaku.scroll"), isOn: boolBinding(\.enableScroll))
-            DanmakuPanelDivider()
+            Toggle(t("danmaku.top"), isOn: boolBinding(\.enableTop))
+            Toggle(t("danmaku.bottom"), isOn: boolBinding(\.enableBottom))
+            Toggle(t("danmaku.scroll"), isOn: boolBinding(\.enableScroll))
             DanmakuPanelToggleRow(title: t("anime.player.danmakuMassive"),
                                   subtitle: t("anime.player.danmakuMassiveHint"),
                                   isOn: boolBinding(\.massiveMode))
-            DanmakuPanelDivider()
             DanmakuPanelToggleRow(title: t("player.enableDeduplication"),
                                   subtitle: t("anime.player.danmakuDeduplicationHint"),
-                                  isOn: boolBinding(\.enableDeduplication), isLast: true)
+                                  isOn: boolBinding(\.enableDeduplication))
         }
     }
 
     // MARK: 弹幕样式
 
     private var styleSection: some View {
-        DanmakuPanelSection(title: t("anime.player.danmakuSectionStyle")) {
-            DanmakuPanelToggleRow(title: t("anime.player.danmakuBorder"), isOn: boolBinding(\.showBorder))
+        Section(t("anime.player.danmakuSectionStyle")) {
+            Toggle(t("anime.player.danmakuBorder"), isOn: boolBinding(\.showBorder))
             if viewModel.danmakuSettings.showBorder {
-                DanmakuPanelDivider()
                 DanmakuPanelSliderRow(title: t("anime.player.danmakuBorderWidth"),
                                       value: doubleBinding(\.borderWidth), range: 0.1...3.0, step: 0.1,
                                       valueText: String(format: "%.1f", viewModel.danmakuSettings.borderWidth))
             }
-            DanmakuPanelDivider()
-            DanmakuPanelToggleRow(title: t("anime.player.danmakuColorful"), isOn: boolBinding(\.allowColor))
-            DanmakuPanelDivider()
+            Toggle(t("anime.player.danmakuColorful"), isOn: boolBinding(\.allowColor))
             DanmakuPanelSliderRow(title: t("danmaku.fontSize"),
                                   value: doubleBinding(\.fontSize), range: 10...48, step: 1,
                                   valueText: "\(Int(viewModel.danmakuSettings.fontSize))")
-            DanmakuPanelDivider()
             DanmakuPanelSliderRow(title: t("anime.player.danmakuFontWeight"),
                                   value: Binding(
                                     get: { Double(viewModel.danmakuSettings.fontWeight) },
@@ -455,10 +357,9 @@ struct AnimeDanmakuSettingsPanel: View {
                                     }),
                                   range: 1...9, step: 1,
                                   valueText: "\(viewModel.danmakuSettings.fontWeight)")
-            DanmakuPanelDivider()
             DanmakuPanelSliderRow(title: t("player.opacity"),
                                   value: doubleBinding(\.opacity), range: 0.1...1.0, step: 0.05,
-                                  valueText: "\(Int(viewModel.danmakuSettings.opacity * 100))%", isLast: true)
+                                  valueText: "\(Int(viewModel.danmakuSettings.opacity * 100))%")
         }
     }
 
@@ -494,67 +395,21 @@ struct AnimeDanmakuSettingsPanel: View {
     }
 }
 
-// MARK: - 弹幕面板分组卡片
-
-private struct DanmakuPanelSection<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(LiquidGlassColors.textTertiary)
-                .padding(.leading, 6)
-            VStack(spacing: 0) {
-                content
-            }
-            .liquidGlassSurface(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-    }
-}
-
-private struct DanmakuPanelRow<Content: View>: View {
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        content
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct DanmakuPanelDivider: View {
-    var body: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.06))
-            .frame(height: 0.5)
-            .padding(.leading, 14)
-    }
-}
+// MARK: - 弹幕面板行（原生 Form 行；分组/分隔线由 Form 提供）
 
 private struct DanmakuPanelToggleRow: View {
     let title: String
     var subtitle: String? = nil
     @Binding var isOn: Bool
-    var isLast: Bool = false
 
     var body: some View {
-        DanmakuPanelRow {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(LiquidGlassColors.textPrimary)
-                    if let subtitle {
-                        Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(LiquidGlassColors.textTertiary)
-                    }
+        Toggle(isOn: $isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer()
-                LiquidGlassSwitch(isOn: $isOn)
             }
         }
     }
@@ -566,25 +421,18 @@ private struct DanmakuPanelSliderRow: View {
     let range: ClosedRange<Double>
     let step: Double
     let valueText: String
-    var isLast: Bool = false
 
     var body: some View {
-        DanmakuPanelRow {
-            VStack(spacing: 6) {
-                HStack {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(LiquidGlassColors.textPrimary)
-                    Spacer()
-                    Text(valueText)
-                        .font(.system(size: 12, weight: .medium).monospacedDigit())
-                        .foregroundStyle(LiquidGlassColors.accentCyan)
-                }
-                Slider(value: $value, in: range, step: step)
-                    .tint(LiquidGlassColors.primaryPink)
-                    .controlSize(.small)
-                    .focusable(false)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(valueText)
+                    .monospacedDigit().foregroundStyle(.secondary)
             }
+            Slider(value: $value, in: range, step: step)
+                .controlSize(.small)
+                .focusable(false)
         }
     }
 }

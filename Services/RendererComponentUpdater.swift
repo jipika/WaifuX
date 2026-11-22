@@ -119,6 +119,8 @@ final class RendererComponentUpdater: ObservableObject {
             window.level = .floating
             let bounds = NSRect(x: 0, y: 0, width: 520, height: 440)
             let hostingView = NSHostingView(rootView: RendererComponentUpdateView(updater: self).ignoresSafeArea())
+            // #130/#132：固定 520×440 面板，frame 手动铺满，不参与窗口约束反推。
+            hostingView.sizingOptions = []
             hostingView.frame = bounds
             hostingView.autoresizingMask = [.width, .height]
             // A single native glass surface for this transient update panel. Keep the

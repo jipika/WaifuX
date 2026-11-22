@@ -179,7 +179,7 @@ public struct MediaVideoCard: View, @preconcurrency Equatable {
     @State private var gifProbeTask: Task<Void, Never>?
     /// 滚停后再做抽帧/SSD 缩略图生成的排队 token
     @State private var pendingThumbnailIdleToken: UUID?
-    private let maxAnimatedGIFBytes: Int64 = 18 * 1024 * 1024
+    private let maxAnimatedGIFBytes = AnimatedImageProbeCache.defaultMaxAnimatedGIFBytes
 
     private static let videoExtensions: Set<String> = ["mp4", "mov", "webm", "m4v", "mkv"]
 

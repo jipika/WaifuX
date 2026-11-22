@@ -82,6 +82,11 @@ final class PreviewWindowManager: ObservableObject {
         let hostingView = NSHostingView(
             rootView: WallpaperPreviewSheet(url: url, isWeb: isWeb, posterURL: posterURL)
         )
+        // #130/#132：预览含 WKWebView / AVPlayerLayer 平台视图，窗口尺寸已按媒体
+        // 比例算好；禁止内容反推窗口尺寸，避免约束更新循环。
+        hostingView.sizingOptions = []
+        hostingView.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        hostingView.autoresizingMask = [.width, .height]
         window.contentView = hostingView
 
         windowController = NSWindowController(window: window)

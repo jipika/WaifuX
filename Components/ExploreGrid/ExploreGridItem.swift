@@ -720,10 +720,7 @@ class ExploreGridItem: NSCollectionViewItem {
                   shouldAutoAnimateGIFOnLoad, let probeURL = urls.first else { return }
             try? await Task.sleep(nanoseconds: 200_000_000)
             guard !Task.isCancelled, self.imageLoadGeneration == generation else { return }
-            let isGIF = await AnimatedImageProbeCache.shared.isAnimatedGIF(
-                probeURL,
-                maxByteCount: 18 * 1024 * 1024
-            )
+            let isGIF = await AnimatedImageProbeCache.shared.isAnimatedGIF(probeURL)
             guard !Task.isCancelled, self.imageLoadGeneration == generation, isGIF, let image = bestImage else { return }
             if let gifData = image.kf.gifRepresentation() {
                 await MainActor.run { [weak self] in

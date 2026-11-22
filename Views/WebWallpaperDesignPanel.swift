@@ -47,6 +47,8 @@ final class WebWallpaperDesignPanelController {
             .preferredColorScheme(.dark)
 
         let hostingView = NSHostingView(rootView: rootView)
+        // #130/#132：面板固定 360×600（min=max），尺寸不参与窗口约束反推。
+        hostingView.sizingOptions = []
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         window.contentView = hostingView

@@ -253,7 +253,12 @@ final class GuideEngine: ObservableObject {
         window.hasShadow = false
         window.ignoresMouseEvents = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        window.contentView = NSHostingView(rootView: GuideOverlayView(engine: self))
+        let hostingView = NSHostingView(rootView: GuideOverlayView(engine: self))
+        // #130/#132：全屏遮罩尺寸由屏幕决定，禁止 SwiftUI 内容反推窗口尺寸。
+        hostingView.sizingOptions = []
+        hostingView.frame = NSRect(origin: .zero, size: screen.frame.size)
+        hostingView.autoresizingMask = [.width, .height]
+        window.contentView = hostingView
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
         overlayWindow = window

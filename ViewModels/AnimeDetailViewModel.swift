@@ -96,12 +96,17 @@ class AnimeDetailViewModel: ObservableObject {
     @Published private(set) var resolvingDownloads = Set<String>()
     @Published private(set) var downloadErrors: [String: String] = [:]
     private let playbackExtractor = AnimeVideoExtractor()
-    private var directHLSRelay: MXdmDirectHLS?
+    private var directHLSRelay: DirectHLSRelay?
     private var downloadExtractors: [String: AnimeVideoExtractor] = [:]
     private var playbackRequestID = UUID()
     private var sourceRequestIDs: [String: UUID] = [:]
     private var candidateIndex = 0
     private var automaticRecoveryCount = 0
+    /// 跨源自动恢复：本集已尝试过的源（含当前源），防止循环。
+    private var attemptedSourceIDs = Set<String>()
+    /// 跨源恢复预算：最多再试 3 个其它源。
+    private var crossSourceRecoveryCount = 0
+    private static let maxCrossSourceRecovery = 3
     private var recoveryStartTime: TimeInterval?
     private var hasPlaybackPosition = false
     private var readyForSync = false
@@ -628,9 +633,12 @@ class AnimeDetailViewModel: ObservableObject {
             (ratio >= initialLoadThreshold && completedCount >= minimumSourcesToWait)
 
         if shouldFreeze {
-            // 仅对已完成的源排序冻结（未完成的排在后面保持原位）
+            // 仅对已完成的源排序冻结（未完成的排在后面保持原位）；
+            // 同优先级内按跨会话信誉分排序，上次的好源排前面。
             let sorted = activeSources.sorted { a, b in
-                sourceAvailabilityPriority(a) < sourceAvailabilityPriority(b)
+                let pa = sourceAvailabilityPriority(a), pb = sourceAvailabilityPriority(b)
+                if pa != pb { return pa < pb }
+                return AnimeSourceReputationStore.shared.ranksBefore(a.id, b.id)
             }
             self.frozenSourceOrder = sorted.map { $0.id }
             self.isInitialLoadComplete = true
@@ -638,9 +646,10 @@ class AnimeDetailViewModel: ObservableObject {
         }
     }
 
-    /// 该源本次会话内是否真实起播成功过（自动检测的「可播放」依据）
+    /// 该源是否真实起播成功过：本会话内存标记 或 跨会话信誉记录（60 天内）。
     func hasVerifiedPlayback(for sourceID: String) -> Bool {
         !(verifiedPlaybackEpisodes[sourceID] ?? []).isEmpty
+            || AnimeSourceReputationStore.shared.hasVerifiedPlayback(sourceID: sourceID)
     }
 
     /// 源可用性排序：可播放 > 有剧集 > 需选择 > 需验证 > 检索中 > 失败 > 无结果 > 未检索。
@@ -939,8 +948,11 @@ class AnimeDetailViewModel: ObservableObject {
         stopPlayback()
         if !isRecovery {
             automaticRecoveryCount = 0
+            crossSourceRecoveryCount = 0
             attemptedRoadIDs.removeAll()
+            attemptedSourceIDs.removeAll()
         }
+        attemptedSourceIDs.insert(rule.id)
         currentRoadID = sourceResults[sourceIndex].roads.first(where: { $0.episodes.contains(where: { $0.id == episode.id }) })?.id
         if let currentRoadID { attemptedRoadIDs.insert(currentRoadID) }
         recoveryStartTime = resumeTime
@@ -958,22 +970,99 @@ class AnimeDetailViewModel: ObservableObject {
         case .success(let sources):
             videoSources = sources
             candidateIndex = 0
-            if let first = sources.first, let url = URL(string: first.url) {
-                currentHTTPHeaders = first.httpHeaders ?? AnimeVideoExtractor.requestHeaders(for: url, rule: rule, pageURL: episode.url)
-                await setupPlayer(with: url, episode: episode, rule: rule, useDirectHLS: first.usesMXdmDirectHLS == true)
-            } else {
-                videoError = t("未找到可播放的视频")
-            }
+            await startCandidate(at: 0, episode: episode, rule: rule, requestID: requestID)
         case .error(let error):
+            AnimeSourceReputationStore.shared.recordFailure(sourceID: rule.id)
             videoError = error
+            await recoverPlaybackFailure(episode: episode, requestID: requestID)
         case .captcha:
             presentCaptchaVerificationForPlayback(rule: rule, episode: episode, sourceIndex: sourceIndex)
         case .timeout:
+            AnimeSourceReputationStore.shared.recordFailure(sourceID: rule.id)
             videoError = t("视频解析超时，请重试或切换其他视频源")
+            await recoverPlaybackFailure(episode: episode, requestID: requestID)
         }
     }
 
-    /// 先换候选，再最多刷新一次解析；预算在新选集或手动重试时重置。
+    /// 预探测后起播指定候选：确认媒体可取才交给 AVPlayer；确认失败则换下一候选。
+    /// 证据不足（网络超时等）不判死，直接试播由播放器兜底。
+    private func startCandidate(at index: Int, episode: AnimeDetail.AnimeEpisodeItem,
+                                rule: AnimeRule, requestID: UUID) async {
+        guard playbackRequestID == requestID, !Task.isCancelled,
+              videoSources.indices.contains(index) else { return }
+        candidateIndex = index
+        let source = videoSources[index]
+        guard let url = URL(string: source.preflightResolvedURL ?? source.url) else {
+            await advanceCandidateOrRecover(episode: episode, rule: rule, requestID: requestID)
+            return
+        }
+        currentHTTPHeaders = source.httpHeaders ?? AnimeVideoExtractor.requestHeaders(for: url, rule: rule, pageURL: episode.url)
+
+        let verdict = await AnimePlaybackPreflight.check(source)
+        guard playbackRequestID == requestID, !Task.isCancelled else { return }
+        if !verdict.playable {
+            addRecoveryLog("预探测拒绝候选 host=\(url.host ?? "?") reason=\(verdict.failure ?? "unknown")")
+            await advanceCandidateOrRecover(episode: episode, rule: rule, requestID: requestID)
+            return
+        }
+        var playSource = source
+        if let resolved = verdict.resolvedURL { playSource.preflightResolvedURL = resolved.absoluteString }
+        if verdict.needsDirectRelay { playSource.usesDirectHLSRelay = true }
+        videoSources[index] = playSource
+        let playURL = verdict.resolvedURL ?? url
+        await setupPlayer(with: playURL, episode: episode, rule: rule, useDirectHLS: playSource.usesDirectHLSRelay == true)
+    }
+
+    /// 当前候选预探测失败：还有候选就换下一个，否则进恢复链。
+    private func advanceCandidateOrRecover(episode: AnimeDetail.AnimeEpisodeItem,
+                                           rule: AnimeRule, requestID: UUID) async {
+        guard playbackRequestID == requestID, !Task.isCancelled else { return }
+        if candidateIndex + 1 < videoSources.count {
+            await startCandidate(at: candidateIndex + 1, episode: episode, rule: rule, requestID: requestID)
+            return
+        }
+        AnimeSourceReputationStore.shared.recordFailure(sourceID: rule.id)
+        videoError = t("未找到可播放的视频")
+        await recoverPlaybackFailure(episode: episode, requestID: requestID)
+    }
+
+    private func addRecoveryLog(_ message: String) {
+        Self.logger.notice("\(message, privacy: .public)")
+    }
+
+    /// 统一失败恢复链（播放器失败 / 解析失败 / 预探测全灭都进这里）：
+    /// 同源换线路 → 跨源换源（按信誉分排序，最多 3 个）→ 停。
+    private func recoverPlaybackFailure(episode: AnimeDetail.AnimeEpisodeItem, requestID: UUID) async {
+        guard playbackRequestID == requestID, !Task.isCancelled else { return }
+        // 1) 同源还有未试线路：换线路。
+        if canSwitchPlaybackRoad {
+            await switchToNextPlaybackRoad()
+            return
+        }
+        // 2) 跨源：按信誉分挑未试过的源里最优的。
+        guard crossSourceRecoveryCount < Self.maxCrossSourceRecovery else { return }
+        let candidates = sourceResults.enumerated().filter { _, source in
+            !attemptedSourceIDs.contains(source.id) && !source.rule.deprecated &&
+            source.status == .success && source.roads.contains { road in
+                road.episodes.contains { $0.episodeNumber == episode.episodeNumber }
+            }
+        }
+        guard let best = candidates.min(by: { lhs, rhs in
+            AnimeSourceReputationStore.shared.ranksBefore(lhs.element.id, rhs.element.id)
+        }) else { return }
+        guard let match = best.element.roads.lazy.compactMap({ road in
+            road.episodes.first { $0.episodeNumber == episode.episodeNumber }
+        }).first else { return }
+        crossSourceRecoveryCount += 1
+        attemptedSourceIDs.insert(best.element.id)
+        automaticRecoveryCount = 0
+        attemptedRoadIDs.removeAll()
+        recoveryStartTime = hasPlaybackPosition ? currentTime : (recoveryStartTime ?? currentStartTime)
+        addRecoveryLog("跨源恢复 → \(best.element.rule.name) 第\(episode.episodeNumber)集")
+        await playEpisode(match, from: best.offset, isRecovery: true)
+    }
+
+    /// 先换候选（经预探测），再最多刷新一次解析，最后进跨源恢复链；预算在新选集或手动重试时重置。
     func retryPlayback(automatically: Bool = false) async {
         if currentPlayURL?.isFileURL == true {
             guard !automatically else { return }
@@ -986,23 +1075,21 @@ class AnimeDetailViewModel: ObservableObject {
         guard let episode = currentEpisode, let sourceID = currentSourceID,
               let index = sourceResults.firstIndex(where: { $0.id == sourceID }) else { return }
         recoveryStartTime = hasPlaybackPosition ? currentTime : (recoveryStartTime ?? currentStartTime)
-        if automatically, candidateIndex + 1 < videoSources.count {
-            candidateIndex += 1
-            let source = videoSources[candidateIndex]
-            if let url = URL(string: source.url) {
-                currentHTTPHeaders = source.httpHeaders ?? [:]
-                await setupPlayer(with: url, episode: episode, rule: sourceResults[index].rule, useDirectHLS: source.usesMXdmDirectHLS == true)
+        let requestID = playbackRequestID
+        if automatically {
+            AnimeSourceReputationStore.shared.recordFailure(sourceID: sourceID)
+            if candidateIndex + 1 < videoSources.count {
+                await startCandidate(at: candidateIndex + 1, episode: episode, rule: sourceResults[index].rule, requestID: requestID)
                 return
             }
-        }
-        if automatically {
             guard automaticRecoveryCount < 1 else {
-                if canSwitchPlaybackRoad { await switchToNextPlaybackRoad() }
+                await recoverPlaybackFailure(episode: episode, requestID: requestID)
                 return
             }
             automaticRecoveryCount += 1
         } else {
             automaticRecoveryCount = 0
+            crossSourceRecoveryCount = 0
         }
         await playEpisode(episode, from: index, isRecovery: true)
     }
@@ -1128,7 +1215,8 @@ class AnimeDetailViewModel: ObservableObject {
         if useDirectHLS {
             let requestID = playbackRequestID
             do {
-                let relay = try MXdmDirectHLS(headers: currentHTTPHeaders)
+                guard let host = url.host else { throw URLError(.badURL) }
+                let relay = try DirectHLSRelay(mediaHost: host, headers: currentHTTPHeaders)
                 directHLSRelay = relay
                 playURL = try await relay.start(at: url)
                 guard playbackRequestID == requestID, directHLSRelay === relay, !Task.isCancelled else {
@@ -1226,6 +1314,7 @@ class AnimeDetailViewModel: ObservableObject {
             videoError = nil // 播放成功时清除之前的错误提示
             if let sourceID = currentSourceID, let episode = currentEpisode, currentPlayURL?.isFileURL != true {
                 verifiedPlaybackEpisodes[sourceID, default: []].insert(episode.id)
+                AnimeSourceReputationStore.shared.recordSuccess(sourceID: sourceID)
             }
             SleepPreventer.shared.startPreventingSleep(sessionID: progressSessionID)
         case .finished:

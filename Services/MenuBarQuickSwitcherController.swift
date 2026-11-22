@@ -47,6 +47,9 @@ final class MenuBarQuickSwitcherController: NSObject {
         let hostingController = NSHostingController(
             rootView: MenuBarQuickSwitcherView(viewModel: viewModel)
         )
+        // 面板尺寸固定为 contentSize（positionPanel 每次 setFrame），不让 SwiftUI
+        // 内容反推窗口尺寸，避免与主窗口同类的约束更新循环（#130/#132）。
+        hostingController.sizingOptions = []
         hostingController.view.wantsLayer = true
         hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentViewController = hostingController

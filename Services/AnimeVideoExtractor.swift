@@ -51,14 +51,49 @@ struct AnimeMediaCandidate {
         ["ts", "m4s", "m4a", "aac", "vtt", "key"].contains(url.pathExtension.lowercased())
     }
 
+    /// Kazumi legacy 解析（decodeVideoSource）：老式播放器把媒体直链放在 iframe src 的
+    /// query 参数里（如 player.php?url=https://cdn/xx.m3u8）。返回第一个命中的媒体 URL。
+    static func legacyEmbeddedMediaURL(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 8192 else { return nil }
+        let expanded = trimmed.hasPrefix("//") ? "https:" + trimmed : trimmed
+        let decoded = expanded.removingPercentEncoding ?? expanded
+        guard let components = URLComponents(string: decoded) else { return nil }
+        for item in components.queryItems ?? [] {
+            guard let value = item.value,
+                  let match = value.range(of: #"https?://[^\s"'<>]+?\.(m3u8|mp4)(?=[&#\s"'<>]|$)"#,
+                                          options: [.regularExpression, .caseInsensitive]) else { continue }
+            let candidate = String(value[match]).trimmingCharacters(in: CharacterSet(charactersIn: "\"'<>"))
+            if let url = URL(string: candidate), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+               url.host != nil, !isSegment(url), pathFormat(url) != nil {
+                return url.absoluteString
+            }
+        }
+        return nil
+    }
+
+    /// 已确认的广告网络宿主（Kazumi contentBlockers 同款 + 常见广告 CDN）。
+    /// 命中宿主的媒体候选一律丢弃，防止广告视频挤掉正片。
+    static func isAdHost(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        let adSuffixes = ["googlesyndication.com", "doubleclick.net", "googleadservices.com",
+                          "adservice.google.com", "adtrafficquality.google", "googletagservices.com",
+                          "adsystem.com", "adnxs.com", "adsrvr.org", "taboola.com", "outbrain.com",
+                          "popads.net", "popcash.net", "propellerads.com", "exoclick.com",
+                          "juicyads.com", "trafficjunky.com", "hilltopads.com", "adcash.com",
+                          "magsrv.com", "mnaspm.com", "bbrdbr.com"]
+        return adSuffixes.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
     static func decode(_ payload: [String: Any], fallbackFrame: URL?, pageURL: String) -> AnimeMediaCandidate? {
         guard let rawURL = payload["url"] as? String,
               let url = URL(string: rawURL, relativeTo: fallbackFrame)?.absoluteURL,
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              url.host != nil, !isSegment(url) else { return nil }
+              url.host != nil, !isSegment(url), !isAdHost(url) else { return nil }
         let kind = payload["sourceKind"] as? String ?? "unknown"
-        // An iframe's src is a document, even when its query embeds a media URL.
-        guard ["fetch-response", "xhr-response", "navigation-response", "media-element", "media-hint", "network-request"].contains(kind) else { return nil }
+        // A raw iframe src is a document; "legacy-iframe" carries only a media URL already
+        // extracted from the frame's query parameters (Kazumi useLegacyParser path).
+        guard ["fetch-response", "xhr-response", "navigation-response", "media-element", "media-hint", "network-request", "legacy-iframe"].contains(kind) else { return nil }
         let rawStatus = (payload["status"] as? NSNumber)?.intValue
         let status = rawStatus.flatMap { $0 > 0 ? $0 : nil }
         if let status, !(200...299).contains(status) { return nil }
@@ -80,6 +115,9 @@ struct AnimeMediaCandidate {
         else if responseKind, responseFormat != nil { confidence = 95 }
         else if responseKind { confidence = 85 }
         else if kind == "media-element" { confidence = 75 }
+        // A declared media URL inside the player frame's query is strong evidence, but the
+        // bytes are unverified; the playback preflight settles it before ranking matters.
+        else if kind == "legacy-iframe" { confidence = 70 }
         else { confidence = 45 }
         return AnimeMediaCandidate(
             url: url, format: format, sourceKind: kind,
@@ -252,11 +290,75 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         controller.addUserScript(WKUserScript(source: captchaDetectionScript(), injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         controller.addUserScript(WKUserScript(source: Self.networkInterceptorScriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         controller.addUserScript(WKUserScript(source: Self.videoScannerScriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        controller.addUserScript(WKUserScript(source: Self.lazyFrameScriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        if rule.useLegacyParser == true {
+            controller.addUserScript(WKUserScript(source: Self.legacyIframeParserScriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        }
         let view = WKWebView(frame: .zero, configuration: config)
         view.customUserAgent = Self.effectiveUserAgent(rule: rule)
         view.navigationDelegate = self
         webView = view
+        // Kazumi 同款基础拦截始终开启：广告文档/反调试脚本/图片不加载，
+        // 广告视频从源头没有机会先于正片产生媒体证据。
+        installContentBlockers(on: view, resolveId: resolveId)
     }
+
+    /// 编译并挂载广告拦截规则。编译结果进程内缓存一次；挂载前校验代次，
+    /// 迟到回调不得污染下一次解析的 WebView。编译失败退回无拦截，不阻塞解析。
+    private func installContentBlockers(on view: WKWebView, resolveId: Int) {
+        if let cached = Self.compiledBlockers {
+            view.configuration.userContentController.add(cached)
+            return
+        }
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "WaifuXAnimeExtractionBlockers",
+            encodedContentRuleList: Self.contentBlockerRulesJSON
+        ) { [weak self, weak view] list, error in
+            Task { @MainActor in
+                guard let list else {
+                    Self.logger.notice("content_blockers_compile_failed error=\(error?.localizedDescription ?? "unknown", privacy: .public)")
+                    return
+                }
+                Self.compiledBlockers = list
+                guard let self, let view, view === self.webView, self.resolveId == resolveId else { return }
+                view.configuration.userContentController.add(list)
+                self.addLog("广告拦截规则已挂载")
+            }
+        }
+    }
+
+    private static var compiledBlockers: WKContentRuleList?
+
+    /// Kazumi video_webview_apple_impl contentBlockers 等价 JSON：
+    /// 拦全部图片、devtools-detector.js、googleads/googlesyndication/prestrain(.html|%2Ehtml)/
+    /// adtrafficquality 文档，以及常见广告网络域名的全部请求。
+    static let contentBlockerRulesJSON: String = {
+        var rules: [[String: Any]] = []
+        func block(_ filter: String, types: [String]? = nil) {
+            var trigger: [String: Any] = ["url-filter": filter]
+            if let types { trigger["resource-type"] = types }
+            rules.append(["trigger": trigger, "action": ["type": "block"]])
+        }
+        block(#"^https?://.+?devtools-detector\.js"#, types: ["script"])
+        block(".*", types: ["image"])
+        block(#"^https?://.+?googleads"#, types: ["document"])
+        block(#"^https?://.+?googlesyndication\.com"#, types: ["document"])
+        block(#"^https?://.+?prestrain\.html"#, types: ["document"])
+        block(#"^https?://.+?prestrain%2Ehtml"#, types: ["document"])
+        block(#"^https?://.+?adtrafficquality"#, types: ["document"])
+        // 广告网络的媒体/脚本/XHR 也一并拦截，广告视频从源头不产生候选。
+        let adHosts = ["googlesyndication\\.com", "doubleclick\\.net", "googleadservices\\.com",
+                       "adservice\\.google\\.com", "adtrafficquality\\.google", "googletagservices\\.com",
+                       "adsystem\\.com", "adnxs\\.com", "adsrvr\\.org", "taboola\\.com", "outbrain\\.com",
+                       "popads\\.net", "popcash\\.net", "propellerads\\.com", "exoclick\\.com",
+                       "juicyads\\.com", "trafficjunky\\.com", "hilltopads\\.com", "adcash\\.com",
+                       "magsrv\\.com", "mnaspm\\.com", "bbrdbr\\.com"]
+        for host in adHosts {
+            block(#"^https?://([a-z0-9-]+\.)*"# + host)
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: rules)) ?? Data("[]".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }()
 
     private func captchaDetectionScript() -> String {
         let config = currentRule?.antiCrawlerConfig
@@ -283,6 +385,17 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
     }
 
     private func receive(_ payload: [String: Any], frameURL: URL?) {
+        var payload = payload
+        // legacy 原始 iframe src：在 Swift 侧提取 query 里的媒体直链（Kazumi decodeVideoSource），
+        // 提取不到就丢弃——iframe 文档本身永远不是媒体候选。
+        if payload["sourceKind"] as? String == "legacy-iframe-raw" {
+            guard currentRule?.useLegacyParser == true,
+                  let raw = payload["url"] as? String,
+                  let media = AnimeMediaCandidate.legacyEmbeddedMediaURL(raw) else { return }
+            payload["url"] = media
+            payload["sourceKind"] = "legacy-iframe"
+            payload["format"] = ""
+        }
         guard let candidate = AnimeMediaCandidate.decode(payload, fallbackFrame: frameURL, pageURL: currentPageURL) else { return }
         let key = candidate.url.absoluteString
         if let existing = candidates[key], existing.confidence >= candidate.confidence { return }
@@ -294,13 +407,16 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         }
         candidates[key] = candidate
         lastImprovementAt = Date()
-        if candidate.confidence >= 75, firstConfirmedAt == nil { firstConfirmedAt = Date() }
+        // legacy iframe 直链与响应级证据同级：足以开启收敛窗口（Kazumi 对这类站点
+        // 甚至首命中即播；这里保留短收敛窗防嵌套播放器的更优候选迟到）。
+        if candidate.confidence >= 70, firstConfirmedAt == nil { firstConfirmedAt = Date() }
         progressMessage = LocalizationService.shared.t("已发现媒体，正在确认播放地址...")
         addLog("媒体候选 host=\(Self.safeHost(candidate.url)) format=\(candidate.format) evidence=\(candidate.sourceKind) confidence=\(candidate.confidence)")
         startCollectionWindow()
         if let frameURL { probeDirectMXdmHLS(candidate, frameURL: frameURL) }
     }
 
+    /// MXdm 已验证站点/CDN 对的窄路径快速恢复（保留原行为，通用探测在预检阶段做）。
     private func probeDirectMXdmHLS(_ candidate: AnimeMediaCandidate, frameURL: URL) {
         guard allowsDirectMXdmHLS, directHLSProbe == nil, let rule = currentRule,
               candidate.sourceKind == "network-request",
@@ -313,7 +429,7 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
                   let self, self.resolveId == id, self.continuation != nil else { return }
             var source = VideoSource(quality: Self.quality(url: candidate.url, format: "m3u8"), url: candidate.url.absoluteString, type: "m3u8", label: nil)
             source.httpHeaders = headers
-            source.usesMXdmDirectHLS = true
+            source.usesDirectHLSRelay = true
             self.addLog("系统代理拒绝 MXdm 媒体；已验证直连播放列表")
             self.finish(with: .success([source]), resolveId: id)
         }
@@ -342,7 +458,8 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
     private func completeCandidates(resolveId: Int, timedOut: Bool) async {
         guard resolveId == self.resolveId, continuation != nil else { return }
         // Request-only hints are insufficient: a failed request or HTML response cannot be played.
-        let ranked = candidates.values.filter { $0.confidence >= 75 }.sorted {
+        // legacy iframe 直链（70）参与收敛：这类站点没有响应级证据，拒绝它等于全站不可播。
+        let ranked = candidates.values.filter { $0.confidence >= 70 }.sorted {
             if $0.confidence != $1.confidence { return $0.confidence > $1.confidence }
             let lhsRank = $0.format == "m3u8" ? 0 : ($0.format == "mp4" ? 1 : 2)
             let rhsRank = $1.format == "m3u8" ? 0 : ($1.format == "mp4" ? 1 : 2)
@@ -425,6 +542,7 @@ class AnimeVideoExtractor: NSObject, ObservableObject {
         webView?.stopLoading()
         webView?.configuration.userContentController.removeAllScriptMessageHandlers()
         webView?.configuration.userContentController.removeAllUserScripts()
+        webView?.configuration.userContentController.removeAllContentRuleLists()
         webView?.loadHTMLString("", baseURL: nil)
         webView = nil
     }
@@ -516,6 +634,8 @@ extension AnimeVideoExtractor {
             let url;
             try { url = new URL(typeof raw === 'string' ? raw : raw.url, doc.baseURI); } catch (_) { return; }
             if (!/^https?:$/.test(url.protocol) || segment(url)) return;
+            // 已知广告网络宿主：与 Swift 侧 isAdHost 同口径，双保险。
+            if (/(^|\.)(googlesyndication\.com|doubleclick\.net|googleadservices\.com|adservice\.google\.com|adtrafficquality\.google|googletagservices\.com|adsystem\.com|adnxs\.com|adsrvr\.org|taboola\.com|outbrain\.com|popads\.net|popcash\.net|propellerads\.com|exoclick\.com|juicyads\.com|trafficjunky\.com|hilltopads\.com|adcash\.com|magsrv\.com|mnaspm\.com|bbrdbr\.com)$/i.test(url.hostname)) return;
             const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.VideoBridge;
             if (!bridge) return;
             if ((kind === 'media-hint' || kind === 'network-request') && !pathFormat(url)) return;
@@ -601,6 +721,92 @@ extension AnimeVideoExtractor {
             }
             return originalOpen.apply(this, arguments);
         };
+        // Kazumi blobParser 同款：播放器用 Response.text() 读播放列表时（hls.js 常见路径），
+        // 即使 URL 无扩展名、MIME 是 octet-stream，也能凭 #EXTM3U 正文确认媒体。
+        // 只观察不克隆：text() 本来就要读完整个 body，这里只检查前缀。
+        const responseText = window.Response && window.Response.prototype && window.Response.prototype.text;
+        if (responseText) window.Response.prototype.text = function() {
+            const response = this;
+            return responseText.call(this).then(function(text) {
+                try {
+                    if (typeof text === 'string' && text.replace(/^\uFEFF/, '').trimStart().startsWith('#EXTM3U')) {
+                        const finalURL = absolute(response.url);
+                        if (finalURL && !segment(finalURL) && response.status >= 200 && response.status <= 299) {
+                            const mime = (response.headers && response.headers.get('content-type')) || '';
+                            if (!/text\/html|application\/xhtml/i.test(mime))
+                                send(finalURL.href, 'fetch-response', 'm3u8', 'hls-body', response.status, mime);
+                        }
+                    }
+                } catch (_) {}
+                return text;
+            });
+        };
+    })();
+    """#
+
+    /// Kazumi removeLazyLoading 同款：摘掉 iframe 的 lazy 属性，播放器框架立即加载。
+    static let lazyFrameScriptSource = #"""
+    (function() {
+        'use strict';
+        function removeLazyLoading(root) {
+            try {
+                (root || document).querySelectorAll('iframe[loading="lazy"]').forEach(function(frame) {
+                    frame.removeAttribute('loading');
+                });
+            } catch (_) {}
+        }
+        function install() {
+            removeLazyLoading(document);
+            if (!document.documentElement) return;
+            new MutationObserver(function(mutations) {
+                for (const mutation of mutations) {
+                    if (mutation.type === 'attributes') { removeLazyLoading(document); return; }
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType !== 1) continue;
+                        if (node.nodeName === 'IFRAME' && node.getAttribute('loading') === 'lazy') node.removeAttribute('loading');
+                        else if (node.querySelectorAll) removeLazyLoading(node);
+                    }
+                }
+            }).observe(document.documentElement, {childList: true, subtree: true, attributes: true, attributeFilter: ['loading']});
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, {once: true});
+        else install();
+    })();
+    """#
+
+    /// Kazumi useLegacyParser 路径：扫 iframe src，把 query 参数里的 m3u8/mp4 直链
+    /// 经 Swift 侧 legacyEmbeddedMediaURL 严格校验后作为 legacy-iframe 候选。
+    /// 只在规则声明 useLegacyParser 时注入；原始 iframe 文档 URL 依旧被拒绝。
+    static let legacyIframeParserScriptSource = #"""
+    (function() {
+        'use strict';
+        if (window.__kazumiLegacyParserInstalled) return;
+        window.__kazumiLegacyParserInstalled = true;
+        const reported = new Set();
+        function scan() {
+            const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.VideoBridge;
+            if (!bridge) return;
+            document.querySelectorAll('iframe').forEach(function(frame) {
+                const src = frame.getAttribute('src');
+                if (!src || reported.has(src) || reported.size >= 64) return;
+                reported.add(src);
+                let frameURL = document.location ? document.location.href : document.baseURI;
+                let pageURL = frameURL;
+                try { pageURL = window.top.location.href; } catch (_) {}
+                // 原样上报 iframe src；媒体 URL 的提取与校验在 Swift 侧完成。
+                bridge.postMessage({url: src, sourceKind: 'legacy-iframe-raw', format: '',
+                    frameURL: frameURL, pageURL: pageURL, referrer: frameURL,
+                    userAgent: navigator.userAgent, evidence: 'iframe-query', status: 0, contentType: ''});
+            });
+        }
+        function install() {
+            scan();
+            if (!document.documentElement) return;
+            new MutationObserver(function() { scan(); }).observe(document.documentElement,
+                {childList: true, subtree: true, attributes: true, attributeFilter: ['src']});
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install, {once: true});
+        else install();
     })();
     """#
 

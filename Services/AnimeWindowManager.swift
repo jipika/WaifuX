@@ -69,7 +69,15 @@ class AnimePlayerWindowController: NSWindowController {
         
         // 设置内容视图（传入 player）
         let contentView = AnimePlayerWindow(viewModel: viewModel, player: player)
-        window.contentView = EdgeToEdgeHostingView(rootView: contentView)
+        let playerHosting = EdgeToEdgeHostingView(rootView: contentView)
+        // #130/#132：播放器窗尺寸由 NSWindow 管理（minSize 900×500），用普通容器
+        // 承载宿主，尺寸单向传递，避免内嵌视频/平台视图反推窗口约束形成布局循环。
+        playerHosting.sizingOptions = []
+        let playerContainer = NSView(frame: NSRect(x: 0, y: 0, width: 1200, height: 700))
+        playerHosting.frame = playerContainer.bounds
+        playerHosting.autoresizingMask = [.width, .height]
+        playerContainer.addSubview(playerHosting)
+        window.contentView = playerContainer
     }
     
     @objc private func handleToggleFullScreen(_ notification: Notification) {
@@ -294,7 +302,7 @@ private final class AnimeDownloadVerificationWindowController: NSWindowControlle
         super.init(window: window)
         window.delegate = self
         window.center()
-        window.contentView = NSHostingView(rootView: LiquidGlassCaptchaSheet(
+        let hostingView = NSHostingView(rootView: LiquidGlassCaptchaSheet(
             session: session,
             onCancel: { [weak self] in self?.close() },
             onVerified: { [weak self] in
@@ -307,6 +315,11 @@ private final class AnimeDownloadVerificationWindowController: NSWindowControlle
                 }
             }
         ))
+        // #130/#132：验证页含 WKWebView，尺寸由窗口单向传给内容，不参与窗口约束。
+        hostingView.sizingOptions = []
+        hostingView.frame = NSRect(x: 0, y: 0, width: 940, height: 740)
+        hostingView.autoresizingMask = [.width, .height]
+        window.contentView = hostingView
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

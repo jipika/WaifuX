@@ -257,6 +257,10 @@ private final class MainTabViewController: NSTabViewController {
 
     private func addPage<Content: View>(title: String, view: Content) {
         let hostingController = NSHostingController(rootView: EdgeToEdgeContainer(content: view))
+        // #130/#132：Tab 页由 NSTabView 的 frame 决定尺寸。默认 sizingOptions 会让
+        // AppKit 在约束更新时反复测量 SwiftUI 内容（含内嵌 NSCollectionView /
+        // NSVisualEffectView 平台视图），形成 updateConstraints 自喂养循环。
+        hostingController.sizingOptions = []
         let item = NSTabViewItem(viewController: hostingController)
         item.label = title
         addTabViewItem(item)

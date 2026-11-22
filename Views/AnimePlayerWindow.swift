@@ -820,8 +820,11 @@ private struct RightPanel: View {
             }
         } else {
             // 尚未冻结：实时排序，与冻结口径一致（可播放 > 有剧集 > 待选择 > 验证 > 失败…）
+            // 同优先级内按跨会话信誉分排序。
             return sources.sorted { a, b in
-                viewModel.sourceAvailabilityPriority(a) < viewModel.sourceAvailabilityPriority(b)
+                let pa = viewModel.sourceAvailabilityPriority(a), pb = viewModel.sourceAvailabilityPriority(b)
+                if pa != pb { return pa < pb }
+                return AnimeSourceReputationStore.shared.ranksBefore(a.id, b.id)
             }
         }
     }
@@ -1925,7 +1928,7 @@ private struct EpisodeRow: View {
     }
 }
 
-// MARK: - 弹幕设置视图（Kazumi 分区结构 + 液态玻璃）
+// MARK: - 弹幕设置视图（Kazumi 分区结构，原生 grouped Form）
 private struct DanmakuSettingsView: View {
     @ObservedObject var viewModel: AnimeDetailViewModel
 

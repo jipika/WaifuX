@@ -48,6 +48,10 @@ struct AnimeRule: Identifiable, Codable, Hashable {
     let videoSourceAttr: String?
     let useWebview: Bool?
     let multiSources: Bool?
+    /// Kazumi 规则字段：老式播放器站点从 iframe src 的 query 参数提取媒体直链。
+    let useLegacyParser: Bool?
+    /// Kazumi 规则字段：站点声明需要广告拦截（提取 WebView 的基础拦截始终开启）。
+    let adBlocker: Bool?
 
     // API v2: XPath 格式 (兼容 Kazumi)
     let xpath: AnimeXPathRules?
@@ -61,7 +65,7 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         case searchURL, searchList, searchName, searchCover, searchDetail, searchId
         case detailTitle, detailCover, detailDesc, detailStatus, detailRating
         case episodeList, episodeName, episodeLink, episodeThumb
-        case videoSelector, videoSourceAttr, useWebview, multiSources
+        case videoSelector, videoSourceAttr, useWebview, multiSources, useLegacyParser, adBlocker
         case xpath
         case antiCrawlerConfig
         case searchMode, chapterMode, searchApiConfig, chapterApiConfig
@@ -100,6 +104,8 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         videoSourceAttr: String? = "src",
         useWebview: Bool? = false,
         multiSources: Bool? = false,
+        useLegacyParser: Bool? = nil,
+        adBlocker: Bool? = nil,
         // API v2 字段
         xpath: AnimeXPathRules? = nil,
         antiCrawlerConfig: AntiCrawlerConfig? = nil,
@@ -142,6 +148,8 @@ struct AnimeRule: Identifiable, Codable, Hashable {
         self.videoSourceAttr = videoSourceAttr
         self.useWebview = useWebview
         self.multiSources = multiSources
+        self.useLegacyParser = useLegacyParser
+        self.adBlocker = adBlocker
 
         self.xpath = xpath
         self.antiCrawlerConfig = antiCrawlerConfig
@@ -188,6 +196,8 @@ struct AnimeRule: Identifiable, Codable, Hashable {
             videoSourceAttr: try c.decodeIfPresent(String.self, forKey: .videoSourceAttr),
             useWebview: try c.decodeIfPresent(Bool.self, forKey: .useWebview),
             multiSources: try c.decodeIfPresent(Bool.self, forKey: .multiSources),
+            useLegacyParser: try c.decodeIfPresent(Bool.self, forKey: .useLegacyParser),
+            adBlocker: try c.decodeIfPresent(Bool.self, forKey: .adBlocker),
             xpath: try c.decodeIfPresent(AnimeXPathRules.self, forKey: .xpath),
             antiCrawlerConfig: try c.decodeIfPresent(AntiCrawlerConfig.self, forKey: .antiCrawlerConfig),
             searchMode: try c.decodeIfPresent(AnimeRuleMode.self, forKey: .searchMode),

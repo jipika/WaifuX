@@ -1120,6 +1120,8 @@ private struct NativeHorizontalThumbnailRail<Content: View>: NSViewRepresentable
 
         init(rootView: Content) {
             hostingView = NSHostingView(rootView: rootView)
+            // 轨道 documentView 尺寸由 updateNSView 显式 setFrameSize（#130/#132 同类防护）。
+            hostingView.sizingOptions = []
             hostingView.wantsLayer = true
             hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         }

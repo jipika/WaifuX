@@ -42,6 +42,10 @@ struct MediaDetailSheet: View {
     @State private var isMuted = true
     @State private var isVisible = false
     @State private var isMediaLoaded = false
+    /// 封面/GIF 背景加载失败（非取消）：显示「加载失败 · 重试」胶囊。
+    /// 重试走 mediaBackgroundEpoch 重建背景 + coverForceRefresh 跳过缓存，
+    /// 并丢弃该 URL 的 GIF 探测负缓存，让瞬态网络失败可以恢复。
+    @State private var backgroundLoadFailed = false
     /// 以「未下载」状态打开（或切到）的详情项 ID：背景钉在打开时的远程预览，
     /// 直到真正可播放的资源（烘焙 MP4 / 本地视频 / 静态 Scene 抽帧）落地才替换。
     @State private var pinnedRemoteBackgroundItemID: String?
@@ -505,6 +509,34 @@ struct MediaDetailSheet: View {
                     )
                 }
 
+                // 封面/GIF 加载失败：底部居中「重试」胶囊（视频背景有自己的封面兜底，不显示）。
+                if backgroundLoadFailed, isVisible, activeTransitionSeed == nil,
+                   activeBackgroundVideoURL == nil, !isNavigating {
+                    Button {
+                        retryBackgroundLoad()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("\(t("loadFailed")) · \(t("retry"))")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 0.5))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 96)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(95)
+                }
+
                 if showInfoBubble {
                     Color.black.opacity(0.001)
                         .ignoresSafeArea()
@@ -739,6 +771,7 @@ struct MediaDetailSheet: View {
             transitionSeed = nil
             displayedVideoURL = nil
             loadedBackgroundCoverURL = nil
+            backgroundLoadFailed = false
             onDisplayedItemChange?(itemID)
             pinRemoteBackgroundIfNeeded()
             restoreSceneBakeProgressIfNeeded()
@@ -779,6 +812,7 @@ struct MediaDetailSheet: View {
                 return
             }
             isMediaLoaded = false
+            backgroundLoadFailed = false
             mediaBackgroundEpoch &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: .localMediaPosterDidUpdate)) { notification in
@@ -789,6 +823,7 @@ struct MediaDetailSheet: View {
                 return
             }
             isMediaLoaded = false
+            backgroundLoadFailed = false
             mediaBackgroundEpoch &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: .steamWorkshopLoginRequired)) { notification in
@@ -1125,6 +1160,7 @@ struct MediaDetailSheet: View {
         resolvedItem = item
         if mediaBackgroundIdentityKey != previousBackgroundKey {
             isMediaLoaded = false
+            backgroundLoadFailed = false
         }
         return true
     }
@@ -1134,6 +1170,18 @@ struct MediaDetailSheet: View {
             return max(min(viewportHeight * 0.42, 380), 300)
         }
         return max(min(viewportHeight * 0.58, 520), 420)
+    }
+
+    /// 「加载失败 · 重试」：丢弃探测负缓存 → 跳过 Kingfisher 缓存 → 重建背景视图。
+    /// 三步缺一不可：负缓存会让 GIF 判定直接短路；同 key 缓存命中会复用失败前的旧数据源；
+    /// 背景 id 不变则 KFImage binder 停在 failure 态不会自发重载。
+    private func retryBackgroundLoad() {
+        AnimatedImageProbeCache.shared.invalidate(heroImageURL)
+        coverForceRefresh = true
+        withAnimation(.easeInOut(duration: 0.25)) {
+            backgroundLoadFailed = false
+        }
+        mediaBackgroundEpoch &+= 1
     }
 
     @ViewBuilder
@@ -1170,7 +1218,19 @@ struct MediaDetailSheet: View {
                     },
                     layoutSize: heroLayoutSize,
                     playAnimatedImage: backgroundVideoURL == nil,
-                    forceRefresh: coverForceRefresh
+                    forceRefresh: coverForceRefresh,
+                    loadFailed: {
+                        guard resolvedItem.id == imageItemID, heroImageURL == imageURL else { return }
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            backgroundLoadFailed = true
+                        }
+                    },
+                    loadSucceeded: {
+                        guard resolvedItem.id == imageItemID, heroImageURL == imageURL else { return }
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            backgroundLoadFailed = false
+                        }
+                    }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -1648,27 +1708,124 @@ struct MediaDetailSheet: View {
     }
 
     private var bakeSizePicker: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(t("sceneBake.output.aspectRatio"))
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(LiquidGlassColors.textPrimary)
-            Picker(t("sceneBake.output.aspectRatio"), selection: $bakeSizeChoice) {
-                ForEach(bakeSizeOptions) { option in
-                    Text(option.title).tag(option.id)
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            if let size = bakeSizeOptions.first(where: { $0.id == bakeSizeChoice })?.size {
-                Text(String(format: t("sceneBake.output.dimensions"), "\(size.width) × \(size.height)"))
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                    .foregroundStyle(LiquidGlassColors.textSecondary)
+        let ratioPresets: [BakeSizeOption] = bakeSizeOptions.filter {
+            switch $0.id {
+            case .portrait, .landscape, .ultrawide: return true
+            default: return false
             }
         }
-        .padding(12)
+        let displayOptions = bakeSizeOptions.filter {
+            switch $0.id {
+            case .current, .display: return true
+            default: return false
+            }
+        }
+        let selectedSize = bakeSizeOptions.first(where: { $0.id == bakeSizeChoice })?.size
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(t("sceneBake.output.aspectRatio"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(LiquidGlassColors.textPrimary)
+                Spacer(minLength: 12)
+                if let selectedSize {
+                    Text(String(format: t("sceneBake.output.dimensions"), "\(selectedSize.width) × \(selectedSize.height)"))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(LiquidGlassColors.textTertiary)
+                        .contentTransition(.numericText())
+                        .animation(AppFluidMotion.hoverEase, value: selectedSize)
+                }
+            }
+
+            HStack(spacing: 8) {
+                ForEach(ratioPresets) { preset in
+                    bakeRatioChip(preset)
+                }
+                if !displayOptions.isEmpty {
+                    bakeDisplayMenu(options: displayOptions)
+                }
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlassSurface(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    /// 比例 chip：微缩形状 + 比例文字，选中态粉色 tint，替代原生灰底 Picker。
+    private func bakeRatioChip(_ option: BakeSizeOption) -> some View {
+        let isSelected = bakeSizeChoice == option.id
+        return Button {
+            withAnimation(AppFluidMotion.interactiveSpring) {
+                bakeSizeChoice = option.id
+            }
+        } label: {
+            HStack(spacing: 7) {
+                bakeAspectGlyph(width: option.size.width, height: option.size.height)
+                    .foregroundStyle(isSelected ? .white : LiquidGlassColors.textSecondary)
+                Text(option.title)
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(isSelected ? .white : LiquidGlassColors.textPrimary)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .contentShape(Capsule())
+            .liquidGlassSurface(
+                isSelected ? .prominent : .subtle,
+                tint: isSelected ? LiquidGlassColors.primaryPink.opacity(0.45) : nil,
+                in: Capsule()
+            )
+        }
+        .buttonStyle(.plain)
+        .help("\(option.title) · \(option.size.width) × \(option.size.height)")
+    }
+
+    /// 按真实比例画的微缩取景框，让 9:16 / 16:9 / 21:9 一眼可辨。
+    private func bakeAspectGlyph(width: Int, height: Int) -> some View {
+        let ratio = CGFloat(max(width, 1)) / CGFloat(max(height, 1))
+        let side: CGFloat = 14
+        let glyphWidth = ratio >= 1 ? side : side * ratio
+        let glyphHeight = ratio >= 1 ? side / ratio : side
+        return RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+            .strokeBorder(lineWidth: 1.5)
+            .frame(width: glyphWidth, height: glyphHeight)
+            .frame(width: side, height: side)
+    }
+
+    /// 显示器选项收进玻璃下拉（仓库 Menu + borderlessButton 约定），不再用系统灰底弹窗按钮。
+    private func bakeDisplayMenu(options: [BakeSizeOption]) -> some View {
+        let selected = options.first(where: { $0.id == bakeSizeChoice })
+        return Menu {
+            ForEach(options) { option in
+                Button {
+                    bakeSizeChoice = option.id
+                } label: {
+                    if option.id == bakeSizeChoice {
+                        Label(option.title, systemImage: "checkmark")
+                    } else {
+                        Text(option.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "display")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(selected?.title ?? t("sceneBake.output.currentDisplay"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundStyle(selected != nil ? .white : LiquidGlassColors.textPrimary)
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .frame(maxWidth: .infinity)
+            .contentShape(Capsule())
+            .liquidGlassSurface(
+                selected != nil ? .prominent : .subtle,
+                tint: selected != nil ? LiquidGlassColors.primaryPink.opacity(0.45) : nil,
+                in: Capsule()
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(maxWidth: .infinity)
     }
 
     private var sceneBakeRendererOverlay: some View {
@@ -1944,6 +2101,7 @@ struct MediaDetailSheet: View {
         }
 
         isMediaLoaded = false
+        backgroundLoadFailed = false
         mediaBackgroundEpoch &+= 1
 
         // 静态图 onFailure 也会 loadFinished；再兜一层防止卡在黑色 LoadingOverlay
@@ -2502,21 +2660,6 @@ struct MediaDetailSheet: View {
     @ViewBuilder
     private var morePopoverMenuContent: some View {
         VStack(spacing: 0) {
-            Button {
-                showMoreOptionsPopover = false
-                setAsScreenSaver()
-            } label: {
-                HStack {
-                    Image(systemName: "display")
-                    Text(t("screensaver.setWallpaper"))
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-            }
-            .buttonStyle(.plain)
-            .disabled(isSettingWallpaper || isDownloading || isWorkshopUpdateFlow)
-
             if isAlreadyDownloaded {
                 Button {
                     // 不关闭菜单，保持锚点有效
@@ -2532,6 +2675,21 @@ struct MediaDetailSheet: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            Button {
+                showMoreOptionsPopover = false
+                setAsScreenSaver()
+            } label: {
+                HStack {
+                    Image(systemName: "display")
+                    Text(t("screensaver.setWallpaper"))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .disabled(isSettingWallpaper || isDownloading || isWorkshopUpdateFlow)
 
             if canRedownloadItem {
                 Button {
@@ -3602,6 +3760,7 @@ struct MediaDetailSheet: View {
             // 重置状态
             isSettingWallpaper = false
             isMediaLoaded = false
+            backgroundLoadFailed = false
             isSourcesReady = false
             showInfoBubble = false
         }
@@ -5752,6 +5911,7 @@ struct MediaDetailSheet: View {
         isNavigating = true
         // 强制详情背景按新项重建，避免 Kingfisher/AVPlayer 残留上一张 GIF/视频
         isMediaLoaded = false
+        backgroundLoadFailed = false
         mediaBackgroundEpoch &+= 1
 
         if let index = navigationItems.firstIndex(where: { $0.id == patchedItem.id }) {

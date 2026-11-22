@@ -857,21 +857,6 @@ struct WallpaperDetailSheet: View {
     @ViewBuilder
     private var morePopoverMenuContent: some View {
         VStack(spacing: 0) {
-            Button {
-                showMoreOptionsPopover = false
-                setAsScreenSaver()
-            } label: {
-                HStack {
-                    Image(systemName: "display")
-                    Text(t("screensaver.setWallpaper"))
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-            }
-            .buttonStyle(.plain)
-            .disabled(isSettingWallpaper || isDownloading)
-
             if isAlreadyDownloaded {
                 Button {
                     // 不关闭菜单，保持锚点有效
@@ -893,6 +878,21 @@ struct WallpaperDetailSheet: View {
                     alignment: .bottom
                 )
             }
+
+            Button {
+                showMoreOptionsPopover = false
+                setAsScreenSaver()
+            } label: {
+                HStack {
+                    Image(systemName: "display")
+                    Text(t("screensaver.setWallpaper"))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .disabled(isSettingWallpaper || isDownloading)
 
             Button {
                 showMoreOptionsPopover = false

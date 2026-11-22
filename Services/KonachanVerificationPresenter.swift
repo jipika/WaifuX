@@ -99,7 +99,13 @@ final class KonachanVerificationWindowController: NSWindowController, NSWindowDe
             onVerified: { [weak self] in self?.handleVerified() },
             onCancel: { [weak self] in self?.close() }
         )
-        window.contentView = NSHostingView(rootView: content)
+        let hostingView = NSHostingView(rootView: content)
+        // #130/#132：内容含 WKWebView 平台视图，禁止 SwiftUI 内容反推窗口尺寸，
+        // 避免约束更新循环。窗口尺寸由 NSWindow 管理（minSize 已设）。
+        hostingView.sizingOptions = []
+        hostingView.frame = NSRect(x: 0, y: 0, width: 960, height: 700)
+        hostingView.autoresizingMask = [.width, .height]
+        window.contentView = hostingView
     }
 
     @available(*, unavailable)

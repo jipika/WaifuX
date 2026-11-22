@@ -46,8 +46,15 @@ actor AnimatedImageProbeCache {
 
     private static let gifSignature = Data("GIF".utf8)
     private static let headerByteCount = 64 * 1024
-    private static let defaultMaxPixelCount = 8_000_000
-    private static let defaultMaxFrameCount = 180
+    /// 可播放 GIF 的统一预算：详情 / 网格 / 库卡片共用同一组值。
+    /// probe 缓存 key 含这三个参数，调用点错开任何一项都会互不命中、重复探测；
+    /// 曾出现详情 18MB/8Mpx/180 帧 vs 网格 32MB/32Mpx/∞ 帧的分裂：
+    /// 同一张大 GIF「网格 hover 会动、详情永远不动」。
+    /// 帧数上限只约束本地/完整响应（ImageIO 全量解析的解码内存保护）；
+    /// 远程 Range 部分响应只验 GIF 头 + 画布像素，不受帧数限制。
+    static let defaultMaxAnimatedGIFBytes: Int64 = 32 * 1024 * 1024
+    static let defaultMaxPixelCount = 32_000_000
+    static let defaultMaxFrameCount = Int.max
 
     private nonisolated static func cacheKey(
         url: URL,
@@ -65,7 +72,7 @@ actor AnimatedImageProbeCache {
     /// - `nil`   → 未探测过，调用方需要走 `isAnimatedGIF(...)` 异步流程。
     nonisolated func cachedIsAnimatedGIF(
         _ url: URL,
-        maxByteCount: Int64,
+        maxByteCount: Int64 = defaultMaxAnimatedGIFBytes,
         maxPixelCount: Int = defaultMaxPixelCount,
         maxFrameCount: Int = defaultMaxFrameCount
     ) -> Bool? {
@@ -78,13 +85,56 @@ actor AnimatedImageProbeCache {
         return Self.memoryCache.object(forKey: key)?.boolValue
     }
 
+    /// 丢弃某 URL 的既有探测结论（详情页「重试」用）：
+    /// 覆盖「CDN 曾以 200 返回错误格式」这类被确定性负缓存记死的情况。
+    nonisolated func invalidate(
+        _ url: URL,
+        maxByteCount: Int64 = defaultMaxAnimatedGIFBytes,
+        maxPixelCount: Int = defaultMaxPixelCount,
+        maxFrameCount: Int = defaultMaxFrameCount
+    ) {
+        let key = Self.cacheKey(
+            url: url,
+            maxByteCount: maxByteCount,
+            maxPixelCount: maxPixelCount,
+            maxFrameCount: maxFrameCount
+        )
+        Self.memoryCache.removeObject(forKey: key)
+    }
+
+    /// 探测结论。网络/IO 瞬态失败与「确认不是 GIF」必须分开：
+    /// 失败结果不得写入负缓存，否则代理抖一次就把该 URL 整个进程生命周期判死。
+    enum ProbeOutcome: Equatable {
+        /// 已确认是可播放 GIF（可缓存）
+        case animatedGIF
+        /// 已确认不是 GIF / 超预算（可缓存）
+        case notAnimated
+        /// 网络/IO 失败或任务取消：结论未知，不缓存，下次访问重试
+        case inconclusive
+    }
+
     /// 不看文件名/后缀，只读取实际图片响应/文件数据判断是否为可安全播放的 GIF。
     func isAnimatedGIF(
         _ url: URL,
-        maxByteCount: Int64,
+        maxByteCount: Int64 = defaultMaxAnimatedGIFBytes,
         maxPixelCount: Int = defaultMaxPixelCount,
         maxFrameCount: Int = defaultMaxFrameCount
     ) async -> Bool {
+        await probeOutcome(
+            url,
+            maxByteCount: maxByteCount,
+            maxPixelCount: maxPixelCount,
+            maxFrameCount: maxFrameCount
+        ) == .animatedGIF
+    }
+
+    /// 三态探测入口：只有确定性结论（是/否）写缓存；瞬态失败返回 `.inconclusive` 且不落缓存。
+    func probeOutcome(
+        _ url: URL,
+        maxByteCount: Int64 = defaultMaxAnimatedGIFBytes,
+        maxPixelCount: Int = defaultMaxPixelCount,
+        maxFrameCount: Int = defaultMaxFrameCount
+    ) async -> ProbeOutcome {
         let key = Self.cacheKey(
             url: url,
             maxByteCount: maxByteCount,
@@ -92,7 +142,7 @@ actor AnimatedImageProbeCache {
             maxFrameCount: maxFrameCount
         )
         if let cached = Self.memoryCache.object(forKey: key)?.boolValue {
-            return cached
+            return cached ? .animatedGIF : .notAnimated
         }
 
         // 并发限制：等待槽位。hover 离开后要能移除排队中的探测，
@@ -103,23 +153,23 @@ actor AnimatedImageProbeCache {
         }, onCancel: {
             Task { await self.cancelProbeWaiter(id: waiterID) }
         })
-        guard acquired else { return false }
+        guard acquired else { return .inconclusive }
         guard !Task.isCancelled else {
             releaseProbeSlot()
-            return false
+            return .inconclusive
         }
 
-        let result: Bool
+        let outcome: ProbeOutcome
         defer { releaseProbeSlot() }
         if url.isFileURL {
-            result = Self.probeLocalGIF(
+            outcome = Self.probeLocalGIF(
                 url,
                 maxByteCount: maxByteCount,
                 maxPixelCount: maxPixelCount,
                 maxFrameCount: maxFrameCount
             )
         } else {
-            result = await Self.probeRemoteGIF(
+            outcome = await Self.probeRemoteGIF(
                 url,
                 maxByteCount: maxByteCount,
                 maxPixelCount: maxPixelCount,
@@ -127,11 +177,11 @@ actor AnimatedImageProbeCache {
             )
         }
 
-        // 取消不是“确认静态图”。快速移开鼠标时不能把取消结果写进负缓存，
-        // 否则下一次 hover 会直接跳过真正的 GIF 探测。
-        guard !Task.isCancelled else { return false }
-        Self.memoryCache.setObject(NSNumber(value: result), forKey: key)
-        return result
+        // 取消/瞬态失败不是“确认静态图”。快速移开鼠标或代理抖一次都不能写负缓存，
+        // 否则下一次 hover / 重开详情会直接跳过真正的 GIF 探测，整个进程内永不动画。
+        guard !Task.isCancelled, outcome != .inconclusive else { return .inconclusive }
+        Self.memoryCache.setObject(NSNumber(value: outcome == .animatedGIF), forKey: key)
+        return outcome
     }
 
     /// 等待一个并发槽位
@@ -170,21 +220,24 @@ actor AnimatedImageProbeCache {
         maxByteCount: Int64,
         maxPixelCount: Int,
         maxFrameCount: Int
-    ) -> Bool {
+    ) -> ProbeOutcome {
+        // 读不到属性/数据多为瞬态 IO（外置卷未挂载、文件正被写入）：不写负缓存。
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let fileSize = attributes[.size] as? NSNumber,
-              fileSize.int64Value <= maxByteCount,
-              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
-              dataLooksLikeGIF(data) else {
-            return false
+              let fileSize = attributes[.size] as? NSNumber else {
+            return .inconclusive
         }
+        guard fileSize.int64Value <= maxByteCount else { return .notAnimated }
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
+            return .inconclusive
+        }
+        guard dataLooksLikeGIF(data) else { return .notAnimated }
 
         return imagePropertiesWithinBudget(
             data,
             maxPixelCount: maxPixelCount,
             maxFrameCount: maxFrameCount,
             requireAnimatedFrameCount: true
-        )
+        ) ? .animatedGIF : .notAnimated
     }
 
     private static func probeRemoteGIF(
@@ -192,7 +245,7 @@ actor AnimatedImageProbeCache {
         maxByteCount: Int64,
         maxPixelCount: Int,
         maxFrameCount: Int
-    ) async -> Bool {
+    ) async -> ProbeOutcome {
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.setValue("bytes=0-\(headerByteCount - 1)", forHTTPHeaderField: "Range")
@@ -212,20 +265,30 @@ actor AnimatedImageProbeCache {
             }
         }
 
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              !data.isEmpty else {
-            return false
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            // 网络瞬态失败（代理 TLS 抖动 / 超时 / 断连）：结论未知，不写负缓存。
+            return .inconclusive
+        }
+        guard !data.isEmpty else { return .inconclusive }
+        // 服务器错误（403 挑战 / 5xx）同样可能是瞬态，不能据此判死「非 GIF」。
+        if let http = response as? HTTPURLResponse,
+           !(200...299).contains(http.statusCode) {
+            return http.statusCode == 404 ? .notAnimated : .inconclusive
         }
         if Int64(data.count) > maxByteCount {
-            return false
+            return .notAnimated
         }
         if let byteCount = estimatedByteCount(from: response), byteCount > maxByteCount {
-            return false
+            return .notAnimated
         }
 
         let mimeType = response.mimeType?.lowercased() ?? ""
         let looksLikeGIF = mimeType.contains("gif") || dataLooksLikeGIF(data)
-        guard looksLikeGIF else { return false }
+        guard looksLikeGIF else { return .notAnimated }
 
         // Range 响应通常只包含 GIF 开头的几十 KB。此时 ImageIO 只能看到首帧，
         // 不能据此判定它是单帧图；否则大 GIF 会被稳定误判为不可播放。
@@ -237,9 +300,10 @@ actor AnimatedImageProbeCache {
                 maxPixelCount: maxPixelCount,
                 maxFrameCount: maxFrameCount,
                 requireAnimatedFrameCount: true
-            )
+            ) ? .animatedGIF : .notAnimated
         }
         return gifHeaderDimensionsWithinBudget(data, maxPixelCount: maxPixelCount)
+            ? .animatedGIF : .notAnimated
     }
 
     private static func dataLooksLikeGIF(_ data: Data) -> Bool {
@@ -979,14 +1043,18 @@ struct KFMediaCoverImage: View {
     var animateOnHoverOnly: Bool = false
     /// 配合 `animateOnHoverOnly`；由卡片 `onHover` / `throttledHover` 传入。
     var isHovered: Bool = false
+    /// 加载失败（非取消）时调用：静帧层失败，或 GIF 动画层失败（此时静帧兜底仍可能可用）。
+    /// 详情页据此提供「重试」入口；列表/网格不传则维持原占位行为。
+    var loadFailed: (() -> Void)? = nil
+    /// 完整成功时调用：静帧成功且未发生动画层失败，或动画层成功。
+    /// 与 `loadFinished`（成功/失败都触发）分开，供详情页清除失败态。
+    var loadSucceeded: (() -> Void)? = nil
 
     @State private var detectedGIF = false
-    @State private var loadFailed = false
-
-    private let maxAnimatedGIFBytes: Int64 = 18 * 1024 * 1024
+    @State private var animatedLoadFailed = false
 
     private var shouldShowStaticLayer: Bool {
-        !detectedGIF || loadFailed
+        !detectedGIF || animatedLoadFailed
     }
 
     private var shouldAnimate: Bool {
@@ -1033,16 +1101,23 @@ struct KFMediaCoverImage: View {
                     .onSuccess { result in
                         if !detectedGIF, result.image.kf.gifRepresentation() != nil {
                             detectedGIF = true
+                        } else if !detectedGIF {
+                            loadSucceeded?()
                         }
                         loadFinished?()
                     }
-                    .onFailure { _ in loadFinished?() }
+                    .onFailure { error in
+                        // 取消（离屏 / 切页）不是失败：不亮重试。
+                        guard !error.isTaskCancelled else { return }
+                        loadFailed?()
+                        loadFinished?()
+                    }
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             }
 
             // 2. 若真实格式为 GIF 且允许动画，叠加 KFAnimatedImage 播放动效
-            if detectedGIF && !loadFailed {
+            if detectedGIF && !animatedLoadFailed {
                 KFAnimatedImage.url(url)
                     .memoryCacheExpiration(.expired)
                     .diskCacheExpiration(.days(3))
@@ -1052,9 +1127,16 @@ struct KFMediaCoverImage: View {
                         configureAnimatedGIFViewForAspectFill(view, autoPlay: shouldAnimate)
                     }
                     .placeholder { _ in underlay }
-                    .onSuccess { _ in loadFinished?() }
-                    .onFailure { _ in
-                        loadFailed = true
+                    .onSuccess { _ in
+                        loadSucceeded?()
+                        loadFinished?()
+                    }
+                    .onFailure { error in
+                        guard !error.isTaskCancelled else { return }
+                        // 动画层失败回退静帧层（shouldShowStaticLayer），同时上报失败
+                        // 让详情页给出重试入口——静帧兜底可能仍是渐变占位。
+                        animatedLoadFailed = true
+                        loadFailed?()
                         loadFinished?()
                     }
                     // 非「仅悬停」模式：仅用 URL 稳定身份。
@@ -1073,20 +1155,20 @@ struct KFMediaCoverImage: View {
         }
         .task(id: url.absoluteString) {
             detectedGIF = false
-            loadFailed = false
+            animatedLoadFailed = false
             // 探针始终运行以检测真实内容是否为 GIF，不依赖 URL 后缀启发式。
             // animated 参数仅用于 shouldAnimate（控制动画播放），不影响检测逻辑。
-            let result = await AnimatedImageProbeCache.shared.isAnimatedGIF(url, maxByteCount: maxAnimatedGIFBytes)
+            let result = await AnimatedImageProbeCache.shared.isAnimatedGIF(url)
             guard !Task.isCancelled else { return }
             detectedGIF = result
         }
         .onReceive(NotificationCenter.default.publisher(for: .appShouldReleaseForegroundMemory)) { _ in
             detectedGIF = false
-            loadFailed = false
+            animatedLoadFailed = false
         }
         .onReceive(NotificationCenter.default.publisher(for: .appDidReceiveMemoryPressure)) { _ in
             detectedGIF = false
-            loadFailed = false
+            animatedLoadFailed = false
         }
     }
 }

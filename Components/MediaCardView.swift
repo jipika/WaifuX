@@ -31,7 +31,7 @@ struct MediaCardView: View, @preconcurrency Equatable {
 
     private let bottomBarHeight: CGFloat = 44
     private let cornerRadius: CGFloat = 16
-    private let maxAnimatedGIFBytes: Int64 = 32 * 1024 * 1024
+    private let maxAnimatedGIFBytes = AnimatedImageProbeCache.defaultMaxAnimatedGIFBytes
 
     static func == (lhs: MediaCardView, rhs: MediaCardView) -> Bool {
         lhs.media.id == rhs.media.id &&

@@ -89,6 +89,7 @@
 		1F21A7ECABA2636B4FC373C1 /* LiquidGlassDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5A6FAAE3D996B466B7354FC /* LiquidGlassDesignSystem.swift */; };
 		1FB9475DD4151BE801BED2FA /* Wallpaper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 220B0056F95AF393DBFDDEBC /* Wallpaper.swift */; };
 		1FC194CB6FE28B96F7756A1F /* SmoothAnimations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62D57CBF90122DC1D11BC1FE /* SmoothAnimations.swift */; };
+		20328638B6F80F235D8153A9 /* AnimeSourceReputationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1648EFFE80E1341B4484E087 /* AnimeSourceReputationStore.swift */; };
 		20581C4C450D384AD19E7F2A /* DesktopWallpaperSyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26E549172081FEBF234C3A56 /* DesktopWallpaperSyncManager.swift */; };
 		20B24F964D7C184424B77E1E /* VideoPosterCacheBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D42F549B0A136EE7D33D641 /* VideoPosterCacheBudget.swift */; };
 		212FEF9422990A482070A473 /* UnixSocketClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB3C0713026606E42DCCE8F9 /* UnixSocketClient.swift */; };
@@ -201,6 +202,7 @@
 		4BF7B91D2CB501146BAA71DD /* WallsflowService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA2FF2BF95D650BD6997B2A /* WallsflowService.swift */; };
 		4C44D0AAD33C35F06931E5E5 /* DynamicWallpaperPosterURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D296AB48EF0C960EBDEDC0F0 /* DynamicWallpaperPosterURLProtocol.swift */; };
 		4C9361204A5D3115434CEB23 /* LiquidGlassMetalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A57F1B7402811BEA53CACDC /* LiquidGlassMetalRenderer.swift */; };
+		4CDB3F7F9FC8586C1EAEF24D /* AnimePlaybackPreflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73F64CEDC6DBC49A2C6BD425 /* AnimePlaybackPreflight.swift */; };
 		4D478D7517E55E55220A10AC /* VideoSourceFrameReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7852831EFE0EC512F651104E /* VideoSourceFrameReadiness.swift */; };
 		4D498AACDA9BC4626A1F8387 /* HeroPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4462B9EB484AA7BCB2E7ADED /* HeroPalette.swift */; };
 		4D920C2F8881C3CA2D824EC3 /* WallpaperEngineAvailability.swift in Sources */ = {isa = PBXBuildFile; fileRef = 625F4264BBAC84F4030D26F1 /* WallpaperEngineAvailability.swift */; };
@@ -550,6 +552,7 @@
 		E7C2A817C1051684A336603E /* RendererComponentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D7A600C4E6E8061C61922EA /* RendererComponentStore.swift */; };
 		E94CC926C75FA43F41FECEFD /* BounceSymbolModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02E3788AB0F9EC18D14604A4 /* BounceSymbolModifier.swift */; };
 		E989D6EC4EC646557E114D01 /* SceneOfflineBakeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F629610BC109E8BDF65491C /* SceneOfflineBakeService.swift */; };
+		E99C1E5241A5EC8E55FA510B /* DirectHLSRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0F3F3FF7048FDC08DA86BE4 /* DirectHLSRelay.swift */; };
 		E9A55AC9BA115A9F9B8DB22C /* we-mpkg-tool-x86_64 in Resources */ = {isa = PBXBuildFile; fileRef = 9497D9AD9E4903E6E46C9C96 /* we-mpkg-tool-x86_64 */; };
 		E9B5A2CFB8630BDB70B9226E /* VideoLoopAnalysisMetalComparator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0439A89A279EE5718DA1AD57 /* VideoLoopAnalysisMetalComparator.swift */; };
 		E9B9B4D21CAB6CBE1DA7F5BC /* WallpaperExtensionAgentHealer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54B454F08F1EDDCF8083FCBB /* WallpaperExtensionAgentHealer.swift */; };
@@ -721,6 +724,7 @@
 		14FCC7E2B2D2C043F74B4102 /* HomeContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeContentView.swift; sourceTree = "<group>"; };
 		15CCEA84D7F64CF643F5E971 /* WallpaperExtensionKeeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperExtensionKeeper.swift; sourceTree = "<group>"; };
 		162DE3A33B89326DEA17F24C /* MediaItem+LocalFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MediaItem+LocalFiles.swift"; sourceTree = "<group>"; };
+		1648EFFE80E1341B4484E087 /* AnimeSourceReputationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeSourceReputationStore.swift; sourceTree = "<group>"; };
 		17B88CC331A0509F08FC5B5F /* BackgroundRuntimeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRuntimeBridge.swift; sourceTree = "<group>"; };
 		1823EAC90BA4264646D4E1D3 /* KonachanService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KonachanService.swift; sourceTree = "<group>"; };
 		185404293E2AF79AC924BE40 /* WallpaperExtensionElection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperExtensionElection.swift; sourceTree = "<group>"; };
@@ -865,6 +869,7 @@
 		71372B83F6B9CC04A2DA24EE /* NativeVideoPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVideoPlayer.swift; sourceTree = "<group>"; };
 		7161F6D026FC623EB6D42B01 /* LiquidGlassClockOverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassClockOverlayManager.swift; sourceTree = "<group>"; };
 		7227160A5C5A1F3036E5B9E1 /* SnapshotCropDrawing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnapshotCropDrawing.swift; sourceTree = "<group>"; };
+		73F64CEDC6DBC49A2C6BD425 /* AnimePlaybackPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimePlaybackPreflight.swift; sourceTree = "<group>"; };
 		747AF5B27704F01082B2C5E4 /* FrameInterpolationMetalInterpolator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameInterpolationMetalInterpolator.swift; sourceTree = "<group>"; };
 		74E772BF3DC1210DCBDCD1B2 /* GuessYouLikeGridCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuessYouLikeGridCell.swift; sourceTree = "<group>"; };
 		7613B3E63CA0792398D3A030 /* AnimeDownloadManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeDownloadManagementView.swift; sourceTree = "<group>"; };
@@ -1028,6 +1033,7 @@
 		DEDFE715B248A8496E3CE357 /* SourceHintIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceHintIcon.swift; sourceTree = "<group>"; };
 		DF90DB2136AE18C3077FA9DD /* DynamicWallpaperAutoPauseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DynamicWallpaperAutoPauseManager.swift; sourceTree = "<group>"; };
 		DFA1B5B4DCE8925AB0A0FCAB /* SpiralRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpiralRecovery.swift; sourceTree = "<group>"; };
+		E0F3F3FF7048FDC08DA86BE4 /* DirectHLSRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectHLSRelay.swift; sourceTree = "<group>"; };
 		E0FCDFCCB46ADEE405357090 /* AnimeGridCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeGridCell.swift; sourceTree = "<group>"; };
 		E13861C6C9277D5A73C9DCF3 /* WallpaperExtensionSocketServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperExtensionSocketServer.swift; sourceTree = "<group>"; };
 		E219ECEDE83361BD4C64D581 /* LoopingVideoBackgroundView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoopingVideoBackgroundView.swift; sourceTree = "<group>"; };
@@ -1302,8 +1308,10 @@
 				B51709E119BA664979BCCA7A /* AnimeFavoriteStore.swift */,
 				F38ED78C067AD44638CFE4A0 /* AnimeFeatureLocalization.swift */,
 				F7DFAADB0F65F41C1AA267F3 /* AnimeParser.swift */,
+				73F64CEDC6DBC49A2C6BD425 /* AnimePlaybackPreflight.swift */,
 				404E1B6C897DB662F6D35134 /* AnimeProgressStore.swift */,
 				85B695679FF6AF35EC8B9B65 /* AnimeRuleStore.swift */,
+				1648EFFE80E1341B4484E087 /* AnimeSourceReputationStore.swift */,
 				EBE51F7E2A19F0AA28E58135 /* AnimeSyncPlayService.swift */,
 				21A497376B55EB752EAE4F33 /* AnimeVideoEnhancer.swift */,
 				3C03424DD49B5B7369F81671 /* AnimeVideoExtractor.swift */,
@@ -1324,6 +1332,7 @@
 				34F29B38A70207EFD930D71B /* DanmakuService.swift */,
 				D154DF41056CBDAB804D79D2 /* DesktopIconManager.swift */,
 				26E549172081FEBF234C3A56 /* DesktopWallpaperSyncManager.swift */,
+				E0F3F3FF7048FDC08DA86BE4 /* DirectHLSRelay.swift */,
 				A71F280593ACA1323B52459B /* DirectoryMigrationService.swift */,
 				60BF2E10795AE5AC074B85C2 /* DisplayCropSettingsStore.swift */,
 				14E3DF54D73DDABA010A0185 /* DownloadPathManager.swift */,
@@ -2215,6 +2224,7 @@
 				D6F0C5F8015EA39514888049 /* AnimeGridCell.swift in Sources */,
 				2D0BC524CE7B3F736A1C413A /* AnimeIntegrationModels.swift in Sources */,
 				41F00B8D505B630076617E4A /* AnimeParser.swift in Sources */,
+				4CDB3F7F9FC8586C1EAEF24D /* AnimePlaybackPreflight.swift in Sources */,
 				E5C14D22CB3F473CAF3579C5 /* AnimePlayerFeatureControls.swift in Sources */,
 				5252C6B4707D39A35AD4EEEF /* AnimePlayerWindow.swift in Sources */,
 				8BD71B61A3E07060DA16E6C0 /* AnimePortraitCard.swift in Sources */,
@@ -2223,6 +2233,7 @@
 				5F1F3FAD775905FF0B8AE77B /* AnimeRuleStore.swift in Sources */,
 				8794AC558B108095E49F0046 /* AnimeRulesMarketView.swift in Sources */,
 				F0CD11A67E854F0FC8892F46 /* AnimeSearchHeuristics.swift in Sources */,
+				20328638B6F80F235D8153A9 /* AnimeSourceReputationStore.swift in Sources */,
 				AE598BBF68EA19A9A01C4B1F /* AnimeSyncPlayService.swift in Sources */,
 				970C96DC00B703BCC1B0D1A4 /* AnimeSyncPlayView.swift in Sources */,
 				CFF0E5F948CE5A59467B7434 /* AnimeVideoEnhancer.swift in Sources */,
@@ -2287,6 +2298,7 @@
 				5AE78FA423D5C48837A6D688 /* DeferredResourceCleanup.swift in Sources */,
 				7A5CA2BA6D3C63B7CB949C6C /* DesktopIconManager.swift in Sources */,
 				7BE02314734DADA1C09E6947 /* DesktopWallpaperSyncManager.swift in Sources */,
+				E99C1E5241A5EC8E55FA510B /* DirectHLSRelay.swift in Sources */,
 				01B60DB90F73D58721413052 /* DirectoryMigrationService.swift in Sources */,
 				DDA9519C500666EFB4DE29D7 /* DisplayCropSettings.swift in Sources */,
 				8F5EC14D5729C2CC77795E76 /* DisplayCropSettingsStore.swift in Sources */,
