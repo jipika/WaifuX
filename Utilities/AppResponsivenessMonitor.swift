@@ -223,7 +223,7 @@ enum AppResponsivenessMonitor {
             }
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
             let callGraphStart = lines.firstIndex { $0.contains("Call graph") } ?? 0
-            let stack = condensedMainThreadStack(Array(lines.dropFirst(callGraphStart)))
+            let stack = condensedMainThreadStack(lines.dropFirst(callGraphStart).map(String.init))
             try? FileManager.default.removeItem(atPath: samplePath)
             AppLogger.error(.ui, "Main thread stall sample", metadata: [
                 "stallMS": String(format: "%.0f", stallMS),
