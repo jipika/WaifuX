@@ -47,6 +47,7 @@ enum AppLogModule: String, CaseIterable {
     case anime       = "Anime"
     case video       = "Video"
     case network     = "Network"
+    case directConnect = "DirectConnect" // 低频、限流的无代理直连诊断
     case storage     = "Storage"
     case startup     = "Startup"
     case performance = "Performance" // 仅限下方合并限频诊断；Release 也保留
@@ -343,7 +344,7 @@ final class AppLogger: @unchecked Sendable {
     }
 
     /// Release 构建里除 `.error` 之外仍然落盘的模块（低频关键链路）。
-    private static let releasePersistedModules: Set<AppLogModule> = [.startup, .performance]
+    private static let releasePersistedModules: Set<AppLogModule> = [.startup, .performance, .directConnect]
 
     /// 等已入队的文件写入全部落盘。只给「写完日志立刻 exit」的路径用
     /// （例如 Helper 拿不到单实例锁）：文件写入走异步队列，不等就退出会丢最后几行。

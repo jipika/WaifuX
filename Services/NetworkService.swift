@@ -238,6 +238,13 @@ actor NetworkService {
         progressHandler: (@Sendable (Double) -> Void)? = nil,
         session: URLSession? = nil
     ) async throws -> Data {
+        // 命中白名单且没有代理/VPN 时直接使用该站点的直连传输；
+        // 有代理或不适用直连时，沿用原会话，不先试直连。
+        if progressHandler == nil, session == nil,
+           DirectConnectPolicy.strategy(for: request) != .none,
+           let directResponse = try await DirectConnectRouter.shared.attempt(request: request) {
+            return directResponse.body
+        }
         let session = session ?? self.session
 
         if let progressHandler {
@@ -278,23 +285,17 @@ actor NetworkService {
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            // Cloudflare 挑战页检测（响应头或响应体）
-            let statusCode = httpResponse.statusCode
-            if statusCode == 403 || statusCode == 503 {
-                let cfMitigated = httpResponse.value(forHTTPHeaderField: "cf-mitigated")?.lowercased()
+            let status = httpResponse.statusCode
+            if status == 403 || status == 503 {
+                let mitigation = httpResponse.value(forHTTPHeaderField: "cf-mitigated")?.lowercased()
                 let server = httpResponse.value(forHTTPHeaderField: "server")?.lowercased() ?? ""
-                let isCloudflare = server.contains("cloudflare") || cfMitigated == "challenge"
-                let bodyHintsCF: Bool = {
-                    guard let text = String(data: data.prefix(2048), encoding: .utf8) else { return false }
-                    return text.contains("Just a moment") || text.contains("challenges.cloudflare")
-                }()
-                if isCloudflare || bodyHintsCF {
-                    throw NetworkError.loginRequired(
-                        message: LocalizationService.shared.t("请求被 Cloudflare 反爬拦截。请在「设置 → 代理」启用 VPN/代理后重试。")
-                    )
+                let body = String(data: data.prefix(2048), encoding: .utf8) ?? ""
+                if mitigation == "challenge" || server.contains("cloudflare") ||
+                    body.contains("Just a moment") || body.contains("challenges.cloudflare") {
+                    throw NetworkError.loginRequired(message: NetworkError.cloudflareBlockedMessage)
                 }
             }
-            throw NetworkError.httpError(statusCode)
+            throw NetworkError.httpError(status)
         }
 
         return data
@@ -397,6 +398,9 @@ actor NetworkService {
             do {
                 let result = try await operation(attempt)
                 return result
+            } catch let terminal as DirectConnectRouter.Terminal {
+                // A direct request has already used its retry budget. Preserve the public error type.
+                throw terminal.underlying
             } catch {
                 lastError = error
 

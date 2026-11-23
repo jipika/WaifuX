@@ -22,6 +22,7 @@ final class DynamicWallpaperPosterURLProtocol: URLProtocol, @unchecked Sendable 
     private struct LoadContext: @unchecked Sendable {
         let client: URLProtocolClient?
         let url: URL
+        let proto: URLProtocol
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -49,7 +50,8 @@ final class DynamicWallpaperPosterURLProtocol: URLProtocol, @unchecked Sendable 
 
         // 抽帧要跨并发域执行：URLProtocolClient 不是 Sendable，先包成上下文再进 Task，
         // 闭包只捕获 Sendable 值（Swift 6 严格并发下不触碰 self 的隔离状态）。
-        let context = LoadContext(client: client, url: url)
+        // self 也包进上下文：避免 @Sendable 闭包隐式捕获非 Sendable 的隔离 self。
+        let context = LoadContext(client: client, url: url, proto: self)
 
         activeTask = Task { [context] in
             do {
@@ -69,12 +71,12 @@ final class DynamicWallpaperPosterURLProtocol: URLProtocol, @unchecked Sendable 
                     expectedContentLength: data.count,
                     textEncodingName: nil
                 )
-                context.client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .allowed)
-                context.client?.urlProtocol(self, didLoad: data)
-                context.client?.urlProtocolDidFinishLoading(self)
+                context.client?.urlProtocol(context.proto, didReceive: response, cacheStoragePolicy: .allowed)
+                context.client?.urlProtocol(context.proto, didLoad: data)
+                context.client?.urlProtocolDidFinishLoading(context.proto)
             } catch {
                 guard !Task.isCancelled else { return }
-                context.client?.urlProtocol(self, didFailWithError: error)
+                context.client?.urlProtocol(context.proto, didFailWithError: error)
             }
         }
     }

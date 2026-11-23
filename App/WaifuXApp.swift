@@ -394,7 +394,8 @@ struct WaifuXApp {
         // `DynamicWallpaperPosterService` 的本地抽帧结果（Range 取片 + AVFoundation）。
         configuration.protocolClasses = [
             DynamicWallpaperPosterURLProtocol.self,
-            WallsflowDirectURLProtocol.self
+            WallsflowDirectURLProtocol.self,
+            DirectConnectURLProtocol.self
         ] + (configuration.protocolClasses ?? [])
         downloader.sessionConfiguration = configuration
         downloader.downloadTimeout = 60.0

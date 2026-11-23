@@ -437,6 +437,7 @@ targets:
       - path: Services/CurrentWallpaperService.swift
       - path: Services/UserLibrary.swift
       - path: Services/DSHHarnessBridge.swift
+      - path: Services/DirectConnect
       - path: Services/DesktopIconManager.swift
       - path: Services/DirectoryMigrationService.swift
       - path: Services/DesktopWallpaperSyncManager.swift
