@@ -118,8 +118,8 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.158
-        CURRENT_PROJECT_VERSION: 38.0.158
+        MARKETING_VERSION: 38.0.159
+        CURRENT_PROJECT_VERSION: 38.0.159
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"
         CODE_SIGN_STYLE: Automatic
@@ -566,8 +566,8 @@ targets:
       base:
         PRODUCT_NAME: WaifuXHelper
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.helper
-        MARKETING_VERSION: 38.0.158
-        CURRENT_PROJECT_VERSION: 38.0.158
+        MARKETING_VERSION: 38.0.159
+        CURRENT_PROJECT_VERSION: 38.0.159
         SWIFT_VERSION: "6.0"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WAIFUX_HELPER
         OTHER_LDFLAGS: $(inherited) $(SRCROOT)/Resources/zip_data.o $(SRCROOT)/Resources/zip_accessor.o
@@ -596,8 +596,8 @@ targets:
       base:
         PRODUCT_NAME: WaifuXWallpaperExtension
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.wallpaperextension
-        MARKETING_VERSION: 38.0.158
-        CURRENT_PROJECT_VERSION: 38.0.158
+        MARKETING_VERSION: 38.0.159
+        CURRENT_PROJECT_VERSION: 38.0.159
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"
         CODE_SIGN_STYLE: Automatic
@@ -629,8 +629,8 @@ targets:
       base:
         PRODUCT_NAME: WaifuXScreenSaver
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.screensaver
-        MARKETING_VERSION: 38.0.158
-        CURRENT_PROJECT_VERSION: 38.0.158
+        MARKETING_VERSION: 38.0.159
+        CURRENT_PROJECT_VERSION: 38.0.159
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.4"
         CODE_SIGN_STYLE: Automatic
