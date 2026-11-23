@@ -248,11 +248,19 @@ private final class MainTabViewController: NSTabViewController {
                 if selectedTabViewItemIndex != homeIndex {
                     swapTabItems(from: selectedTabViewItemIndex, to: homeIndex)
                     selectedTabViewItemIndex = homeIndex
+                } else {
+                    mountPageIfNeeded(at: homeIndex)
                 }
             }
             return
         }
-        guard selectedTabViewItemIndex != targetIndex else { return }
+        guard selectedTabViewItemIndex != targetIndex else {
+            // NSTabView 添加 item 后默认选中 index 0：select(.home) 同 index 早退
+            // 会让占位视图永远没被真实宿主替换，首页黑屏；后台收回主窗口重建
+            // contentView 也走这条路（15 实机：切别的 tab 再切回才显示）。
+            mountPageIfNeeded(at: targetIndex)
+            return
+        }
         let previousIndex = selectedTabViewItemIndex
         // #130/#132/#133 分步调试：AppKit 页面替换前后各打一条，
         // 若 2a 有而 2b 没有，说明 NSTabView 替换过程本身挂死。
@@ -297,6 +305,24 @@ private final class MainTabViewController: NSTabViewController {
         pageControllers.append(hostingController)
         pageHostingViews.append(hostingView)
         addTabViewItem(item)
+    }
+
+    /// 选中 index 未变时兜底：item 仍持占位视图就把真实宿主挂上。
+    /// NSTabView 不会重读已选中 item 的 view，需手动替换当前显示的子视图。
+    private func mountPageIfNeeded(at index: Int) {
+        let items = tabView.tabViewItems
+        guard pageHostingViews.count == items.count, items.indices.contains(index) else { return }
+        let hostingView = pageHostingViews[index]
+        guard items[index].view !== hostingView else { return }
+        AppLogger.throttled(.error, .general, key: "tabtrace.mount.fallback", interval: 2,
+            "[TabTrace] 2c.mount fallback | index=\(index)")
+        hostingView.frame = tabView.bounds
+        hostingView.autoresizingMask = [.width, .height]
+        let placeholder = items[index].view
+        items[index].view = hostingView
+        if let placeholder, placeholder.superview === tabView {
+            tabView.replaceSubview(placeholder, with: hostingView)
+        }
     }
 
     /// 切换前把旧页宿主摘回 controller、新页宿主挂上 item。
