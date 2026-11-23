@@ -1714,23 +1714,17 @@ private struct HomeSectionSeeAllButton: View {
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .liquidGlassSurface(
-                        .regular,
-                        tint: Color.white.opacity(isHovered ? 0.12 : 0.04),
-                        in: Circle(),
-                        lightweight: true
-                    )
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(isHovered ? .white : .white.opacity(0.54))
-            }
-            .frame(width: 22, height: 22)
-            // Keep the larger hit target while keeping the visual control compact.
-            .frame(width: 36, height: 36)
-            .contentShape(Rectangle())
+            Image(systemName: "chevron.right")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(isHovered ? .white : .white.opacity(0.54))
+                .frame(width: 22, height: 22)
+                .detailGlassCircleChrome(
+                    tint: homeHeroGlassTint(isHovered: isHovered),
+                    level: .max
+                )
+                // Keep the larger hit target while keeping the visual control compact.
+                .frame(width: 36, height: 36)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
