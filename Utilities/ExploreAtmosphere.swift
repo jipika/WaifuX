@@ -1052,6 +1052,15 @@ struct KFMediaCoverImage: View {
 
     @State private var detectedGIF = false
     @State private var animatedLoadFailed = false
+    /// 取消/瞬态失败后的自动重试代次：KFImage binder 在 cancelOnDisappear 取消后
+    /// 不会自发重启（placeholder 的 onAppear 不会再次触发），必须换 id 重建。
+    @State private var loadRetryEpoch = 0
+    @State private var loadRetryTask: Task<Void, Never>?
+    @State private var loadRetryCount = 0
+    /// 任一层已成功解码：阻止「重建→旧 binder 取消→再重试」自喂养环。
+    @State private var anyLayerLoaded = false
+    /// 内存复位后的补探测任务：换 URL / 离屏时取消，防旧结论写回新 URL。
+    @State private var reprobeTask: Task<Void, Never>?
 
     private var shouldShowStaticLayer: Bool {
         !detectedGIF || animatedLoadFailed
@@ -1065,13 +1074,12 @@ struct KFMediaCoverImage: View {
         return isVisible
     }
 
-    /// `KFAnimatedImage` 的 `configure` 在 SwiftUI 更新时不一定会同步到已有 NSView；仅悬停播放时让 `id` 随悬停变化以强制重建并应用 `autoPlayAnimatedImage`。
+    /// `KFAnimatedImage` 的 `configure` 只在 makeNSView 跑一次，且 `autoPlayAnimatedImage`
+    /// 是无 didSet 的普通属性：建视图时算出的播放开关定终身。把最终播放决策纳入 `id`，
+    /// 开关变化（悬停进出 / 宿主活跃翻转 / 可见性变化）强制重建以应用新值。
+    /// 仅悬停模式下 shouldAnimate 已含 isHovered，统一覆盖旧 hover 专用 id。
     private var kfAnimatedLayerIdentity: String {
-        if animateOnHoverOnly {
-            "\(url.absoluteString)|hover:\(isHovered)"
-        } else {
-            url.absoluteString
-        }
+        "\(url.absoluteString)|play:\(shouldAnimate)"
     }
 
     private var underlay: some View {
@@ -1087,6 +1095,9 @@ struct KFMediaCoverImage: View {
     }
 
     var body: some View {
+        // 闭包捕获本代次：被重建替换的旧 binder 的取消回调不再触发重试，
+        // 否则「重建→旧 binder 取消→再重建」自喂养，冷缓存下载永远跑不完。
+        let retryEpoch = loadRetryEpoch
         let core = ZStack {
             underlay
             // 静态层只负责非 GIF 或动画加载失败的封面；确认 GIF 后释放，避免静态图和动画层长期双持有。
@@ -1099,6 +1110,8 @@ struct KFMediaCoverImage: View {
                     .fade(duration: fadeDuration)
                     .placeholder { _ in underlay }
                     .onSuccess { result in
+                        anyLayerLoaded = true
+                        loadRetryCount = 0
                         if !detectedGIF, result.image.kf.gifRepresentation() != nil {
                             detectedGIF = true
                         } else if !detectedGIF {
@@ -1107,13 +1120,21 @@ struct KFMediaCoverImage: View {
                         loadFinished?()
                     }
                     .onFailure { error in
-                        // 取消（离屏 / 切页）不是失败：不亮重试。
-                        guard !error.isTaskCancelled else { return }
+                        // 取消（离屏 / 切页 / 同 URL 下载被其它消费者掐断）不是失败：
+                        // 不亮重试，但短暂延迟后换 id 重建 binder 自动续载。
+                        // KFImage 的 placeholder onAppear 取消后不会再触发，
+                        // 不重建就永远停在渐变占位（详情背景「半天加载不出来」）。
+                        if error.isTaskCancelled {
+                            scheduleLoadRetry(forEpoch: retryEpoch)
+                            return
+                        }
                         loadFailed?()
                         loadFinished?()
                     }
                     .resizable()
                     .aspectRatio(contentMode: .fill)
+                    // 重试代次参与身份：取消后重建 binder 才会重新发起加载。
+                    .id(retryEpoch)
             }
 
             // 2. 若真实格式为 GIF 且允许动画，叠加 KFAnimatedImage 播放动效
@@ -1128,20 +1149,26 @@ struct KFMediaCoverImage: View {
                     }
                     .placeholder { _ in underlay }
                     .onSuccess { _ in
+                        anyLayerLoaded = true
+                        loadRetryCount = 0
                         loadSucceeded?()
                         loadFinished?()
                     }
                     .onFailure { error in
-                        guard !error.isTaskCancelled else { return }
+                        if error.isTaskCancelled {
+                            // 同静帧层：被掐断的动画层下载也要续载，否则定格/空底。
+                            scheduleLoadRetry(forEpoch: retryEpoch)
+                            return
+                        }
                         // 动画层失败回退静帧层（shouldShowStaticLayer），同时上报失败
                         // 让详情页给出重试入口——静帧兜底可能仍是渐变占位。
                         animatedLoadFailed = true
                         loadFailed?()
                         loadFinished?()
                     }
-                    // 非「仅悬停」模式：仅用 URL 稳定身份。
-                    // 「仅悬停」模式：`id` 必须随 `isHovered` 变化，否则 AppKit 侧不会响应 `autoPlayAnimatedImage` 切换。
-                    .id(kfAnimatedLayerIdentity)
+                    // id 随最终播放决策变化：AppKit 侧不会响应已建视图的 `autoPlayAnimatedImage` 更新。
+                    // 重试代次同样参与：取消后重建才会重新下载。
+                    .id("\(kfAnimatedLayerIdentity)|retry:\(retryEpoch)")
                     .aspectRatio(contentMode: .fill)
             }
         }
@@ -1154,6 +1181,13 @@ struct KFMediaCoverImage: View {
             }
         }
         .task(id: url.absoluteString) {
+            loadRetryTask?.cancel()
+            loadRetryTask = nil
+            reprobeTask?.cancel()
+            reprobeTask = nil
+            loadRetryEpoch = 0
+            loadRetryCount = 0
+            anyLayerLoaded = false
             detectedGIF = false
             animatedLoadFailed = false
             // 探针始终运行以检测真实内容是否为 GIF，不依赖 URL 后缀启发式。
@@ -1162,13 +1196,63 @@ struct KFMediaCoverImage: View {
             guard !Task.isCancelled else { return }
             detectedGIF = result
         }
+        .onDisappear {
+            loadRetryTask?.cancel()
+            loadRetryTask = nil
+            reprobeTask?.cancel()
+            reprobeTask = nil
+        }
+        // 内存释放 / 内存压力复位 detectedGIF 后必须重新探测：
+        // .task(id: url) 不重跑，探针结论丢了就永远停在静帧。
         .onReceive(NotificationCenter.default.publisher(for: .appShouldReleaseForegroundMemory)) { _ in
-            detectedGIF = false
-            animatedLoadFailed = false
+            resetAndReprobe()
         }
         .onReceive(NotificationCenter.default.publisher(for: .appDidReceiveMemoryPressure)) { _ in
-            detectedGIF = false
-            animatedLoadFailed = false
+            resetAndReprobe()
+        }
+    }
+
+    private func resetAndReprobe() {
+        loadRetryTask?.cancel()
+        loadRetryTask = nil
+        reprobeTask?.cancel()
+        loadRetryEpoch = 0
+        loadRetryCount = 0
+        anyLayerLoaded = false
+        detectedGIF = false
+        animatedLoadFailed = false
+        let target = url
+        reprobeTask = Task { @MainActor in
+            let result = await AnimatedImageProbeCache.shared.isAnimatedGIF(target)
+            guard !Task.isCancelled else { return }
+            detectedGIF = result
+        }
+    }
+
+    /// 下载被取消（同 URL 的其它消费者掐断了共享 URLSession 任务 / 离屏取消）后，
+    /// 短暂延迟换 id 重建两层 binder 续载。KF 的 placeholder onAppear 在取消后
+    /// 不会再次触发，不重建就永远停在渐变占位。
+    /// 防环：任一层已成功不再重试；连续取消最多 3 次；离屏 / 换 URL 取消排队。
+    private func scheduleLoadRetry(forEpoch epoch: Int) {
+        // 旧代 binder（已被重建替换）的取消不算数，防自喂养环。
+        guard epoch == loadRetryEpoch else { return }
+        guard !anyLayerLoaded else { return }
+        guard loadRetryCount < 3 else {
+            // 连续被掐断 3 次：不再自动重建，亮手动重试入口兜底。
+            loadFailed?()
+            loadFinished?()
+            return
+        }
+        guard loadRetryTask == nil else { return }
+        loadRetryCount += 1
+        loadRetryTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            // 睡眠期间被换 URL / 离屏取消时 task 已被置 nil；仍持有旧句柄说明没人清理，
+            // 这里兜底释放，避免后续取消分支被「已有排队」guard 永久挡住。
+            loadRetryTask = nil
+            guard !anyLayerLoaded, loadRetryEpoch == epoch else { return }
+            loadRetryEpoch &+= 1
         }
     }
 }

@@ -1170,12 +1170,14 @@ struct MediaDetailSheet: View {
         return max(min(viewportHeight * 0.58, 520), 420)
     }
 
-    /// 「加载失败 · 重试」：丢弃探测负缓存 → 跳过 Kingfisher 缓存 → 重建背景视图。
-    /// 三步缺一不可：负缓存会让 GIF 判定直接短路；同 key 缓存命中会复用失败前的旧数据源；
-    /// 背景 id 不变则 KFImage binder 停在 failure 态不会自发重载。
+    /// 「加载失败 · 重试」：丢弃探测负缓存 → 重建背景视图。
+    /// 负缓存会让 GIF 判定直接短路；背景 id 不变则 KFImage binder 停在 failure 态不会自发重载。
+    /// 不 forceRefresh：磁盘缓存里可能有上次会话下完的完整数据，跳过它反而每次重试都重下。
     private func retryBackgroundLoad() {
         AnimatedImageProbeCache.shared.invalidate(heroImageURL)
-        coverForceRefresh = true
+        // forceRefresh 会跳过 KF 磁盘缓存：上次会话已完整落盘的 GIF 也应秒开，
+        // 重试只需丢探测负缓存 + 重建 binder，不必重新下载。
+        coverForceRefresh = false
         withAnimation(.easeInOut(duration: 0.25)) {
             backgroundLoadFailed = false
         }

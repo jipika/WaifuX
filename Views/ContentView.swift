@@ -630,6 +630,10 @@ struct ContentView: View {
                             detailDestination(for: route)
                         }
                 }
+                // 详情是 tab 容器的兄弟节点，不吃 TabPage 注入的「!isShowingDetail」开关：
+                // 那个开关本意停底下网格，详情自身必须恒可播，否则打开瞬间的翻转竞态
+                // 会把动画层建在 autoPlay=false 上、永久定格首帧。
+                .environment(\.coverGIFPlaybackHostActive, true)
                 .id(detailNavigationStackID)
                 .opacity(detailPath.isEmpty ? 0 : 1)
                 .allowsHitTesting(!detailPath.isEmpty)
