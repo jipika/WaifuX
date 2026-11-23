@@ -656,6 +656,8 @@ private struct TopBarSegmentedControl: View {
             // 仅显示启动快照启用的 tab（home/myMedia 永远显示；三个 Explore 受功能模块开关门控）
             ForEach(MainTab.allCases.filter { ModuleAvailability.shared.isTabEnabled($0) }, id: \.self) { tab in
                 Button {
+                    AppLogger.throttled(.error, .general, key: "tabtrace.topbar.click.\(tab.rawValue)", interval: 2,
+                        "[TabTrace] 0.topbar click | tab=\(tab.rawValue)")
                     selectedTab = tab
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
                         highlightedTab = tab

@@ -110,8 +110,19 @@ final class LibraryFolderTransitionView: NSView {
             finishTransition()
             viewportSize = bounds.size
         }
-        liveContainer.frame = bounds
-        hostingView.frame = liveContainer.bounds
+        // #130/#132/#133：只在 frame 真正变化时才赋值。无条件赋值会在稳态布局里
+        // 反复触发内嵌 NSHostingView 重渲染；SwiftUI 渲染时回写平台视图几何/环境
+        // （setFrameOrigin→tracking areas dirty、adoptEnvironment→NSButtonCell
+        // invalidateResolvedButtonStyle）又把外层窗口约束标脏，形成
+        // 「layout→render→mark dirty→layout」自喂养环，最终撞 AppKit
+        // 「Update Constraints pass 数不得超过视图数」上限（15.x 实机栈证实）。
+        if liveContainer.frame != bounds {
+            liveContainer.frame = bounds
+        }
+        let hostFrame = liveContainer.bounds
+        if hostingView.frame != hostFrame {
+            hostingView.frame = hostFrame
+        }
     }
 
     override func viewDidMoveToWindow() {

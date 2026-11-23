@@ -631,10 +631,14 @@ struct MyLibraryContentView: View {
             // 每次出现都确保本地索引可用（缓存温热时是 no-op；失效时会重建并
             // 经 libraryContentRevision → debouncedUpdate 刷新网格）。
             let loadStart = Date()
+            AppLogger.throttled(.error, .general, key: "tabtrace.library.task.start", interval: 2,
+                "[TabTrace] 3a.library task start | placeholder=\(libraryFirstLoadPlaceholderVisible ? 1 : 0) bootstrapped=\(didBootstrapLibraryGrid ? 1 : 0)")
             async let wallpaperIndex: Void = viewModel.ensureLocalWallpaperIndex()
             async let mediaIndex: Void = mediaViewModel.ensureLocalMediaIndex()
             _ = await (wallpaperIndex, mediaIndex)
             let indexReady = Date()
+            AppLogger.throttled(.error, .general, key: "tabtrace.library.index.ready", interval: 2,
+                "[TabTrace] 3b.library index ready | ms=\(Int(indexReady.timeIntervalSince(loadStart) * 1000))")
 
             // 引导加载只跑一次：详情往返的 re-appear 跳过全量 update 与
             // initialLoad，避免返回时封面整网格重载。
@@ -649,6 +653,8 @@ struct MyLibraryContentView: View {
             // 避免媒体库 250 条（220 个 WE 目录）与壁纸 995 条同时做全量派生。
             rebuildCurrentLibraryLists(reason: "initial-bootstrap")
             let itemsReady = Date()
+            AppLogger.throttled(.error, .general, key: "tabtrace.library.lists.built", interval: 2,
+                "[TabTrace] 3c.library lists built | ms=\(Int(itemsReady.timeIntervalSince(indexReady) * 1000))")
 
             async let initialLoad: Void = viewModel.initialLoad()
             async let animeFavoritesLoad: Void = loadAnimeFavorites()
@@ -662,6 +668,8 @@ struct MyLibraryContentView: View {
             // 此后才等待网络初始化，且这段耗时绝不反向遮住本地库。
             libraryFirstLoadPlaceholderVisible = false
             let localReady = Date()
+            AppLogger.throttled(.error, .general, key: "tabtrace.library.local.ready", interval: 2,
+                "[TabTrace] 3d.library local ready | ms=\(Int(localReady.timeIntervalSince(loadStart) * 1000)) snapshot=\(helper.librarySnapshotIsArrived ? 1 : 0) connected=\(helper.isConnected ? 1 : 0)")
             AppLogger.info(.startup, "[LibraryLoad] 本地库首屏已放行", metadata: [
                 "indexMS": Int(indexReady.timeIntervalSince(loadStart) * 1000),
                 "itemsMS": Int(itemsReady.timeIntervalSince(indexReady) * 1000),
@@ -685,6 +693,8 @@ struct MyLibraryContentView: View {
             ])
         }
         .onAppear {
+            AppLogger.throttled(.error, .general, key: "tabtrace.library.onappear", interval: 2,
+                "[TabTrace] 3.library onAppear | placeholder=\(libraryGridPlaceholderVisible ? 1 : 0) typeLoaded=\(libraryCurrentTypeIsLoaded ? 1 : 0) snapshot=\(helper.librarySnapshotIsArrived ? 1 : 0) connected=\(helper.isConnected ? 1 : 0) requiresApproval=\(helper.requiresApproval ? 1 : 0)")
             startLibrarySnapshotFetchIfPending()
             restoreLastLibraryPageIfNeeded()
             // ✅ 从详情返回时触发 ScrollView 滚动位置恢复
@@ -1962,6 +1972,7 @@ struct MyLibraryContentView: View {
     }
 
     private func updateWallpaperItems() {
+        let updateStart = Date()
         librarySearchTask?.cancel()
         librarySearchGeneration &+= 1
         lastWallpaperPrefetchBucket = nil
@@ -2024,6 +2035,8 @@ struct MyLibraryContentView: View {
         }
         syncSelectionWithVisibleItems()
         scheduleLibraryCoverBackfillIfNeeded()
+        AppLogger.throttled(.error, .general, key: "tabtrace.library.updateWallpaperItems", interval: 2,
+            "[TabTrace] 4.updateWallpaperItems | ms=\(Int(Date().timeIntervalSince(updateStart) * 1000)) items=\(wallpaperItems.count) folders=\(currentWallpaperFolders.count) built=\(libraryCurrentPageIsBuilt ? 1 : 0)")
     }
 
     private var orderedWallpaperGridItems: [LibraryGridEntry<AnyWallpaperItem>] {
@@ -2103,6 +2116,7 @@ struct MyLibraryContentView: View {
     }
 
     private func updateMediaItems() {
+        let updateStart = Date()
         librarySearchTask?.cancel()
         librarySearchGeneration &+= 1
         lastMediaPrefetchBucket = nil
@@ -2155,6 +2169,8 @@ struct MyLibraryContentView: View {
         }
         syncSelectionWithVisibleItems()
         scheduleLibraryCoverBackfillIfNeeded()
+        AppLogger.throttled(.error, .general, key: "tabtrace.library.updateMediaItems", interval: 2,
+            "[TabTrace] 4.updateMediaItems | ms=\(Int(Date().timeIntervalSince(updateStart) * 1000)) items=\(mediaItems.count) folders=\(currentMediaFolders.count) built=\(libraryCurrentPageIsBuilt ? 1 : 0)")
     }
 
     private var orderedMediaGridItems: [LibraryGridEntry<AnyMediaItem>] {

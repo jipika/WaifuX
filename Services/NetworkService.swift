@@ -47,8 +47,13 @@ actor NetworkService {
         config.httpShouldSetCookies = true
         // 允许蜂窝网络访问
         config.allowsCellularAccess = true
-        // 等待网络连接
-        config.waitsForConnectivity = true
+        // #130/#132/#133：不等待连通性。waitsForConnectivity=true 时，源站不可达
+        // （如 VM/弱网下 api.bgm.tv 超时）URLSession 会无限期等待网络恢复，
+        // **不遵守 request.timeoutInterval**，动漫等列表页 loadInitialData 永不
+        // resolve，加载转圈永久卡住（用户报告「点击卡死」，实机日志 heartbeat
+        // unchanged ≥15m 而主 runloop 仍活着）。改为 false：请求按各自 timeout
+        // 失败 → 上层显示错误态可重试，不再永久转圈。
+        config.waitsForConnectivity = false
         // 启用后台会话
         config.isDiscretionary = false
         if let host = proxy?.host, let port = proxy?.port {

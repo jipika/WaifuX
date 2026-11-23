@@ -183,7 +183,41 @@ enum AppExitDiagnostics {
     }
 }
 
-final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
+/// #130/#132/#133：macOS 15 约束自喂养环隔离层。
+/// 15.x 上 SwiftUI 在窗口约束 pass 内提交状态（ViewGraph.beginNextUpdate→
+/// graphDidChange→NSHostingView.setNeedsUpdateConstraints），把窗口再次标脏，
+/// 同一 display cycle 内 pass 数超过视图数抛 NSGenericException（15.4.1 实机栈）。
+/// 这里在窗口布局 pass 期间阻断 hosting view 向窗口传播 needsUpdateConstraints
+/// （hosting view 自身仍由 autoresizing/frame 正常布局，功能不受影响）；
+/// pass 之外的标记照常传播，下一轮 display cycle 正常渲染。
+enum LayoutLoopGuardState {
+    /// 窗口约束 pass 深度（AppKit 布局只在主线程，串行访问）。
+    fileprivate nonisolated(unsafe) static var layoutPassDepth = 0
+    fileprivate nonisolated(unsafe) static var suppressedMarks = 0
+}
+
+class LayoutLoopGuardHostingView<Content: View>: NSHostingView<Content> {
+    override func updateConstraints() {
+        LayoutLoopGuardState.layoutPassDepth += 1
+        super.updateConstraints()
+        LayoutLoopGuardState.layoutPassDepth -= 1
+    }
+
+    override var needsUpdateConstraints: Bool {
+        get { super.needsUpdateConstraints }
+        set {
+            if newValue && LayoutLoopGuardState.layoutPassDepth > 0 {
+                LayoutLoopGuardState.suppressedMarks += 1
+                AppLogger.throttled(.error, .general, key: "layoutloop.suppress", interval: 10,
+                    "[LayoutLoop] suppressed in-pass constraint mark #\(LayoutLoopGuardState.suppressedMarks)")
+                return
+            }
+            super.needsUpdateConstraints = newValue
+        }
+    }
+}
+
+final class EdgeToEdgeHostingView<Content: View>: LayoutLoopGuardHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
 
     /// macOS 15+ (Sequoia) 的 Liquid Glass 改变了 safe area 行为，
@@ -461,7 +495,7 @@ struct WaifuXApp {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcurrency SPUStandardUserDriverDelegate, @preconcurrency SPUUpdaterDelegate {
-    var window: NSWindow?
+    var window: ScreenClampedWindow?
     // ⚠️ 延迟初始化 SettingsViewModel，不在 AppDelegate 属性初始化阶段创建
     // 避免其 @Published didSet 在 applicationDidFinishLaunching 之前写 UserDefaults
     private var settingsViewModel: SettingsViewModel?
@@ -492,8 +526,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     lazy var animeViewModel = AnimeViewModel()
 
     // MARK: - 窗口尺寸（唯一真实来源，全局统一）
-    /// 最小允许的窗口大小
+    /// 期望的最小窗口大小。实际最小值会被屏幕可用区封顶：
+    /// 小屏（如 1024×675 虚拟机、1280×800 缩放档）上把最小值钉在 1150×720
+    /// 会让窗口比屏幕可见区还大，AppKit 的「缩回屏幕」与最小尺寸约束互相拉扯，
+    /// 是 macOS 15「Update Constraints pass 数超过视图数」自喂养环的触发器之一。
     private static let minimumWindowSize = NSSize(width: 1150, height: 720)
+
+    /// 指定屏幕上的有效最小窗口尺寸（永不超过该屏可用区）。
+    private static func effectiveMinimumWindowSize(for screen: NSScreen?) -> NSSize {
+        guard let available = screen?.visibleFrame.size else { return minimumWindowSize }
+        return NSSize(
+            width: min(minimumWindowSize.width, floor(available.width)),
+            height: min(minimumWindowSize.height, floor(available.height))
+        )
+    }
 
     /// 默认窗口大小：根据屏幕尺寸动态计算（首次启动或无保存状态时使用）
     private static var defaultWindowSize: NSSize {
@@ -502,10 +548,46 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             return NSSize(width: 1400, height: 880) // 兜底值
         }
         let available = screen.visibleFrame
-        // 取屏幕可用区域的 ~78% 宽度，~92% 高度，给首页轮播和内容区留足空间
-        let width = max(minimumWindowSize.width, floor(available.width * 0.78))
-        let height = max(minimumWindowSize.height, floor(available.height * 0.92))
+        let minimum = effectiveMinimumWindowSize(for: screen)
+        // 取屏幕可用区域的 ~78% 宽度，~92% 高度，给首页轮播和内容区留足空间；
+        // 结果同样不超过可用区，避免默认尺寸就把窗口顶出屏幕。
+        let width = min(floor(available.width), max(minimum.width, floor(available.width * 0.78)))
+        let height = min(floor(available.height), max(minimum.height, floor(available.height * 0.92)))
         return NSSize(width: width, height: height)
+    }
+
+    /// 把主窗口收敛到当前屏幕可用区内，并按该屏重设最小尺寸。
+    /// 屏幕参数变化（分辨率切换/外接屏插拔）与恢复历史保存帧后调用；
+    /// 历史帧可能是在更大屏幕上保存的，直接恢复会再次制造「窗口大于屏幕」。
+    @MainActor
+    private func clampMainWindowToScreen() {
+        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        let available = screen.visibleFrame
+        let effectiveMin = Self.effectiveMinimumWindowSize(for: screen)
+        if window.contentMinSize != effectiveMin {
+            window.contentMinSize = effectiveMin
+        }
+        var frame = window.frame
+        let clampedWidth = min(frame.width, available.width)
+        let clampedHeight = min(frame.height, available.height)
+        var clamped = false
+        if frame.width != clampedWidth || frame.height != clampedHeight {
+            frame.size = NSSize(width: clampedWidth, height: clampedHeight)
+            clamped = true
+        }
+        if frame.minX < available.minX || frame.maxX > available.maxX {
+            frame.origin.x = available.minX + max(0, (available.width - frame.width) / 2)
+            clamped = true
+        }
+        if frame.minY < available.minY || frame.maxY > available.maxY {
+            frame.origin.y = available.minY + max(0, (available.height - frame.height) / 2)
+            clamped = true
+        }
+        if clamped {
+            window.setFrame(frame, display: false)
+        }
+        AppLogger.throttled(.error, .general, key: "window.frame.screenFit", interval: 10,
+            "[WindowFit] frame=\(Int(frame.width))x\(Int(frame.height)) screen=\(Int(available.width))x\(Int(available.height)) min=\(Int(effectiveMin.width))x\(Int(effectiveMin.height)) clamped=\(clamped ? 1 : 0)")
     }
 
     // MARK: - 窗口自动保存名称
@@ -528,6 +610,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         AppResponsivenessMonitor.startIfNeeded()
         AppResponsivenessMonitor.noteScenePhase("didFinishLaunching")
         AppResponsivenessMonitor.noteAppActive(NSApp.isActive)
+
+        // #130/#132/#133：分辨率切换/外接屏插拔后，主窗口可能比新屏幕可见区大，
+        // 触发 AppKit 约束自喂养环。屏幕参数一变就重新收敛窗口与最小尺寸。
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.clampMainWindowToScreen()
+            }
+        }
 
         // [AnimTracker] 后台 CPU 诊断：动画存活心跳 + 主窗口遮挡状态
         RepeatForeverAnimationTracker.shared.startHeartbeat()
@@ -944,7 +1038,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
         if window == nil {
             // ⚠️ 使用 defer: false 立即显示窗口
-            window = NSWindow(
+            window = ScreenClampedWindow(
                 contentRect: NSRect(origin: .zero, size: Self.defaultWindowSize),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
@@ -976,10 +1070,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
                 window.setFrameAutosaveName(WindowAutosaveName.mainWindow)
                 if !hasSavedWindowFrame() { window.center() }
                 window.delegate = self
+                // 历史保存帧可能来自更大的屏幕；恢复后立即收敛到当前屏。
+                clampMainWindowToScreen()
             }
         } else if let window, window.contentView == nil {
             // 视图树之前已被释放，重新挂载。
             installMainWindowContent(in: window)
+            clampMainWindowToScreen()
         }
 
         // 确保窗口显示在最前面
@@ -1148,7 +1245,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         hostingView.layer?.isOpaque = true
         container.addSubview(hostingView)
         window.contentView = container
-        window.contentMinSize = Self.minimumWindowSize
+        // 最小尺寸随该窗口所在屏幕封顶，绝不大于屏幕可用区（#130/#132/#133）。
+        window.contentMinSize = Self.effectiveMinimumWindowSize(for: window.screen ?? NSScreen.main)
     }
 
     func quitApplication() {
@@ -1247,6 +1345,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
+
+        // #130/#132/#133 诊断：主菜单 items 只允许主线程修改。崩溃日志反复出现
+        // 「API misuse: modification of a menu's items on a non-main thread」，但
+        // 静态排查所有自有菜单/窗口操作都在 @MainActor，元凶可能是 AppKit 自动
+        // 维护的 Window 菜单或第三方库。给主菜单及子菜单挂线程守卫 delegate：
+        // 一旦在非主线程被修改，立即记录完整调用栈，下次即可精确定位。
+        let guardDelegate = MainMenuThreadGuard.shared
+        mainMenu.delegate = guardDelegate
+        for item in mainMenu.items { item.submenu?.delegate = guardDelegate }
 
         NSApp.mainMenu = mainMenu
     }
@@ -1761,7 +1868,7 @@ private final class HelperUIExitProbeDelegate: AppDelegate {
 
     override func applicationDidFinishLaunching(_ notification: Notification) {
         installHelperQuitHandlers()
-        let probeWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 32, height: 32),
+        let probeWindow = ScreenClampedWindow(contentRect: NSRect(x: 0, y: 0, width: 32, height: 32),
                                    styleMask: [.titled, .closable], backing: .buffered, defer: false)
         probeWindow.isReleasedWhenClosed = false
         probeWindow.delegate = self
@@ -1997,6 +2104,16 @@ extension AppDelegate {
         AppResponsivenessMonitor.noteScenePhase("mainWindowDeminiaturized")
     }
 
+    /// #130/#132/#133 诊断：记录主窗口尺寸变化与当前屏幕的关系。
+    /// 约束自喂养环发生前通常能看到「窗口高 > 屏幕可见高」的帧。
+    func windowDidResize(_ notification: Notification) {
+        guard let resized = notification.object as? NSWindow, resized === window else { return }
+        let frame = resized.frame
+        let available = (resized.screen ?? NSScreen.main)?.visibleFrame.size ?? .zero
+        AppLogger.throttled(.error, .general, key: "window.resize.fit", interval: 5,
+            "[WindowFit] resize frame=\(Int(frame.width))x\(Int(frame.height)) screen=\(Int(available.width))x\(Int(available.height)) oversized=\(frame.width > available.width || frame.height > available.height ? 1 : 0)")
+    }
+
     func windowWillClose(_ notification: Notification) {
         // Wait until AppKit has removed the closed window from visibility/key-window state.
         DispatchQueue.main.async { [weak self] in
@@ -2078,6 +2195,194 @@ extension AppDelegate {
 // MARK: - 布局异常处理代理
 
 /// 记录 macOS 窗口布局循环异常（_postWindowNeedsLayout）。
+/// #130/#132/#133：主窗口尺寸硬闸门。
+/// macOS 15 上 NSHostingController 的内容理想尺寸会在 tab 切换时回写窗口
+/// （sizingOptions=[] 也挡不住这条回写），窗口被撑到比屏幕可见区大，AppKit
+/// 再缩回，两者互拉形成「Update Constraints pass 数超过视图数」自喂养环。
+/// 这里在 setFrame/setContentSize 入口把任何调用方（含 AppKit/SwiftUI 内部）
+/// 请求的尺寸收敛到当前屏幕可用区，从源头切断振荡；全屏状态不干预。
+final class ScreenClampedWindow: NSWindow {
+    /// #130/#132/#133：macOS 15 约束环熔断器。
+    /// SwiftUI 的 render pass（ViewGraph.beginNextUpdate）会在窗口 display cycle
+    /// 内提交状态并私有路径标脏窗口，_postWindowNeedsUpdateConstraints 同 tick
+    /// 反复触发直至 pass 数超过视图数抛 NSGenericException。继承拦不住（私有
+    /// setNeedsUpdate 不走公开属性），但崩溃点这个私有 category 方法可以按
+    /// selector 覆盖：同一 runloop tick 内标记次数超阈值即跳过本次、下一 tick
+    /// 补发，切断同步自喂养；合法更新不丢。仅 macOS 15 启用。
+    private var constraintMarkCount = 0
+    private var layoutMarkCount = 0
+
+    /// 熔断后的补发：100ms 后重发原始标记（tick 计数已清零必放行），并直接
+    /// 驱动宿主视图 layoutSubtreeIfNeeded——SwiftUI 的 render 事务在窗口布局
+    /// observer 里会被循环吞掉，公开 layoutSubtreeIfNeeded 独立跑完整布局+渲染，
+    /// 保证内容画出来。100ms 间隔把环频率压到 ≤10Hz，远低于崩溃阈值。
+    private func driveHostingRender() {
+        contentView?.layoutSubtreeIfNeeded()
+        if let hosting = contentView?.subviews.first {
+            hosting.layoutSubtreeIfNeeded()
+            hosting.needsDisplay = true
+        }
+        contentView?.needsDisplay = true
+    }
+
+    private func scheduleDeferredConstraintMark() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
+            let sel = NSSelectorFromString("_postWindowNeedsUpdateConstraints")
+            let post: PostIMP = unsafeBitCast(class_getMethodImplementation(NSWindow.self, sel), to: PostIMP.self)
+            post(self, sel)
+            self.driveHostingRender()
+        }
+    }
+
+    private func scheduleDeferredLayoutMark() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
+            let sel = NSSelectorFromString("_postWindowNeedsLayout")
+            let post: PostIMP = unsafeBitCast(class_getMethodImplementation(NSWindow.self, sel), to: PostIMP.self)
+            post(self, sel)
+            self.driveHostingRender()
+        }
+    }
+
+    @objc(_waifux_postWindowNeedsUpdateConstraints)
+    private func waifux_postWindowNeedsUpdateConstraints() {
+        if #available(macOS 15.0, *) {
+            constraintMarkCount += 1
+            if constraintMarkCount == 1 {
+                DispatchQueue.main.async { [weak self] in
+                    self?.constraintMarkCount = 0
+                }
+            }
+            if constraintMarkCount > 8 {
+                AppLogger.throttled(.error, .general, key: "layoutloop.breaker.constraints", interval: 10,
+                    "[LayoutLoop] constraint-mark breaker tripped count=\(constraintMarkCount)")
+                scheduleDeferredConstraintMark()
+                return
+            }
+        }
+        typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
+        let post: PostIMP = unsafeBitCast(
+            class_getMethodImplementation(NSWindow.self, NSSelectorFromString("_postWindowNeedsUpdateConstraints")),
+            to: PostIMP.self)
+        post(self, NSSelectorFromString("_postWindowNeedsUpdateConstraints"))
+    }
+
+    @objc(_waifux_postWindowNeedsLayout)
+    private func waifux_postWindowNeedsLayout() {
+        if #available(macOS 15.0, *) {
+            layoutMarkCount += 1
+            if layoutMarkCount == 1 {
+                DispatchQueue.main.async { [weak self] in
+                    self?.layoutMarkCount = 0
+                }
+            }
+            if layoutMarkCount > 8 {
+                AppLogger.throttled(.error, .general, key: "layoutloop.breaker.layout", interval: 10,
+                    "[LayoutLoop] layout-mark breaker tripped count=\(layoutMarkCount)")
+                scheduleDeferredLayoutMark()
+                return
+            }
+        }
+        typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
+        let post: PostIMP = unsafeBitCast(
+            class_getMethodImplementation(NSWindow.self, NSSelectorFromString("_postWindowNeedsLayout")),
+            to: PostIMP.self)
+        post(self, NSSelectorFromString("_postWindowNeedsLayout"))
+    }
+
+    private static let installConstraintBreaker: Void = {
+        if #available(macOS 15.0, *) {
+            // 只给子类添加覆盖实现，不动 NSWindow 本类（其它窗口不受影响）。
+            for (orig, repl) in [
+                ("_postWindowNeedsUpdateConstraints", "_waifux_postWindowNeedsUpdateConstraints"),
+                ("_postWindowNeedsLayout", "_waifux_postWindowNeedsLayout"),
+            ] {
+                guard let swizzled = class_getInstanceMethod(ScreenClampedWindow.self, NSSelectorFromString(repl)),
+                      class_getInstanceMethod(NSWindow.self, NSSelectorFromString(orig)) != nil
+                else { continue }
+                class_addMethod(ScreenClampedWindow.self, NSSelectorFromString(orig),
+                                method_getImplementation(swizzled), method_getTypeEncoding(swizzled))
+            }
+        }
+    }()
+
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        _ = Self.installConstraintBreaker
+    }
+
+    override var contentMinSize: NSSize {
+        get { super.contentMinSize }
+        set {
+            if let available = (screen ?? NSScreen.main)?.visibleFrame.size,
+               !styleMask.contains(.fullScreen),
+               (newValue.width > floor(available.width) || newValue.height > floor(available.height)),
+               newValue != super.contentMinSize {
+                AppLogger.throttled(.error, .general, key: "windowfit.minSize.oversized", interval: 5,
+                    "[WindowFit] contentMinSize set oversized \(Int(newValue.width))x\(Int(newValue.height)) screen=\(Int(available.width))x\(Int(available.height))",
+                    metadata: ["stack": Thread.callStackSymbols.prefix(16).joined(separator: "\n")])
+            }
+            super.contentMinSize = newValue
+        }
+    }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(Self.clamped(frameRect, for: self), display: flag)
+    }
+
+    override func setFrame(_ frameRect: NSRect, display displayFlag: Bool, animate animateFlag: Bool) {
+        super.setFrame(Self.clamped(frameRect, for: self), display: displayFlag, animate: animateFlag)
+    }
+
+    override func setContentSize(_ size: NSSize) {
+        super.setContentSize(Self.clampedContentSize(size, for: self))
+    }
+
+    private static func clampedContentSize(_ size: NSSize, for window: NSWindow) -> NSSize {
+        guard !window.styleMask.contains(.fullScreen),
+              let available = (window.screen ?? NSScreen.main)?.visibleFrame.size else { return size }
+        let contentWidth = min(size.width, floor(available.width))
+        let contentHeight = min(size.height, floor(available.height))
+        guard contentWidth != size.width || contentHeight != size.height else { return size }
+        AppLogger.throttled(.error, .general, key: "windowfit.setContentSize.clamp", interval: 5,
+            "[WindowFit] setContentSize clamp \(Int(size.width))x\(Int(size.height)) -> \(Int(contentWidth))x\(Int(contentHeight))",
+            metadata: ["stack": Thread.callStackSymbols.prefix(16).joined(separator: "\n")])
+        return NSSize(width: contentWidth, height: contentHeight)
+    }
+
+    private static func clamped(_ rect: NSRect, for window: NSWindow) -> NSRect {
+        guard !window.styleMask.contains(.fullScreen),
+              let available = (window.screen ?? NSScreen.main)?.visibleFrame else { return rect }
+        var frame = rect
+        let width = min(frame.width, available.width)
+        let height = min(frame.height, available.height)
+        var changed = false
+        if frame.width != width || frame.height != height {
+            // 保持左上角不动地缩尺寸，避免窗口跳动
+            frame.origin.y += frame.height - height
+            frame.size = NSSize(width: width, height: height)
+            changed = true
+        }
+        if frame.minX < available.minX || frame.maxX > available.maxX {
+            frame.origin.x = available.minX + max(0, (available.width - frame.width) / 2)
+            changed = true
+        }
+        if frame.minY < available.minY || frame.maxY > available.maxY {
+            frame.origin.y = available.minY + max(0, (available.height - frame.height) / 2)
+            changed = true
+        }
+        if changed {
+            AppLogger.throttled(.error, .general, key: "windowfit.setFrame.clamp", interval: 5,
+                "[WindowFit] setFrame clamp \(Int(rect.width))x\(Int(rect.height)) -> \(Int(frame.width))x\(Int(frame.height)) min=\(Int(window.contentMinSize.width))x\(Int(window.contentMinSize.height))",
+                metadata: ["stack": Thread.callStackSymbols.prefix(16).joined(separator: "\n")])
+        }
+        return frame
+    }
+}
+
 /// 当 NSHostingView 和 NSCollectionView 混合布局时，窗口的 _layoutViewTree
 /// 可能触发 _postWindowNeedsLayout 导致 NSGenericException 崩溃。
 /// 注意：NSExceptionHandler 只能观察和记录，无法真正抑制异常传播。
@@ -2087,7 +2392,9 @@ extension AppDelegate {
 private final class LayoutExceptionHandlerDelegate: NSObject, @unchecked Sendable {
     static let shared = LayoutExceptionHandlerDelegate()
 
-    /// 记录布局循环异常
+    /// 记录布局循环异常。
+    /// 15.x 实际文案是「The window has been marked as needing another Update
+    /// Constraints in Window pass, ...」，旧匹配词 "Layout Window" 永远命不中。
     @objc override func exceptionHandler(
         _ sender: NSExceptionHandler,
         shouldHandle exception: NSException,
@@ -2095,8 +2402,14 @@ private final class LayoutExceptionHandlerDelegate: NSObject, @unchecked Sendabl
     ) -> Bool {
         if exception.name.rawValue == "NSGenericException",
            let reason = exception.reason,
-           reason.contains("Layout Window") {
-            AppLogger.error(.general, "窗口布局循环异常: \(reason)")
+           reason.contains("Update Constraints") || reason.contains("Layout Window") {
+            AppLogger.throttled(.error, .general, key: "layout.exception.loop", interval: 5,
+                "[LayoutLoop] 窗口布局循环异常: \(reason)", metadata: [
+                    "stack": Thread.callStackSymbols.prefix(24).joined(separator: "\n"),
+                ])
+            AppExitDiagnostics.record("layoutConstraintLoopException", metadata: [
+                "reason": reason,
+            ])
         }
         return true
     }
@@ -2109,9 +2422,43 @@ private final class LayoutExceptionHandlerDelegate: NSObject, @unchecked Sendabl
     ) -> Bool {
         if exception.name.rawValue == "NSGenericException",
            let reason = exception.reason,
-           reason.contains("Layout Window") {
+           reason.contains("Update Constraints") || reason.contains("Layout Window") {
             return false
         }
         return true
+    }
+}
+
+/// #130/#132/#133 诊断：主菜单线程守卫。
+/// 崩溃日志反复出现「modification of a menu's items on a non-main thread when
+/// the menu is part of the main menu」，但静态排查所有自有菜单/窗口操作都在
+/// @MainActor。给主菜单及子菜单挂此 delegate：menuDidChange 在菜单 items 变化
+/// 后触发，若当时不在主线程，立即记录完整调用栈与菜单标题，下次即可精确定位
+/// 是哪个代码路径（含 AppKit 自动 Window 菜单 / 第三方库）在后台线程改菜单。
+private final class MainMenuThreadGuard: NSObject, NSMenuDelegate, @unchecked Sendable {
+    static let shared = MainMenuThreadGuard()
+    private let lock = NSLock()
+    private var lastReportedAt: TimeInterval = 0
+
+    func menuDidChange(_ menu: NSMenu) {
+        guard !Thread.isMainThread else { return }
+        // 限频：同一后台修改风暴只记一次栈，避免日志爆炸。
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        let shouldReport = now - lastReportedAt > 5
+        if shouldReport { lastReportedAt = now }
+        lock.unlock()
+        guard shouldReport else { return }
+        let stack = Thread.callStackSymbols.prefix(24).joined(separator: "\n")
+        AppLogger.error(.general, "MAIN_MENU_OFF_MAIN_MODIFICATION", metadata: [
+            "menuTitle": menu.title,
+            "itemCount": menu.numberOfItems,
+            "thread": String(describing: Thread.current),
+            "stack": stack,
+        ])
+        AppExitDiagnostics.record("mainMenuOffMainModification", metadata: [
+            "menuTitle": menu.title,
+            "stack": Thread.callStackSymbols.prefix(12).joined(separator: " <- "),
+        ])
     }
 }

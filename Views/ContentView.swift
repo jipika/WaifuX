@@ -24,7 +24,11 @@ private final class MainContentNavigationState: ObservableObject {
     @Published var selectedTab: MainTab = .home {
         didSet {
             if oldValue != selectedTab {
-                AppLogger.error(.general, "[AnimTracker] tab -> \(selectedTab)")
+                // #130/#132/#133 分步调试：tab 提交瞬间记录窗口/屏幕尺寸关系，
+                // 冻结若由布局环引起，这里能看到 oversized=1 的前置帧。
+                let frame = NSApp.mainWindow?.frame ?? .zero
+                let available = (NSApp.mainWindow?.screen ?? NSScreen.main)?.visibleFrame.size ?? .zero
+                AppLogger.error(.general, "[TabTrace] 1.navState \(oldValue.rawValue) -> \(selectedTab.rawValue) frame=\(Int(frame.width))x\(Int(frame.height)) screen=\(Int(available.width))x\(Int(available.height)) oversized=\(frame.width > available.width || frame.height > available.height ? 1 : 0)")
             }
         }
     }
@@ -165,6 +169,17 @@ private final class MainTabViewController: NSTabViewController {
     /// 实际添加的 tab 顺序（仅含启动快照启用的 tab），用于 select(tab:) 查找真实 index。
     /// 在 configure 一次性构建（快照不变），禁用的 tab 不加入，避免位置 Int 错位。
     private var addedTabs: [MainTab] = []
+    /// #130/#132/#133：懒挂载。非激活 tab 的 item.view 是占位 NSView，真实
+    /// NSHostingController 的 view 只在激活时挂上、失活时摘回 controller。
+    /// keep-alive 若把 5 个 SwiftUI 宿主同时挂在窗口里，任何一页的 @Published
+    /// 变化都会让隐藏页的 graph 失效并 setNeedsUpdateConstraints，在 macOS 15 的
+    /// display cycle 内把窗口反复标脏（Update Constraints pass 自喂养环，15.4.1
+    /// 实机栈实锤：graphDidChange→NSHostingView.requestUpdate→setNeedsUpdateConstraints）。
+    /// 懒挂载后状态变化只 invalidate 激活页。controller 始终被 tabViewItem 持有，
+    /// @State/滚动位置不丢，切回即恢复。
+    private var pageControllers: [NSHostingController<EdgeToEdgeContainer<AnyView>>] = []
+    /// 与 pageControllers 一一对应的隔离宿主视图（阻断 macOS 15 约束环）。
+    private var pageHostingViews: [LayoutLoopGuardHostingView<EdgeToEdgeContainer<AnyView>>] = []
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -231,6 +246,7 @@ private final class MainTabViewController: NSTabViewController {
             // tab 被禁用（不在 addedTabs 中），回退到 home
             if let homeIndex = addedTabs.firstIndex(of: .home) {
                 if selectedTabViewItemIndex != homeIndex {
+                    swapTabItems(from: selectedTabViewItemIndex, to: homeIndex)
                     selectedTabViewItemIndex = homeIndex
                 }
             }
@@ -238,6 +254,11 @@ private final class MainTabViewController: NSTabViewController {
         }
         guard selectedTabViewItemIndex != targetIndex else { return }
         let previousIndex = selectedTabViewItemIndex
+        // #130/#132/#133 分步调试：AppKit 页面替换前后各打一条，
+        // 若 2a 有而 2b 没有，说明 NSTabView 替换过程本身挂死。
+        AppLogger.throttled(.error, .general, key: "tabtrace.select.before.\(tab.rawValue)", interval: 2,
+            "[TabTrace] 2a.select before | tab=\(tab.rawValue) from=\(previousIndex) target=\(targetIndex)")
+        swapTabItems(from: previousIndex, to: targetIndex)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         NSAnimationContext.runAnimationGroup { context in
@@ -248,6 +269,8 @@ private final class MainTabViewController: NSTabViewController {
         }
         CATransaction.commit()
         let visibleLabel = tabView.selectedTabViewItem?.label ?? "nil"
+        AppLogger.throttled(.error, .general, key: "tabtrace.select.after.\(tab.rawValue)", interval: 2,
+            "[TabTrace] 2b.select after | tab=\(tab.rawValue) visible=\(visibleLabel) selectedIndex=\(selectedTabViewItemIndex)")
         AppLogger.throttled(
             .error, .general,
             key: "navigation.tab.commit.\(tab.rawValue)", interval: 2,
@@ -256,14 +279,46 @@ private final class MainTabViewController: NSTabViewController {
     }
 
     private func addPage<Content: View>(title: String, view: Content) {
-        let hostingController = NSHostingController(rootView: EdgeToEdgeContainer(content: view))
+        let root = EdgeToEdgeContainer(content: AnyView(view))
+        let hostingController = NSHostingController(rootView: root)
         // #130/#132：Tab 页由 NSTabView 的 frame 决定尺寸。默认 sizingOptions 会让
         // AppKit 在约束更新时反复测量 SwiftUI 内容（含内嵌 NSCollectionView /
         // NSVisualEffectView 平台视图），形成 updateConstraints 自喂养循环。
         hostingController.sizingOptions = []
+        // 用隔离宿主替换默认 NSHostingView：macOS 15 约束 pass 内的状态提交
+        // 不再向窗口传播 needsUpdateConstraints（见 LayoutLoopGuardHostingView）。
+        let hostingView = LayoutLoopGuardHostingView(rootView: root)
+        hostingView.sizingOptions = []
+        hostingController.view = hostingView
         let item = NSTabViewItem(viewController: hostingController)
         item.label = title
+        // 懒挂载：初始不加载真实 view，item 先持占位视图；select 时再挂。
+        item.view = NSView()
+        pageControllers.append(hostingController)
+        pageHostingViews.append(hostingView)
         addTabViewItem(item)
+    }
+
+    /// 切换前把旧页宿主摘回 controller、新页宿主挂上 item。
+    /// 必须在 selectedTabViewItemIndex 赋值前调用：NSTabView 选中时读 item.view。
+    private func swapTabItems(from oldIndex: Int, to newIndex: Int) {
+        let items = tabView.tabViewItems
+        guard pageHostingViews.count == items.count else { return }
+        if items.indices.contains(oldIndex), oldIndex != newIndex {
+            let hostingView = pageHostingViews[oldIndex]
+            if items[oldIndex].view === hostingView {
+                hostingView.removeFromSuperview()
+                items[oldIndex].view = NSView()
+            }
+        }
+        if items.indices.contains(newIndex) {
+            let hostingView = pageHostingViews[newIndex]
+            if items[newIndex].view !== hostingView {
+                hostingView.frame = tabView.bounds
+                hostingView.autoresizingMask = [.width, .height]
+                items[newIndex].view = hostingView
+            }
+        }
     }
 }
 
@@ -662,7 +717,15 @@ struct ContentView: View {
         .transaction { $0.animation = nil }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationBarBackButtonHidden(true)
-        .toolbar(navigationState.selectedTab == .myMedia ? .visible : .hidden, for: .automatic)
+        // #130/#132/#133：主窗口所有 tab 统一隐藏系统工具栏。
+        // 历史（cac485df）曾给「我的」tab 单独 .toolbar(.visible)，但全 App 没有任何
+        // ToolbarItem——库页的编辑/新建文件夹/导入都是内容区里的自绘胶囊按钮，
+        // 系统工具栏实际是空的。macOS 15 上按 tab 切换 .visible/.hidden 会让
+        // NSToolbar 反复增删标题栏 accessory，与 SwiftUI 宿主的环境/几何回写叠加成
+        // 「Update Constraints pass 数超过视图数」自喂养环：轻则界面冻结，重则
+        // makeKeyAndOrderFront 时抛 NSGenericException 崩溃（15.4.1 实机复现并验证：
+        // 强制 .hidden 后快速切 tab 150 次零崩溃）。空工具栏无内容可展示，统一隐藏。
+        .toolbar(.hidden, for: .automatic)
     }
 
     private var topNavigationBar: some View {

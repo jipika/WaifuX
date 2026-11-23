@@ -606,7 +606,11 @@ final class ExploreGridCoordinator: NSObject {
             self.layout.hoverExpansionAllowance = self.parent.hoverExpansionAllowance
             self.layout.preferredColumnCount = self.parent.gridColumnCount
             // reloadData 会完全重建布局，不需要手动 invalidateLayout
+            AppLogger.throttled(.error, .general, key: "tabtrace.grid.reload.exec", interval: 2,
+                "[TabTrace] 6a.grid reloadData exec | items=\(itemCount)")
             self.collectionView.reloadData()
+            AppLogger.throttled(.error, .general, key: "tabtrace.grid.reload.done", interval: 2,
+                "[TabTrace] 6b.grid reloadData done | items=\(itemCount)")
             self.recordDisplayedItemIDs()
             self.layoutDocument()
             self.applyPendingRestoreScrollOffsetIfNeeded()
@@ -1033,15 +1037,34 @@ final class ExploreGridCoordinator: NSObject {
 
     func configureScrollingMode(_ allowsScrolling: Bool) {
         guard let scrollView = scrollView as? ExploreGridScrollView else { return }
+        // #130/#132/#133：updateNSView 每次 SwiftUI 更新都会调这里。稳态下
+        // 反复给 scroller 赋 has*/nil（即使值相同）会触发 AppKit 内部 tile/
+        // 约束标脏，等于每轮渲染都把窗口标脏一次，喂大约束循环。只在滚动
+        // 模式真正变化时才重配；scroller 被 AppKit 自动重挂时也必须重配，
+        // 保证挂上的始终是隐形占位类（见 ExploreGridLayoutRegression 断言）。
+        let modeChanged = scrollView.allowsGridScrolling != allowsScrolling
+        let scrollerReattached = !(scrollView.verticalScroller is ExploreGridInvisibleScroller)
+            || !(scrollView.horizontalScroller is ExploreGridInvisibleScroller)
+            || scrollView.hasVerticalScroller
+            || scrollView.hasHorizontalScroller
         scrollView.allowsGridScrolling = allowsScrolling
+        guard modeChanged || scrollerReattached else { return }
         self.scrollView.verticalScrollElasticity = allowsScrolling ? .allowed : .none
         // Scroller 只在初始化/此配置入口修改，绝不在 tile()/layout() 里改。
         // AppKit 的 NSCollectionView resize-to-fit 会嵌套触发 tile；在 tile 内
         // 改 scroller 会再次调整 clipView bounds，形成主线程栈溢出。
         self.scrollView.hasVerticalScroller = false
         self.scrollView.hasHorizontalScroller = false
-        self.scrollView.verticalScroller = nil
-        self.scrollView.horizontalScroller = nil
+        if !(scrollView.verticalScroller is ExploreGridInvisibleScroller) {
+            let invisibleV = ExploreGridInvisibleScroller()
+            invisibleV.scrollerStyle = .overlay
+            self.scrollView.verticalScroller = invisibleV
+        }
+        if !(scrollView.horizontalScroller is ExploreGridInvisibleScroller) {
+            let invisibleH = ExploreGridInvisibleScroller()
+            invisibleH.scrollerStyle = .overlay
+            self.scrollView.horizontalScroller = invisibleH
+        }
 
         // `allowsScrolling=false` 时本 NSScrollView 不内部滚动（外层 SwiftUI ScrollView 总滚动），
         // 默认 NSClipView.masksToBounds=true 会把 cell hover 1.02 缩放在网格四角溢出的部分裁掉。

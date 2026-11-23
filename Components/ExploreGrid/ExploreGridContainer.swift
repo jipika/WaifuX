@@ -89,7 +89,9 @@ struct ExploreGridContainer: NSViewRepresentable {
     var onEscape: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
-        context.coordinator.scrollView
+        AppLogger.throttled(.error, .general, key: "tabtrace.grid.makeNSView", interval: 2,
+            "[TabTrace] 5.grid makeNSView | items=\(itemCount()) scrolling=\(allowsScrolling ? 1 : 0)")
+        return context.coordinator.scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
@@ -104,6 +106,10 @@ struct ExploreGridContainer: NSViewRepresentable {
             || previousParent.additionalCellClasses.map(ObjectIdentifier.init)
                 != additionalCellClasses.map(ObjectIdentifier.init)
         let scrollingModeChanged = allowsScrolling != previousParent.allowsScrolling
+        if visibilityChanged {
+            AppLogger.throttled(.error, .general, key: "tabtrace.grid.visibility", interval: 2,
+                "[TabTrace] 5.grid visibility | visible=\(isVisible ? 1 : 0) items=\(itemCount()) width=\(Int(layoutWidth))")
+        }
         coordinator.parent = self
         coordinator.syncHeaderCollapseStateFromParent()
         coordinator.syncGridSpacingIfNeeded(gridSpacing)
@@ -155,9 +161,13 @@ struct ExploreGridContainer: NSViewRepresentable {
         // 注意：reloadData / performBatchUpdates 是延迟到下一个 run loop 执行的。
         // lastItemCount 在延迟块实际执行时才更新，确保后续 updateNSView 调用能正确触发 reload。
         if cellClassChanged {
+            AppLogger.throttled(.error, .general, key: "tabtrace.grid.reload", interval: 2,
+                "[TabTrace] 6.grid reload | reason=cellClass items=\(newCount)")
             coordinator.reloadData()
         } else if newCount != coordinator.lastItemCount {
             let oldCount = coordinator.lastItemCount
+            AppLogger.throttled(.error, .general, key: "tabtrace.grid.reload", interval: 2,
+                "[TabTrace] 6.grid reload | reason=count \(oldCount)->\(newCount)")
 
             // 混排网格（cellClassForItem != nil，如我的库「文件夹+项目」）禁用增量插入：
             // 内容整体替换时旧 index 上的 cell 类可能已失效（文件夹 cell ↔ 项目 cell 互换），

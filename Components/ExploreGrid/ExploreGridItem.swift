@@ -379,7 +379,15 @@ class ExploreGridItem: NSCollectionViewItem {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        layoutCardFrame()
+        // #130/#132/#133：稳态布局不重排。NSCollectionView 的 tile/layout 会在
+        // 每次 display cycle 回调 viewDidLayout；无条件 applyCardFrame 会给全部
+        // 可见 cell 的子视图赋 frame（即使值没变），setFrameOrigin 触发
+        // tracking-area 标脏 → 窗口 structural region 更新 → 下一轮布局，
+        // 与 SwiftUI 渲染回写叠加成约束自喂养环。frame 未变且非 hover 过渡时跳过。
+        let targetFrame = cardFrame()
+        if cardSurfaceView.frame != targetFrame || isHovered {
+            layoutCardFrame()
+        }
     }
 
     // MARK: - 布局
