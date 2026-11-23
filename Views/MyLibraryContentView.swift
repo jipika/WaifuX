@@ -3904,7 +3904,7 @@ struct MyLibraryContentView: View {
                         .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
                 )
         }
-        .menuStyle(.borderlessButton)
+        .modifier(LibraryMenuStyleCompat())
         .fixedSize(horizontal: true, vertical: false)
         .pointingHandCursor()
     }
@@ -4004,8 +4004,21 @@ struct MyLibraryContentView: View {
                     )
             }
             .guideAnchor(.libraryMoreMenuButton)
-            .menuStyle(.borderlessButton)
+            .modifier(LibraryMenuStyleCompat())
             .pointingHandCursor()
+        }
+    }
+
+    /// macOS 15 的 .borderlessButton 菜单会给 label 附加系统下拉箭头与内边距
+    /// （26+ 原生 glass 渲染紧凑无此 chrome），表现为按钮右侧多出莫名其妙
+    /// 的宽度。26 以下改用 .button + .plain 剥掉系统 chrome，只留自绘 label。
+    private struct LibraryMenuStyleCompat: ViewModifier {
+        func body(content: Content) -> some View {
+            if #available(macOS 26.0, *) {
+                content.menuStyle(.borderlessButton)
+            } else {
+                content.menuStyle(.button).buttonStyle(.plain)
+            }
         }
     }
 
