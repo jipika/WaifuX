@@ -49,6 +49,10 @@ COPILOT.md
 # 锚定仓库根：不锚定会连带忽略未来子目录里的同名 .dsh 目录
 /.dsh/
 
+# speckit 规格工作流工件（仅本机使用，不提交）；锚定仓库根，理由同上
+/.speckit/
+/specs/
+
 # Editor
 .1code/
 .claude/
