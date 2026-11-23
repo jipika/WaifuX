@@ -39,10 +39,12 @@ enum AppResponsivenessMonitor {
                 // 随后才失活」的卡顿会在重设基线时被洗掉。
                 evaluateStall()
 
-                // 只有应用真正活跃时，主队列回执迟到才算主线程卡顿。
-                // 失活/后台状态下系统会节流应用或让主 runloop 停在嵌套事件循环里，
-                // 回执迟到是预期行为：实测 244 条 stall 记录里 204 条处于 appActive=false，
-                // 栈样本 846 帧全部停在 mach_msg2_trap（等事件，不是在算）。
+                // 窗口可见即回执：#132/#133 的冻结是「窗口在前台、runloop 活着
+                // 但 UI 不刷新」，用户卡住后常切去别的应用求证——若按 appActive
+                // 门控，切走瞬间基线被重置，整段冻结永远凑不满阈值、一条栈都采不到
+                // （mzyaoo 11-22 日志：Shimmerx9 持续 3 分钟，零 stall 记录）。
+                // 完全不可见/最小化时才停止回执：那时主队列不被排空是预期行为。
+                // 失活误报靠样本里的 appActive/scenePhase 元数据区分，不靠丢弃。
                 if isStallSamplingEligible {
                     DispatchQueue.main.async {
                         acknowledgeHeartbeat(token)
@@ -91,9 +93,14 @@ enum AppResponsivenessMonitor {
                 // 失活前最后判一次：活跃期已开始的卡顿不能被基线重设洗掉。
                 evaluateStall()
             }
-            // 恢复活跃时也重设：清掉失活期间累积的差值，避免整段后台时间
-            // 在回到前台后被算成一次「卡顿」。
-            resetHeartbeatBaseline()
+            // 窗口仍可见时不重置基线：#132/#133 的冻结跨失活持续，用户切去
+            // 别的应用求证时若清零差值，整段冻结就永远凑不满阈值。失活期间
+            // 主队列回执照常追踪（见 isStallSamplingEligible），回到前台也
+            // 无需洗差值——那正是同一次冻结的延续。仅窗口不可见时才重置，
+            // 避免把整段后台时间算成一次卡顿。
+            if !state.windowVisible {
+                resetHeartbeatBaseline()
+            }
             flushSnapshotIfNeeded(trigger: "appActive", force: true)
         }
     }
@@ -122,13 +129,17 @@ enum AppResponsivenessMonitor {
         }
     }
 
-    /// 是否允许把「主队列回执迟到」判定为主线程卡顿。
+    /// 是否继续追踪「主队列回执迟到」。
     ///
-    /// 失活/后台时（`didResignActive`、窗口不在前台），系统会节流应用或把主 runloop
-    /// 停在嵌套事件循环里，主队列回执迟到是预期行为而非卡顿。只有应用活跃、
-    /// 且不处于失活瞬间时才采样。
+    /// 旧门控是 `appActive && scenePhase != didResignActive`，为压失活误报
+    /// （244 条 stall 里 204 条 appActive=false、栈全在 mach_msg2_trap）。
+    /// 但 #132/#133 的真实冻结发生在窗口可见时，用户卡住后切去别的应用求证，
+    /// 失活瞬间 `noteAppActive(false)` 重置基线，把正在进行的冻结整段洗掉——
+    /// 结果最需要的栈一条都采不到。改为：**窗口可见就追踪**（含失活），
+    /// 只有窗口不可见/最小化才停。失活期的误报样本保留 appActive/scenePhase
+    /// 元数据 + idle 栈特征，分析时可区分，不再靠丢样本压噪。
     private static var isStallSamplingEligible: Bool {
-        state.appActive && state.scenePhase != "didResignActive"
+        state.windowVisible
     }
 
     static func noteScenePhase(_ phase: String) {
@@ -180,6 +191,20 @@ enum AppResponsivenessMonitor {
         lastStallLogTime = now
 
         stallWasObserved = true
+        // #132/#133：冻结期记录必须直写 error 级。旧实现只走
+        // InteractionPerformanceLog 的 60s 聚合窗口，而用户从卡死到强退/重启
+        // 往往不到 60s（mzyaoo 实测 6s~3min），聚合摘要随进程丢失——日志里
+        // 「点我的」之后零 stall 记录，取证链在这里断掉。
+        AppLogger.error(.ui, "Main thread stall detected", metadata: [
+            "stallMS": String(format: "%.0f", elapsed * 1000),
+            "heartbeat": String(snapshot.heartbeat),
+            "ackedHeartbeat": String(snapshot.lastAckedHeartbeat),
+            "tab": snapshot.currentTab,
+            "detailDepth": String(snapshot.detailDepth),
+            "windowVisible": snapshot.windowVisible ? "1" : "0",
+            "appActive": snapshot.appActive ? "1" : "0",
+            "scenePhase": snapshot.scenePhase
+        ])
         InteractionPerformanceLog.record(.mainThreadStall, milliseconds: elapsed * 1000, metadata: [
             "phase": "detected",
             "heartbeat": String(snapshot.heartbeat),
@@ -199,9 +224,11 @@ enum AppResponsivenessMonitor {
     /// 采样期间主线程若已恢复，栈顶会显示 idle 等待——同样是有价值的证据。
     ///
     /// 每次采样都会 spawn 一个 `/usr/bin/sample` 子进程并抓 1 秒栈，连续卡顿时
-    /// 会放大负载。这里 10 分钟最多采一次；其余观测并入限频性能摘要。
+    /// 会放大负载。这里 60s 最多采一次；其余观测并入限频性能摘要。
+    /// 旧值 600s 是 #132/#133 取证断链的另一环：zhaixinyu 16:13 采过一次
+    /// 失活误报后，10 分钟内即使发生真冻结也采不到第二份栈。
     private static func captureMainThreadSample(stallMS: Double) {
-        guard AppLogger.shouldThrottle(key: "ui.stallSample", interval: 600) else { return }
+        guard AppLogger.shouldThrottle(key: "ui.stallSample", interval: 60) else { return }
         let samplePath = "/tmp/waifux-stall-sample-\(Int(Date().timeIntervalSince1970)).txt"
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
@@ -211,7 +238,17 @@ enum AppResponsivenessMonitor {
         ]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
-        try? task.run()
+        do {
+            try task.run()
+        } catch {
+            // #132/#133：spawn 失败必须留痕。旧实现 try? 静默吞错，用户日志里
+            // 「有 stall detected 却没有 sample」时无法区分节流与启动失败。
+            AppLogger.error(.ui, "Main thread stall sample spawn failed", metadata: [
+                "stallMS": String(format: "%.0f", stallMS),
+                "error": error.localizedDescription
+            ])
+            return
+        }
         DispatchQueue.global(qos: .utility).async {
             task.waitUntilExit()
             guard let text = try? String(contentsOfFile: samplePath, encoding: .utf8) else {
@@ -219,6 +256,7 @@ enum AppResponsivenessMonitor {
                     "stallMS": String(format: "%.0f", stallMS),
                     "sampleExit": Int(task.terminationStatus)
                 ])
+                try? FileManager.default.removeItem(atPath: samplePath)
                 return
             }
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
