@@ -450,6 +450,66 @@ actor PixivService {
         return try await fetchWeekly(limit: limit)
     }
 
+    /// 首页 hero 高清解析：排行接口只给 c/240x480 小图，hero 整幅拉伸会糊。
+    /// 对候选并发取 master1200 档 URL：优先 /ajax/illust/{id}/pages 首帧 regular（真实 URL），
+    /// 接口失败时从缩略图 URL 推导兜底；两路都失败的项不进入结果，调用方保留小图现状。
+    func homeHighResURLs(for items: [Wallpaper]) async -> [String: String] {
+        await withTaskGroup(of: (String, String)?.self) { group in
+            for item in items {
+                guard item.source == "pixiv", item.id.hasPrefix("pixiv_") else { continue }
+                let illustID = String(item.id.dropFirst("pixiv_".count))
+                let fallback = Self.masterPreviewURL(from: item.path)
+                group.addTask {
+                    if let pages = try? await self.mangaPages(id: illustID),
+                       let regular = pages.first?.urls.regular,
+                       regular.hasPrefix("https://") {
+                        return (item.id, regular)
+                    }
+                    if let fallback {
+                        return (item.id, fallback)
+                    }
+                    return nil
+                }
+            }
+            var result: [String: String] = [:]
+            for await pair in group {
+                if let (id, url) = pair {
+                    result[id] = url
+                }
+            }
+            return result
+        }
+    }
+
+    /// 从 Pixiv 缩略图 URL 推导 master1200 预览 URL。
+    /// 排行：i.pximg.net/c/240x480/img-master/img/…/123_p0_master1200.jpg
+    /// 搜索：i.pximg.net/c/240x480/custom-thumb/img/…/123_p0_custom1200.jpg（或 _square1200）
+    /// 目标：i.pximg.net/img-master/img/…/123_p0_master1200.jpg
+    /// 非 pximg 域 / 非 master 缩略图路径返回 nil。
+    static func masterPreviewURL(from urlString: String) -> String? {
+        guard let url = URL(string: urlString),
+              url.host?.lowercased() == "i.pximg.net" else { return nil }
+        var path = url.path
+        // 去掉 c/<size>/ 尺寸前缀
+        if path.hasPrefix("/c/") {
+            let rest = path.dropFirst(3)
+            guard let slash = rest.firstIndex(of: "/") else { return nil }
+            path = String(rest[slash...])
+        }
+        // custom-thumb 与 img-master 目录结构一致，统一到 img-master
+        path = path.replacingOccurrences(of: "/custom-thumb/", with: "/img-master/")
+        guard path.hasPrefix("/img-master/") else { return nil }
+        let nsPath = path as NSString
+        let dir = nsPath.deletingLastPathComponent
+        let ext = nsPath.pathExtension
+        let stem = nsPath.lastPathComponent
+            .replacingOccurrences(of: "_custom1200", with: "")
+            .replacingOccurrences(of: "_square1200", with: "")
+            .replacingOccurrences(of: "_master1200", with: "")
+        let file = ext.isEmpty ? stem + "_master1200" : "\(stem)_master1200.\(ext)"
+        return "https://i.pximg.net\(dir)/\(file)"
+    }
+
     /// 获取热门标签（从日榜前 50 名中提取高频标签）
     /// - Parameter limit: 返回数量，默认 6
     func fetchHotTags(limit: Int = 6) async throws -> [PixivHotTag] {

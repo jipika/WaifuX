@@ -10,6 +10,14 @@ final class WallsflowDirectURLProtocol: URLProtocol, @unchecked Sendable {
     private var loadTask: Task<Void, Never>?
     private var stopped = false
 
+    // URLProtocol 在部分 SDK 中不可 Sendable。跨任务只传不可变的弱引用；
+    // 所有完成/取消状态仍由同一个 stateLock 保护。
+    private final class CompletionTarget: @unchecked Sendable {
+        private weak var owner: WallsflowDirectURLProtocol?
+        init(_ owner: WallsflowDirectURLProtocol) { self.owner = owner }
+        func finish(_ result: Result<Data, Error>) { owner?.complete(result) }
+    }
+
     override class func canInit(with request: URLRequest) -> Bool {
         guard request.value(forHTTPHeaderField: handledHeader) == nil,
               let url = request.url else { return false }
@@ -23,16 +31,17 @@ final class WallsflowDirectURLProtocol: URLProtocol, @unchecked Sendable {
             guard !stopped, loadTask == nil else { return }
             var outbound = request
             outbound.setValue(nil, forHTTPHeaderField: Self.handledHeader)
-            loadTask = Task { @Sendable [weak self, outbound] in
+            let target = CompletionTarget(self)
+            loadTask = Task { @Sendable [target, outbound] in
                 do {
                     guard let url = outbound.url else { throw URLError(.badURL) }
                     let data = try await WallsflowService.shared.fetchMediaData(
                         from: url, headers: outbound.allHTTPHeaderFields ?? [:]
                     )
                     try Task.checkCancellation()
-                    self?.complete(.success(data))
+                    target.finish(.success(data))
                 } catch {
-                    self?.complete(.failure(error))
+                    target.finish(.failure(error))
                 }
             }
         }

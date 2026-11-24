@@ -27,6 +27,8 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - Task Cancellation Support
     private var searchTask: Task<Void, Never>?
     private var loadMoreTask: Task<Void, Never>?
+    /// Pixiv 首页 hero 高清解析任务（featured 到达后后台补 master1200 URL）
+    private var pixivHomeHDTask: Task<Void, Never>?
 
     // MARK: - 预加载支持
     private var preloadTask: Task<Void, Never>?
@@ -1241,6 +1243,7 @@ class WallpaperViewModel: ObservableObject {
     func cancelAllTasks() {
         searchTask?.cancel()
         loadMoreTask?.cancel()
+        pixivHomeHDTask?.cancel()
     }
 
     /// 释放前台浏览态内存：取消任务并使本地库索引失效，持久化库数据保持不变。
@@ -1255,6 +1258,8 @@ class WallpaperViewModel: ObservableObject {
         loadMoreTask = nil
         debounceTask = nil
         preloadTask = nil
+        pixivHomeHDTask?.cancel()
+        pixivHomeHDTask = nil
 
         wallpapers.removeAll()
         featuredWallpapers.removeAll()
@@ -2012,8 +2017,31 @@ class WallpaperViewModel: ObservableObject {
                     await Task.yield()
                 }
             }
+            schedulePixivHomeHDResolution()
         } catch {
             // 静默忽略
+        }
+    }
+
+    /// Pixiv 排行只返回 240px 小图，hero 整幅拉伸会糊。
+    /// featured 到达后后台解析横版前 8（与 hero 取数一致）的 master1200 URL，按 id 合并进 path；
+    /// thumbs 保持小图供打底/氛围采样。解析失败保留小图现状，不劣化。
+    private func schedulePixivHomeHDResolution() {
+        guard sourceManager.activeSource == .pixiv else { return }
+        pixivHomeHDTask?.cancel()
+        let candidates = Array(featuredWallpapers.filter { $0.dimensionX > $0.dimensionY }.prefix(8))
+        guard !candidates.isEmpty else { return }
+        pixivHomeHDTask = Task { [weak self] in
+            let resolved = await PixivService.shared.homeHighResURLs(for: candidates)
+            guard !Task.isCancelled, let self else { return }
+            guard self.sourceManager.activeSource == .pixiv, !resolved.isEmpty else { return }
+            // 按 id 合并：不整表替换，避免重置轮播位置；源已切走/项已不在表内则丢弃
+            self.featuredWallpapers = self.featuredWallpapers.map { wallpaper in
+                guard let hdURL = resolved[wallpaper.id], hdURL != wallpaper.path else { return wallpaper }
+                var updated = wallpaper
+                updated.path = hdURL
+                return updated
+            }
         }
     }
 

@@ -3,6 +3,7 @@ import AVKit
 import AVFoundation
 import AppKit
 import Kingfisher
+import ImageIO
 import WebKit
 
 struct MediaDetailSheet: View {
@@ -24,8 +25,12 @@ struct MediaDetailSheet: View {
     /// 有意只在创建详情时取一次种子；切换媒体项后不能复用原卡片图像。
     @State private var transitionSeed: NSImage?
     @State private var displayedVideoURL: URL?
-    @State private var loadedBackgroundCoverURL: URL?
-    @State private var loadedBackgroundCoverSize: CGSize = .zero
+    private struct DisplayedCover {
+        let itemID: String
+        let sources: [URL]
+        let image: NSImage
+    }
+    @State private var loadedBackgroundCover: DisplayedCover?
     @State private var backgroundImageResult: DetailBackgroundImageResult?
 
     @ObservedObject private var wallpaperManager = VideoWallpaperManager.shared
@@ -42,10 +47,6 @@ struct MediaDetailSheet: View {
     @State private var isMuted = true
     @State private var isVisible = false
     @State private var isMediaLoaded = false
-    /// 封面/GIF 背景加载失败（非取消）：显示「加载失败 · 重试」胶囊。
-    /// 重试走 mediaBackgroundEpoch 重建背景 + coverForceRefresh 跳过缓存，
-    /// 并丢弃该 URL 的 GIF 探测负缓存，让瞬态网络失败可以恢复。
-    @State private var backgroundLoadFailed = false
     /// 以「未下载」状态打开（或切到）的详情项 ID：背景钉在打开时的远程预览，
     /// 直到真正可播放的资源（烘焙 MP4 / 本地视频 / 静态 Scene 抽帧）落地才替换。
     @State private var pinnedRemoteBackgroundItemID: String?
@@ -146,7 +147,7 @@ struct MediaDetailSheet: View {
 
     private struct DetailBackgroundImageResult {
         let request: DetailBackgroundImageRequest
-        let url: URL
+        let urls: [URL]
     }
 
     private var backgroundImageRequest: DetailBackgroundImageRequest {
@@ -509,34 +510,6 @@ struct MediaDetailSheet: View {
                     )
                 }
 
-                // 封面/GIF 加载失败：底部居中「重试」胶囊（视频背景有自己的封面兜底，不显示）。
-                if backgroundLoadFailed, isVisible, activeTransitionSeed == nil,
-                   activeBackgroundVideoURL == nil, !isNavigating {
-                    Button {
-                        retryBackgroundLoad()
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text("\(t("loadFailed")) · \(t("retry"))")
-                                .font(.system(size: 13, weight: .semibold))
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 10)
-                        .background(
-                            Capsule()
-                                .fill(.ultraThinMaterial)
-                                .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 0.5))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.bottom, 96)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .zIndex(95)
-                }
-
                 if showInfoBubble {
                     Color.black.opacity(0.001)
                         .ignoresSafeArea()
@@ -742,15 +715,14 @@ struct MediaDetailSheet: View {
             let request = backgroundImageRequest
             guard request.isActive else { return }
             let item = resolvedItem
-            let url: URL?
-            if request.isPinnedRemote {
-                url = undownloadedStylePreviewImageURL
-            } else {
-                url = await WallpaperTransitionImageLoader.mediaImageURL(
-                    item: item, record: currentDownloadRecord, isBaking: request.isBaking)
-            }
-            guard !Task.isCancelled, request == backgroundImageRequest, let url else { return }
-            backgroundImageResult = DetailBackgroundImageResult(request: request, url: url)
+            let resolved = await WallpaperTransitionImageLoader.mediaImageURL(
+                item: item, record: currentDownloadRecord, isBaking: request.isBaking)
+            guard !Task.isCancelled, request == backgroundImageRequest else { return }
+            let urls = DetailCoverLoader.orderedSources([
+                resolved, fallbackHeroImageURL, localWorkshopPreviewFallbackURL,
+                item.posterURL, item.thumbnailURL
+            ])
+            backgroundImageResult = DetailBackgroundImageResult(request: request, urls: urls)
         }
         .onChange(of: preparedTransitionImage) { _, image in
             guard resolvedItem.id == initialItem.id, activeTransitionSeed != nil,
@@ -768,8 +740,7 @@ struct MediaDetailSheet: View {
         .onChange(of: resolvedItem.id) { _, itemID in
             transitionSeed = nil
             displayedVideoURL = nil
-            loadedBackgroundCoverURL = nil
-            backgroundLoadFailed = false
+            loadedBackgroundCover = nil
             onDisplayedItemChange?(itemID)
             pinRemoteBackgroundIfNeeded()
             restoreSceneBakeProgressIfNeeded()
@@ -810,7 +781,6 @@ struct MediaDetailSheet: View {
                 return
             }
             isMediaLoaded = false
-            backgroundLoadFailed = false
             mediaBackgroundEpoch &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: .localMediaPosterDidUpdate)) { notification in
@@ -821,7 +791,6 @@ struct MediaDetailSheet: View {
                 return
             }
             isMediaLoaded = false
-            backgroundLoadFailed = false
             mediaBackgroundEpoch &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: .steamWorkshopLoginRequired)) { notification in
@@ -845,8 +814,8 @@ struct MediaDetailSheet: View {
     }
 
     private var heroImageURL: URL {
-        if let result = backgroundImageResult, result.request == backgroundImageRequest {
-            return result.url
+        if let result = backgroundImageResult, result.request == backgroundImageRequest, let first = result.urls.first {
+            return first
         }
         return fallbackHeroImageURL
     }
@@ -1158,7 +1127,6 @@ struct MediaDetailSheet: View {
         resolvedItem = item
         if mediaBackgroundIdentityKey != previousBackgroundKey {
             isMediaLoaded = false
-            backgroundLoadFailed = false
         }
         return true
     }
@@ -1170,20 +1138,6 @@ struct MediaDetailSheet: View {
         return max(min(viewportHeight * 0.58, 520), 420)
     }
 
-    /// 「加载失败 · 重试」：丢弃探测负缓存 → 重建背景视图。
-    /// 负缓存会让 GIF 判定直接短路；背景 id 不变则 KFImage binder 停在 failure 态不会自发重载。
-    /// 不 forceRefresh：磁盘缓存里可能有上次会话下完的完整数据，跳过它反而每次重试都重下。
-    private func retryBackgroundLoad() {
-        AnimatedImageProbeCache.shared.invalidate(heroImageURL)
-        // forceRefresh 会跳过 KF 磁盘缓存：上次会话已完整落盘的 GIF 也应秒开，
-        // 重试只需丢探测负缓存 + 重建 binder，不必重新下载。
-        coverForceRefresh = false
-        withAnimation(.easeInOut(duration: 0.25)) {
-            backgroundLoadFailed = false
-        }
-        mediaBackgroundEpoch &+= 1
-    }
-
     @ViewBuilder
     private func fixedMediaBackground(width: CGFloat, height viewH: CGFloat) -> some View {
         ZStack {
@@ -1193,46 +1147,28 @@ struct MediaDetailSheet: View {
             let backgroundVideoURL = activeBackgroundVideoURL
             let showPosterUnderVideo = backgroundVideoURL != nil && !(backgroundVideoURL?.isFileURL ?? true)
             let imageItemID = resolvedItem.id
-            let imageURL = heroImageURL
-
-            if shouldActivateMediaBackground,
-               activeTransitionSeed == nil || backgroundImageResult?.request == backgroundImageRequest,
-               backgroundVideoURL == nil || showPosterUnderVideo {
-                KFMediaCoverImage(
-                    url: imageURL,
-                    animated: resolvedItem.shouldRenderThumbnailAsAnimatedImage,
-                    downsampleSize: heroDownsampleSize,
-                    fadeDuration: usesCardTransition && imageItemID == initialItem.id ? 0 : 0.3,
-                    loadFinished: {
-                        guard resolvedItem.id == imageItemID, heroImageURL == imageURL else { return }
-                        coverForceRefresh = false
-                        loadedBackgroundCoverURL = imageURL
-                        loadedBackgroundCoverSize = heroDownsampleSize
-                        synchronizeTransitionImage(itemID: imageItemID, url: imageURL, downsampleSize: heroDownsampleSize)
-                        // 仅在没有视频、或视频尚未 ready 时由封面结束 loading
-                        if backgroundVideoURL == nil {
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                isMediaLoaded = true
-                            }
-                        }
-                    },
-                    layoutSize: heroLayoutSize,
-                    playAnimatedImage: backgroundVideoURL == nil,
-                    forceRefresh: coverForceRefresh,
-                    loadFailed: {
-                        guard resolvedItem.id == imageItemID, heroImageURL == imageURL else { return }
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            backgroundLoadFailed = true
-                        }
-                    },
-                    loadSucceeded: {
-                        guard resolvedItem.id == imageItemID, heroImageURL == imageURL else { return }
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            backgroundLoadFailed = false
-                        }
+            // 数据源重新解析期间也保留本项最后一次成功的封面，不能因重建背景闪回底色。
+            let currentCover = loadedBackgroundCover.flatMap { $0.itemID == imageItemID ? $0.image : nil }
+            if let currentCover, backgroundVideoURL == nil || showPosterUnderVideo {
+                DetailCoverView(image: currentCover, playAnimation: backgroundVideoURL == nil, viewportSize: heroLayoutSize)
+                    .frame(width: width, height: viewH).clipped()
+            }
+            if shouldActivateMediaBackground, let sources = backgroundImageResult,
+               sources.request == backgroundImageRequest, backgroundVideoURL == nil || showPosterUnderVideo {
+                Color.clear.task(id: DetailCoverLoader.Request(urls: sources.urls, size: heroDownsampleSize)) {
+                    let image = await DetailCoverLoader.load(sources.urls, size: heroDownsampleSize, refresh: coverForceRefresh)
+                    guard !Task.isCancelled else { return }
+                    guard resolvedItem.id == imageItemID, sources.request == backgroundImageRequest else { return }
+                    coverForceRefresh = false
+                    if let image {
+                        loadedBackgroundCover = DisplayedCover(itemID: imageItemID, sources: sources.urls, image: image)
+                        synchronizeLoadedBackgroundCover()
                     }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // 失败也停止转圈，但不能撤掉点击列表时已经显示的封面。
+                    if backgroundVideoURL == nil { isMediaLoaded = true }
+                }
+                .frame(width: width, height: viewH)
+                .clipped()
             }
 
             if shouldActivateMediaBackground, let backgroundVideoURL {
@@ -1259,7 +1195,7 @@ struct MediaDetailSheet: View {
             }
 
             if let seed = activeTransitionSeed {
-                // 与现有 KFMediaCoverImage 一致：所有封面居中 fill，按全屏范围裁切。
+                // 所有封面居中 fill，按全屏范围裁切。
                 // 此层只复用点击时已显示的静帧，不触发 GIF 解码、抽帧或播放器。
                 Image(nsImage: seed)
                     .resizable()
@@ -1303,33 +1239,14 @@ struct MediaDetailSheet: View {
     }
 
     private func synchronizeLoadedBackgroundCover() {
-        guard let url = loadedBackgroundCoverURL, url == heroImageURL,
-              loadedBackgroundCoverSize.width > 0, loadedBackgroundCoverSize.height > 0 else { return }
-        synchronizeTransitionImage(itemID: resolvedItem.id, url: url,
-                                   downsampleSize: loadedBackgroundCoverSize)
-    }
-
-    /// KFMediaCoverImage 先写内存缓存再通知 loadFinished。沿同一 URL/cacheKey 和 processor
-    /// 同步取已解码封面；本地 file URL 也必须用 Kingfisher 的 cacheKey，不能用 absoluteString。
-    /// 不为转场重新下载/解码；GIF 动画层不保留此静帧缓存时也必须让位，维持原有播放行为。
-    private func synchronizeTransitionImage(itemID: String, url: URL, downsampleSize: CGSize) {
-        guard resolvedItem.id == itemID, heroImageURL == url,
-              activeTransitionSeed != nil || onTransitionImageReady != nil else { return }
-        // The click-time loader owns HQ selection until the liquid handoff finishes. A catalog
-        // cover loading underneath must not cancel it or replace its HD poster with a thumbnail.
-        guard !isCardTransitionActive, !isPreparingTransitionImage, !isCardTransitionClosing else { return }
-        // A catalog poster must never downgrade the prepared HD still while video buffers.
+        guard let cover = loadedBackgroundCover, cover.itemID == resolvedItem.id,
+              cover.sources == backgroundImageResult?.urls,
+              !isCardTransitionActive, !isPreparingTransitionImage, !isCardTransitionClosing else { return }
+        let image = cover.image
         if activeTransitionSeed != nil, previewVideoURL != nil { return }
-        let options: KingfisherOptionsInfo = [.processor(DownsamplingImageProcessor(size: downsampleSize))]
-        if let image = KingfisherManager.shared.cache.retrieveImageInMemoryCache(
-            forKey: url.cacheKey, options: options
-        ), image.size.width > 0, image.size.height > 0 {
-            onTransitionImageReady?(itemID, image)
-            transitionSeed = nil
-        } else if previewVideoURL == nil {
-            // loadFinished 也覆盖动画层和失败；不让静态 seed 遮住已有 GIF 或失败占位。
-            transitionSeed = nil
-        }
+        // 返回列表的转场只接收静图；GIF 由详情持有并播放。
+        if image.kf.frameSource == nil { onTransitionImageReady?(resolvedItem.id, image) }
+        transitionSeed = nil
     }
 
     private func fixedHeroChrome(viewportWidth: CGFloat, topBarTopInset: CGFloat) -> some View {
@@ -2101,7 +2018,6 @@ struct MediaDetailSheet: View {
         }
 
         isMediaLoaded = false
-        backgroundLoadFailed = false
         mediaBackgroundEpoch &+= 1
 
         // 静态图 onFailure 也会 loadFinished；再兜一层防止卡在黑色 LoadingOverlay
@@ -3760,7 +3676,6 @@ struct MediaDetailSheet: View {
             // 重置状态
             isSettingWallpaper = false
             isMediaLoaded = false
-            backgroundLoadFailed = false
             isSourcesReady = false
             showInfoBubble = false
         }
@@ -5911,7 +5826,6 @@ struct MediaDetailSheet: View {
         isNavigating = true
         // 强制详情背景按新项重建，避免 Kingfisher/AVPlayer 残留上一张 GIF/视频
         isMediaLoaded = false
-        backgroundLoadFailed = false
         mediaBackgroundEpoch &+= 1
 
         if let index = navigationItems.firstIndex(where: { $0.id == patchedItem.id }) {
@@ -5933,6 +5847,219 @@ struct MediaDetailSheet: View {
 }
 
 // MARK: - 详情页加载动画
+// MARK: - 详情封面：同一份响应决定静图或 GIF，不另发 Range 请求
+private enum DetailCoverLoader {
+    struct Request: Equatable { let urls: [URL]; let size: CGSize }
+
+    static func orderedSources(_ candidates: [URL?]) -> [URL] {
+        var seen = Set<URL>()
+        let urls = candidates.compactMap { $0 }.filter { seen.insert($0).inserted }
+        return urls.filter(\.isFileURL) + urls.filter { !$0.isFileURL }
+    }
+
+    struct Processor: ImageProcessor {
+        let size: CGSize
+        var identifier: String { "WaifuX.DetailCover.v1.\(size)" }
+
+        func process(item: ImageProcessItem, options: KingfisherParsedOptionsInfo) -> NSImage? {
+            let data: Data?
+            switch item {
+            case .data(let bytes): data = bytes
+            case .image(let image): data = image.kf.gifRepresentation()
+            }
+            if let data, data.count <= AnimatedImageProbeCache.defaultMaxAnimatedGIFBytes,
+               data.starts(with: Data("GIF".utf8)),
+               let src = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(src) > 1,
+               let image = DefaultImageProcessor.default.process(item: .data(data), options: options), image.kf.frameSource != nil {
+                return image
+            }
+            return DownsamplingImageProcessor(size: size).process(item: item, options: options)
+        }
+    }
+
+    static func load(_ urls: [URL], size: CGSize, refresh: Bool,
+                     manager: KingfisherManager = .shared) async -> NSImage? {
+        // 本地优先、第一个可用就停：已有抽帧的项显示抽帧静图（详情背景语义），
+        // 没抽帧才轮到本地 preview.gif；远程 GIF 只作本地全缺时的兜底。
+        // 候选顺序由 orderedSources 保证（本地在前），这里不再跨候选扫动图。
+        for url in urls {
+            guard !Task.isCancelled else { return nil }
+            var options: KingfisherOptionsInfo = [.processor(Processor(size: size)), .scaleFactor(1)]
+            if url.isFileURL {
+                // 不用同路径旧缓存冒充仍存在的文件。缓存 key 随文件版本更新。
+                guard let info = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]),
+                      info.isRegularFile == true, let count = info.fileSize, count > 0 else { continue }
+                if refresh { options.append(.forceRefresh) }
+                let key = "\(url.cacheKey)|\(count)|\(info.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+                if let result = try? await manager.retrieveImage(with: url.convertToSource(overrideCacheKey: key), options: options) {
+                    return result.image
+                }
+            } else if let result = try? await manager.retrieveImage(with: url.convertToSource(), options: options) {
+                return result.image
+            }
+        }
+        return nil
+    }
+}
+
+private struct DetailCoverView: View {
+    let image: NSImage
+    let playAnimation: Bool
+    var viewportSize: CGSize = .zero
+
+    var body: some View {
+        if playAnimation, image.kf.frameSource != nil {
+            DetailAnimatedCover(image: image, viewportSize: viewportSize)
+        } else {
+            Image(nsImage: image).resizable().scaledToFill()
+        }
+    }
+}
+
+/// 详情 GIF 播放：与列表 hover 同一套「后台解帧 + 定时器逐帧画进普通 NSImageView」。
+/// 不用 Kingfisher AnimatedImageView —— 它在 macOS SwiftUI 宿主里逐帧驱动不可靠，
+/// 且 updateLayer 强制 resizeAspect（letterbox），正是列表当初弃用它的原因
+/// （见 ExploreGridItem「Hover GIF 覆盖播放」注释）。
+private struct DetailAnimatedCover: NSViewRepresentable {
+    let image: NSImage
+    var viewportSize: CGSize = .zero
+
+    func makeNSView(context: Context) -> DetailGIFPlayerView {
+        let view = DetailGIFPlayerView()
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        return view
+    }
+    func updateNSView(_ view: DetailGIFPlayerView, context: Context) {
+        view.play(image: image, viewportSize: viewportSize)
+    }
+    static func dismantleNSView(_ view: DetailGIFPlayerView, coordinator: ()) {
+        view.stop()
+    }
+}
+
+@MainActor
+private final class DetailGIFPlayerView: NSView {
+    private let imageView: NSImageView = {
+        let v = NSImageView()
+        v.imageScaling = .scaleAxesIndependently
+        v.wantsLayer = true
+        v.layer?.contentsGravity = .resizeAspectFill
+        v.layer?.masksToBounds = true
+        return v
+    }()
+    private var frames: [(image: NSImage, duration: TimeInterval)] = []
+    private var frameIndex = 0
+    private var timer: Timer?
+    private var decodeTask: Task<Void, Never>?
+    private var loadedImage: NSImage?
+    private var maxPixel: Int = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        addSubview(imageView)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        imageView.frame = bounds
+    }
+
+    func play(image: NSImage, viewportSize: CGSize) {
+        let scale = min(max(window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2, 1), 2)
+        let edge = max(viewportSize.width, viewportSize.height, bounds.width, bounds.height)
+        let targetPixel = max(64, Int(edge * scale))
+        // 同一张图、同一分辨率预算：不重复解码。
+        if loadedImage === image, maxPixel == targetPixel, !frames.isEmpty { return }
+        stop()
+        loadedImage = image
+        maxPixel = targetPixel
+        guard let data = image.kf.gifRepresentation(), !data.isEmpty else {
+            imageView.image = image
+            return
+        }
+        imageView.image = image
+        let pixel = targetPixel
+        decodeTask = Task { [weak self] in
+            let prepared = await Self.prepareFrames(data: data, maxPixelSize: pixel)
+            guard !Task.isCancelled, let self else { return }
+            self.install(prepared)
+        }
+    }
+
+    func stop() {
+        decodeTask?.cancel()
+        decodeTask = nil
+        timer?.invalidate()
+        timer = nil
+        frames = []
+        frameIndex = 0
+    }
+
+    private func install(_ prepared: [(image: CGImage, duration: TimeInterval)]) {
+        guard !prepared.isEmpty else { return }
+        frames = prepared.map { (image: NSImage(cgImage: $0.image, size: .zero), duration: $0.duration) }
+        frameIndex = frames.count / 2 // 中间帧起播，避开黑色开场帧
+        imageView.image = frames[frameIndex].image
+        advance()
+    }
+
+    private func advance() {
+        guard !frames.isEmpty else { return }
+        let dur = max(frames[frameIndex].duration, 0.05)
+        timer = Timer.scheduledTimer(withTimeInterval: dur, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                guard !self.frames.isEmpty else { return }
+                self.frameIndex = (self.frameIndex + 1) % self.frames.count
+                self.imageView.image = self.frames[self.frameIndex].image
+                self.advance()
+            }
+        }
+    }
+
+    private nonisolated static func prepareFrames(data: Data, maxPixelSize: Int) async -> [(image: CGImage, duration: TimeInterval)] {
+        await Task.detached(priority: .userInitiated) {
+            guard !Task.isCancelled,
+                  let source = CGImageSourceCreateWithData(data as CFData, nil) else { return [] }
+            let count = CGImageSourceGetCount(source)
+            guard count > 1 else { return [] }
+            let maxFrames = 60
+            let step = max(1, (count + maxFrames - 1) / maxFrames)
+            let options: [CFString: Any] = [
+                kCGImageSourceShouldCache: false,
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: max(64, maxPixelSize),
+                kCGImageSourceCreateThumbnailWithTransform: true
+            ]
+            var result: [(image: CGImage, duration: TimeInterval)] = []
+            result.reserveCapacity(min(count, maxFrames))
+            var index = 0
+            while index < count, result.count < maxFrames {
+                guard !Task.isCancelled else { return [] }
+                let end = min(count, index + step)
+                let duration = (index..<end).reduce(0.0) { $0 + frameDuration(at: $1, source: source) }
+                if let cg = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) {
+                    result.append((image: cg, duration: max(duration, 0.05)))
+                }
+                index = end
+            }
+            return result
+        }.value
+    }
+
+    private nonisolated static func frameDuration(at index: Int, source: CGImageSource) -> TimeInterval {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+              let gif = props[kCGImagePropertyGIFDictionary] as? [CFString: Any] else { return 0.1 }
+        if let d = gif[kCGImagePropertyGIFDelayTime] as? NSNumber, d.doubleValue > 0 { return d.doubleValue }
+        if let d = gif[kCGImagePropertyGIFUnclampedDelayTime] as? NSNumber, d.doubleValue > 0 { return d.doubleValue }
+        return 0.1
+    }
+}
+
 private struct LoadingOverlayView: View {
     @State private var isAnimating = false
     @State private var rotationAngle: Double = 0

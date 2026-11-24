@@ -154,6 +154,9 @@ struct HomeContentView: View {
     // 轮播专用 MotionBG 数据（独立于 explore 列表）
     @State private var heroMediaItems: [MediaItem] = []
 
+    // Pixiv 首页 hero 高清预取任务（featured 合并 master1200 后预热缓存）
+    @State private var homeHDPrefetchTask: Task<Void, Never>?
+
     // 更高更沉浸的轮播图，接近参考图比例
     private func heroHeight(for width: CGFloat) -> CGFloat {
         guard width > 0, width.isFinite, !width.isNaN, !width.isInfinite else { return 460 }
@@ -317,6 +320,8 @@ struct HomeContentView: View {
             homeRetryTask?.cancel()
             homeRetryTask = nil
             homeSkeletonTimedOut = false
+            homeHDPrefetchTask?.cancel()
+            homeHDPrefetchTask = nil
             ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.wallpaperShelf)
             ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.mediaShelf)
         }
@@ -336,6 +341,7 @@ struct HomeContentView: View {
                     syncCarouselState(with: heroItems)
                     startCarouselAutoPlay()
                 }
+                prefetchPixivHeroHD()
             } else {
                 stopCarouselAutoPlay()
                 cancelCarouselLoopReset()
@@ -343,6 +349,8 @@ struct HomeContentView: View {
                 atmosphereController.pause()
                 initialLoadTask?.cancel()
                 initialLoadTask = nil
+                homeHDPrefetchTask?.cancel()
+                homeHDPrefetchTask = nil
                 ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.wallpaperShelf)
                 ForegroundPrefetchManager.shared.stop(namespace: HomePrefetchNamespace.mediaShelf)
             }
@@ -363,6 +371,32 @@ struct HomeContentView: View {
             syncCarouselState(with: heroItems)
             stopCarouselAutoPlay()
             startCarouselAutoPlay()
+        }
+        .onChange(of: viewModel.featuredWallpapers) { _, _ in
+            prefetchPixivHeroHD()
+        }
+    }
+
+    /// Pixiv 源：featured 合并进 master1200 URL 后，把 hero 候选的高清图预热进 Kingfisher 缓存，
+    /// 轮播切到时直接命中。走全局 downloader（Referer/直连 URLProtocol 同链路）；限量 8。
+    private func prefetchPixivHeroHD() {
+        homeHDPrefetchTask?.cancel()
+        guard isViewVisible, isTabActive,
+              WallpaperSourceManager.shared.activeSource == .pixiv else { return }
+        let urls = heroItems.prefix(8).compactMap { item -> URL? in
+            guard case .wallpaper(let w) = item, w.source == "pixiv" else { return nil }
+            let url = w.fullImageURL
+            return url?.absoluteString.contains("img-master") == true ? url : nil
+        }
+        guard !urls.isEmpty else { return }
+        homeHDPrefetchTask = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for url in urls {
+                    group.addTask {
+                        _ = try? await KingfisherManager.shared.retrieveImage(with: .network(url))
+                    }
+                }
+            }
         }
     }
 
@@ -958,6 +992,8 @@ private struct HeroSlide: View {
     let height: CGFloat
 
     @State private var imageLoadFailed = false
+    /// Pixiv 高清层加载失败时隐藏顶层，保留低清打底，不露失败占位
+    @State private var hdLayerFailed = false
 
     private var palette: HeroDrivenPalette {
         switch item {
@@ -970,13 +1006,29 @@ private struct HeroSlide: View {
         item.imageURL
     }
 
+    /// Pixiv 排行接口只给 240px 小图：先用缩略图即时打底，
+    /// ViewModel 解析出 master1200 后高清层原地淡入升级；非 Pixiv 源 path 即全分辨率，单层原逻辑。
+    private var isPixivHero: Bool {
+        if case .wallpaper(let w) = item { return w.source == "pixiv" }
+        return false
+    }
+
+    private var baseImageURL: URL? {
+        isPixivHero ? (item.thumbnailURL ?? imageURL) : imageURL
+    }
+
+    private var hdImageURL: URL? {
+        guard isPixivHero, let full = imageURL, full != baseImageURL else { return nil }
+        return full
+    }
+
     var body: some View {
         ZStack {
             if imageLoadFailed {
                 // 加载失败时摘掉转圈占位符，避免 repeatForever 动画常驻空转
                 heroPlaceholder(showsProgress: false)
             } else {
-                KFImage(imageURL)
+                KFImage(baseImageURL)
                     .cacheOriginalImage()
                     .fade(duration: 0.25)
                     .placeholder { _ in
@@ -984,8 +1036,24 @@ private struct HeroSlide: View {
                     }
                     .retry(maxCount: 2, interval: .seconds(2))
                     .onFailure { err in
-                        AppLogger.error(.general, "[AnimTracker] hero image failed url=\(imageURL?.absoluteString.prefix(120) ?? "nil") err=\(err.localizedDescription)")
+                        AppLogger.error(.general, "[AnimTracker] hero image failed url=\(baseImageURL?.absoluteString.prefix(120) ?? "nil") err=\(err.localizedDescription)")
                         imageLoadFailed = true
+                    }
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: width, height: height)
+                    .clipped()
+            }
+
+            if let hdURL = hdImageURL, !hdLayerFailed {
+                KFImage(hdURL)
+                    .cacheOriginalImage()
+                    .fade(duration: 0.25)
+                    .placeholder { _ in Color.clear }
+                    .retry(maxCount: 2, interval: .seconds(2))
+                    .onFailure { _ in
+                        // 高清失败保留打底小图，不露失败占位
+                        hdLayerFailed = true
                     }
                     .resizable()
                     .scaledToFill()
@@ -1002,7 +1070,10 @@ private struct HeroSlide: View {
                 .frame(width: width, height: height)
             }
         }
-        .onChange(of: imageURL) { _ in imageLoadFailed = false }
+        .onChange(of: imageURL) { _ in
+            imageLoadFailed = false
+            hdLayerFailed = false
+        }
     }
 
     private func heroPlaceholder(showsProgress: Bool) -> some View {
