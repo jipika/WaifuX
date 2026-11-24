@@ -9,8 +9,8 @@ import Foundation
 /// - `wallpaperengine-cli`（Web 壁纸 daemon）
 /// - 扩展 / 屏保保持 universal，两个包共用
 ///
-/// 已知差异：x86_64 包暂不含独立的 `ffmpeg` 二进制（仅影响 web 壁纸离线烘焙），
-/// 实时 web/场景渲染与场景壁纸不受影响。
+/// 两个架构包携带的组件集合一致（x86_64 包同样含 `ffmpeg`），
+/// 场景渲染、静态/视频/Web 壁纸在两个包上都可用。
 enum WallpaperEngineAvailability {
     /// 当前包是否内置 scene 渲染器（wallpaper-wgpu）。
     /// 两个架构包都携带自己的渲染器；缺文件时由

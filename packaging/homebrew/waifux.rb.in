@@ -1,7 +1,7 @@
 cask "waifux" do
   version "__VERSION__"
 
-  # 按架构分发：arm64 包含场景渲染器全家桶；x86_64 包不含（wgpu 生态暂为 arm64-only）。
+  # 按架构分发：两个包各自携带本架构的渲染器全家桶（wgpu / DXC / ffmpeg / web daemon）。
   on_arm do
     sha256 "__SHA256_ARM__"
 

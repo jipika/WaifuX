@@ -1785,7 +1785,7 @@ final class WallpaperEngineXBridge: ObservableObject {
             }
         }
 
-        // 失败文案统一走一次翻译：Intel Mac 上跑 arm64 渲染器时系统只回
+        // 失败文案统一走一次翻译：包架构与机器不符时系统只回
         // 「可执行文件中CPU类型不正确」，用户看不懂，客服每次都要解释一遍。
         let launchFailureText = lastLaunchError.map { WallpaperEngineError.userFacingLaunchFailure($0) }
         let launchFailedByCPUType = lastLaunchError.map { WallpaperEngineError.isCPUTypeMismatch($0) } ?? false
@@ -4370,13 +4370,14 @@ final class WallpaperEngineXBridge: ObservableObject {
     /// （烘焙/预览子进程各有 1.5GB 看门狗，这里没有），异常场景下会无限膨胀
     /// 拖垮系统。phys_footprint 超限 → 记日志并终止该屏进程；进程退出后由
     /// `processPendingTermination` 照常清理 screenProcesses/renderStates，
-    /// Scene 渲染进程没有自动重启逻辑，不会产生重启循环。
-    /// 阈值默认 2560MB，可用 UserDefaults `scene_renderer_memory_limit_mb` 覆盖；
+    /// 看门狗击杀会进自愈队列重新拉起（同一壁纸持续膨胀时会表现为周期性重启）。
+    /// 阈值默认 4096MB，可用 UserDefaults `scene_renderer_memory_limit_mb` 覆盖
+    /// （设置 → 壁纸引擎「场景渲染内存上限」）；每轮采样重读，运行中改值 ≤2s 生效。
     /// 启动后 10s 内不采样，避免场景加载期的正常瞬时峰值误杀。
     private func startRendererMemoryWatchdog(process: Process, screenID: String) {
         let pid = process.processIdentifier
-        let limitMB = UInt64(max(512, WaifuXPreferences.shared.object(forKey: "scene_renderer_memory_limit_mb") as? Int ?? 2560))
-        let limitBytes = limitMB * 1_048_576
+        var limitMB = UInt64(Self.resolvedSceneRendererMemoryLimitMB())
+        var limitBytes = limitMB * 1_048_576
         let startedAt = Date()
         let graceInterval: TimeInterval = 10
         Task(priority: .utility) { [weak self] in
@@ -4384,6 +4385,13 @@ final class WallpaperEngineXBridge: ObservableObject {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard process.isRunning, process.processIdentifier == pid else { return }
                 guard Date().timeIntervalSince(startedAt) >= graceInterval else { continue }
+                // 每轮重读阈值：设置页改动无需重启渲染进程即可生效。
+                // 偏好对象主线程亲和（类 @MainActor），hop 一次开销可忽略。
+                let refreshedLimitMB = UInt64(await MainActor.run { Self.resolvedSceneRendererMemoryLimitMB() })
+                if refreshedLimitMB != limitMB {
+                    limitMB = refreshedLimitMB
+                    limitBytes = limitMB * 1_048_576
+                }
                 var info = rusage_info_current()
                 let status = withUnsafeMutablePointer(to: &info) { pointer in
                     pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
@@ -4416,6 +4424,12 @@ final class WallpaperEngineXBridge: ObservableObject {
                 return
             }
         }
+    }
+
+    /// 看门狗阈值单点解析：默认 4096MB，下限钳 512MB；键值类型不符时回退默认。
+    /// 设置页（SettingsViewModel）与云同步导入写的都是 Int，此处 `as? Int` 兼容 NSNumber。
+    static func resolvedSceneRendererMemoryLimitMB() -> Int {
+        max(512, WaifuXPreferences.shared.object(forKey: "scene_renderer_memory_limit_mb") as? Int ?? 4096)
     }
 
     private nonisolated func enqueueTermination(_ event: TerminationEvent) {
@@ -7255,13 +7269,13 @@ enum WallpaperEngineError: LocalizedError {
     case legacyCliNotFound
     case screenCaptureDenied
     case executionFailed(String)
-    /// x86_64 包不携带 scene 渲染器（wgpu 生态 arm64-only），入口占位短路。
+    /// 安装包缺少 scene 渲染器组件（异常安装或架构装错），入口占位短路。
     case sceneRendererUnavailable
 
-    /// CPU 架构不匹配时的用户可见文案。wallpaper-wgpu 只发布 arm64 版本，Intel
-    /// Mac 上必然启动失败，而系统原文案是「未能完成该操作。可执行文件中CPU类型不正确」，
+    /// CPU 架构不匹配时的用户可见文案。两个架构包各自携带匹配的 wallpaper-wgpu，
+    /// 只有装错架构包时才会撞上，而系统原文案是「未能完成该操作。可执行文件中CPU类型不正确」，
     /// 用户看到后只能来问「CPU类型不正确是什么意思」，所以换成能自解释的说法。
-    static var unsupportedIntelCPUDescription: String { LocalizationService.shared.t("不支持英特尔处理器：Scene 渲染器 wallpaper-wgpu 只提供 Apple 芯片（arm64）版本") }
+    static var unsupportedIntelCPUDescription: String { LocalizationService.shared.t("场景渲染器与当前处理器架构不匹配：请确认安装包架构（arm64 / x86_64）与本机一致") }
 
     /// `posix_spawn` 在 CPU 架构不匹配时返回 EBADARCH；LaunchServices 路径则给出
     /// 本地化文案，所以 errno 与文案双保险。

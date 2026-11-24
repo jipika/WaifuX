@@ -74,7 +74,7 @@
 | ⚡️ **One-click Apply** | ✅ | Set as desktop wallpaper or dynamic desktop directly while browsing |
 | 🖥️ **Multi-display Support** | ✅ | Set different wallpapers for each display — perfect for multi-monitor setups |
 | 📥 **Local Data Import** | ✅ | Import local wallpaper folders for unified management of personal collections |
-| 🧊 **Wallpaper Engine Rendering (Beta)** | ✅ | Experimental Wallpaper Engine live wallpapers: **scene** (native Rust + Metal/wgpu renderer) and **Web** (HTML/JS) types, both via the built-in renderer — not a generic “any website as wallpaper” feature<br>⚠️ **Apple Silicon (arm64) only; Intel chips are not supported** |
+| 🧊 **Wallpaper Engine Rendering (Beta)** | ✅ | Experimental Wallpaper Engine live wallpapers: **scene** (native Rust + Metal/wgpu renderer) and **Web** (HTML/JS) types, both via the built-in renderer — not a generic “any website as wallpaper” feature<br>✅ **Both Apple Silicon (arm64) and Intel (x86_64) are supported**, each installer bundles its own architecture-matched renderer components |
 | 🔄 **Auto-updating Rules** | ✅ | Rule configurations loaded remotely via GitHub — quick adaptation when source sites change |
 | ☁️ **Cross-device Sync** | 🚧 | Cloud sync for favorites (in development) |
 
