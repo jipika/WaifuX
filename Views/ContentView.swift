@@ -523,11 +523,18 @@ struct ContentView: View {
             navigationState.isHomeChromeHidden = false
             cardSourceTabDidChange(to: tab)
         }
-        .onChange(of: detailPath.count) { _, depth in
-            AppResponsivenessMonitor.noteDetailDepth(depth)
-            // 详情页功能导览（WaifuX GuideKit）
-            if depth > 0 {
-                GuideEngine.shared.noteDetailOpened()
+        .onChange(of: detailPath) { _, path in
+            AppResponsivenessMonitor.noteDetailDepth(path.count)
+            // 详情页功能导览（WaifuX GuideKit）：只有壁纸/媒体详情有导览锚点。
+            // 动漫/漫画详情不触发——否则四步锚点全缺空跑一轮，还把 detail 导览
+            // 记成已看，压掉之后首次打开壁纸详情的自动播放。
+            if let top = path.last {
+                switch top {
+                case .wallpaper, .media:
+                    GuideEngine.shared.noteDetailOpened()
+                case .anime, .manga:
+                    break
+                }
             }
         }
         // 必须位于详情页 NavigationStack 的外层，已有详情页显示时也要能收到替换请求。

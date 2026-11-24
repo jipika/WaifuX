@@ -487,7 +487,7 @@ final class AppLogger: @unchecked Sendable {
     // MARK: - 导出日志到桌面
 
     /// 把全部诊断日志聚合到桌面一个文件（App 运行日志、扩展、退出诊断、CLI、
-    /// 扩展守护、烘焙失败现场），渲染器日志单独打一个 zip。
+    /// 扩展守护、烘焙失败现场、系统崩溃/挂死报告），渲染器日志逐屏并入同一文件。
     ///
     /// 契约：任一来源缺失/不可读/为空时写入一行「[跳过] 原因」并继续，
     /// 绝不因为某一段缺失让整个导出失败。每段只保留尾部 N KiB。
@@ -515,7 +515,7 @@ final class AppLogger: @unchecked Sendable {
         header += "导出时间: \(Date())\n"
         header += "版本: \(version)\n"
         header += "系统: \(ProcessInfo.processInfo.operatingSystemVersionString)\n"
-        header += "说明: 以下为各日志来源的尾部片段；渲染器日志另存桌面 zip。\n"
+        header += "说明: 以下为各日志来源的尾部片段；系统崩溃/挂死报告（.ips/.diag）已并入 SYSTEM DIAGNOSTIC REPORTS 段。\n"
         try header.write(to: destination, atomically: true, encoding: .utf8)
 
         var readableSegments = 0
@@ -555,6 +555,10 @@ final class AppLogger: @unchecked Sendable {
             maxBytes: 256 * 1024,
             to: destination
         )
+
+        // 系统诊断报告（崩溃 / 挂死 / CPU 超限 / web daemon 异常）：只有系统侧
+        // 留痕的故障（启动期挂死、Helper 被杀）靠这段定案，与自有日志合并导出。
+        readableSegments += appendSystemDiagnosticReports(to: destination)
 
         // 「无法与帮助程序通信」光看日志定不了案（2026-11-01：只有 4097，看不出
         // Helper 是起不来、被锁挡住还是旧进程在拒连），要现场的 launchd 与进程状态。
@@ -676,6 +680,105 @@ final class AppLogger: @unchecked Sendable {
             "segments": String(readableSegments)
         ])
         return destination
+    }
+
+    // MARK: - 系统诊断报告（.ips / .diag）合并
+
+    /// 只收本软件家族进程的系统报告；系统进程（textunderstandingd 等）一律不收。
+    private static let diagnosticProcessPrefixes = [
+        "WaifuX", "waifux", "wallpaper-wgpu", "wallpaperengine-cli", "dxc", "ffmpeg",
+    ]
+
+    /// 报告目录：用户级为主，系统级兜底（个别报告落在 /Library）；
+    /// 各自的 Retired 子目录是系统轮转走的旧报告，一并扫描。
+    /// 测试钩子：WAIFUX_DIAGNOSTIC_REPORT_DIRS 可用 ":" 分隔指到 fixture 目录，
+    /// 每个指定目录同样附带其 Retired 子目录，与生产语义一致。
+    private static func diagnosticReportDirectories() -> [URL] {
+        let bases: [URL]
+        if let override = getenv("WAIFUX_DIAGNOSTIC_REPORT_DIRS"), strlen(override) > 0 {
+            bases = String(cString: override).split(separator: ":").map {
+                URL(fileURLWithPath: String($0), isDirectory: true)
+            }
+        } else {
+            let fm = FileManager.default
+            bases = [
+                fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/DiagnosticReports", isDirectory: true),
+                URL(fileURLWithPath: "/Library/Logs/DiagnosticReports", isDirectory: true),
+            ]
+        }
+        return bases.flatMap { [$0, $0.appendingPathComponent("Retired", isDirectory: true)] }
+    }
+
+    /// 把最近的系统诊断报告并入导出：按修改时间取最新 12 份、14 天内，
+    /// 单份尾部 192KiB（.ips 的栈与 Binary Images 在尾部），总量封顶 1.5MiB。
+    /// 每份先写一行摘要（bug_type / 版本 / 进程路径），再附原文，
+    /// 任一目录不可读时写一行说明并继续，不影响其余段。
+    private static func appendSystemDiagnosticReports(to destination: URL) -> Int {
+        let title = "SYSTEM DIAGNOSTIC REPORTS"
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-14 * 24 * 3600)
+        var candidates: [(url: URL, modified: Date)] = []
+        var scannedDirs = 0
+        for dir in diagnosticReportDirectories() {
+            guard let files = try? fm.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            scannedDirs += 1
+            for url in files {
+                let ext = url.pathExtension
+                guard ext == "ips" || ext == "diag" || ext == "crash" else { continue }
+                let name = url.lastPathComponent
+                guard diagnosticProcessPrefixes.contains(where: { name.hasPrefix($0) }) else { continue }
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                guard modified >= cutoff else { continue }
+                candidates.append((url, modified))
+            }
+        }
+        guard scannedDirs > 0 else {
+            appendSkipped(title, reason: "诊断报告目录不可读", to: destination)
+            return 0
+        }
+        let recent = candidates.sorted { $0.modified > $1.modified }.prefix(12)
+        guard !recent.isEmpty else {
+            appendSkipped(title, reason: "近 14 天无本软件进程的系统诊断报告（属正常状态）", to: destination)
+            return 0
+        }
+        guard let output = try? FileHandle(forWritingTo: destination) else { return 0 }
+        defer { try? output.close() }
+        output.seekToEndOfFile()
+        let formatter = ISO8601DateFormatter()
+        output.write(Data("\n--- \(title) (最近 \(recent.count) 份 / 14 天内) ---\n".utf8))
+        var written = 0
+        var budget = 1_572_864
+        for (url, modified) in recent {
+            guard budget > 0, let input = try? FileHandle(forReadingFrom: url) else { continue }
+            let size = input.seekToEndOfFile()
+            let take = Int(min(size, 192 * 1024, UInt64(budget)))
+            input.seek(toFileOffset: size - UInt64(take))
+            let data = input.readData(ofLength: take)
+            try? input.close()
+            guard !data.isEmpty else { continue }
+            // .ips 首行是 JSON 头（app_name/bug_type/版本）；截尾后拿不到时标注即可。
+            var summary = ""
+            if let head = try? String(contentsOf: url, encoding: .utf8).prefix(4096),
+               let firstLine = head.split(separator: "\n").first,
+               let headerData = firstLine.data(using: .utf8),
+               let json = (try? JSONSerialization.jsonObject(with: headerData)) as? [String: Any] {
+                let bugType = json["bug_type"] as? String ?? "?"
+                let appVersion = json["app_version"] as? String ?? "?"
+                summary = " bug_type=\(bugType) app_version=\(appVersion)"
+            }
+            let header = "\n[REPORT] \(url.lastPathComponent) modified=\(formatter.string(from: modified))\(summary)\n来源: \(url.path)\n"
+            output.write(Data(header.utf8))
+            output.write(data)
+            if data.last != 0x0A { output.write(Data("\n".utf8)) }
+            budget -= data.count
+            written += 1
+        }
+        return written > 0 ? 1 : 0
     }
 
     /// 追加一段日志尾部；返回是否读取到内容。

@@ -7,7 +7,7 @@ import Security
 /// 凭证来源（按优先级）：
 /// 1. 进程环境变量 `WAIFUX_DANDAN_APPID` / `WAIFUX_DANDAN_APPSECRET`（本地开发）
 /// 2. 构建注入的 `Info.plist`（CI 由 GitHub Secrets 写入，键 `WaifuXDandanAppID` / `WaifuXDandanAppSecret`）
-/// 3. 用户在设置页填写后保存在 Keychain 的本机凭证
+/// 3. 历史版本用户在设置页填写、保存在 Keychain 的本机凭证（UI 入口已移除，仅兼容读取）
 /// 签名算法（官方文档）：`base64(sha256(AppId + Timestamp + Path + AppSecret))`，Path 不含域名与查询串。
 enum DanmakuCredentials {
     private static let keychainService = "com.waifux.app.dandanplay"
@@ -57,7 +57,8 @@ enum DanmakuCredentials {
         return .none
     }
 
-    /// 保存用户提供的凭证到 Keychain；传空清除。返回是否成功。
+    /// 历史 UI 遗留的 Keychain 写入接口（设置页填写入口已移除，当前无调用方）。
+    /// 传空清除。返回是否成功。
     @discardableResult
     static func saveUserCredentials(appID: String, appSecret: String) -> Bool {
         let id = appID.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -1372,11 +1372,59 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
               }, true);
             });
           }
+          // 命中兼容层：runtime5 导出包把姿势卡美术挂在 camera 骨骼上，比 interaction
+          // JSON 热区低约 50px（实测美术 y135–230 vs 热区 y80–192）；卡片点亮期间倒立
+          // 角色的大热区仍启用并罩住卡片下半截，裸 hitCfg 会把下半截点击判给角色。
+          // 不改工坊包：卡片启用时，桥合成事件在卡片屏幕带（热区+下方 64px）内强制
+          // 钳进卡片热区；真实光标事件只读坐标不改写。页面 API 缺失时原样放行。
+          var wxClampMemo = null;
+          function wxCardClampY(x, y, isDown) {
+            var why = '';
+            var oy = y;
+            try {
+              if (!isDown && wxClampMemo && Math.hypot(x - wxClampMemo.x, y - wxClampMemo.y) < 16) {
+                why = 'memo'; y = wxClampMemo.ny;
+              } else {
+                var rt = window.__rt5;
+                if (!rt || !rt.touch || !rt.hitTest || !rt.quad) { why = 'noapi'; }
+                else {
+                  var ts = rt.touch(), best = null, bestD = 1e9;
+                  for (var i = 0; i < ts.length; i++) {
+                    var t = ts[i];
+                    if (!t.enabled || t.sName !== 'click7' || t.changerole || t.drag) continue;
+                    var q = rt.quad(t.index);
+                    if (!q || q.length !== 4) continue;
+                    var x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+                    for (var k = 0; k < 4; k++) {
+                      x0 = Math.min(x0, q[k].x); x1 = Math.max(x1, q[k].x);
+                      y0 = Math.min(y0, q[k].y); y1 = Math.max(y1, q[k].y);
+                    }
+                    if (x < x0 - 2 || x > x1 + 2 || y < y0 || y > y1 + 64) continue;
+                    var d = Math.abs(y - y1);
+                    if (d < bestD) { bestD = d; best = { y0: y0, y1: y1 }; }
+                  }
+                  if (!best) { why = 'nobest'; }
+                  else {
+                    var ny = Math.min(Math.max(y, best.y0 + 10), best.y1 - 10);
+                    if (rt.hitTest(x, ny) === null) { why = 'nohit'; }
+                    else { why = 'clamp'; y = ny; }
+                  }
+                }
+              }
+            } catch (e) { why = 'err:' + e; }
+            if (isDown) wxClampMemo = (why === 'clamp') ? { x: x, y: oy, ny: y } : null;
+            (window.__wxClampLog = window.__wxClampLog || []).push([Math.round(x), Math.round(y), why]);
+            if (window.__wxClampLog.length > 20) window.__wxClampLog.shift();
+            return y;
+          }
           if (window.__wxMouseBridge) return;
           window.__wxMouseBridge = {
             lastDownTarget: null,
             cancel: function() { this.lastDownTarget = null; },
+            probe: function(x, y) { this.dispatch('mousedown', x, y, 0, 0, 0); this.dispatch('mouseup', x, y, 0, 0, 0); },
             dispatch: function(type, x, y, button, deltaX, deltaY) {
+              if (type === 'mousedown') y = wxCardClampY(x, y, true);
+              else if (type === 'mouseup') y = wxCardClampY(x, y, false);
               var el = document.elementFromPoint(x, y);
               if (!el) el = document.documentElement;
               if (type === 'wheel') {
@@ -3475,11 +3523,38 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
 
     func pushAudioFrame(_ floats: [Float]) {
         // 诊断哨兵：全 1.0 频谱帧触发页面事件日志回传（临时调试通道）。
+        // 首值 0.999 + 后续 1..16 编码 = 经 __rt5.clickIndex 走真实 Lua 回调的点击序列（间隔 0.8s，避开 0.5s 全局节流）。
+        // 首值 0.998 + [x, y] = 经真实桥 dispatch（含命中兼容层）合成一次点击（临时调试通道）。
+        if floats.count >= 3 && floats[0] == 0.998 {
+            let px = Int(floats[1]), py = Int(floats[2])
+            for (screen, state) in screenStates where state.isLoaded {
+                guard let webView = state.webView else { continue }
+                DispatchQueue.main.async { [weak webView] in
+                    webView?.evaluateJavaScript("window.__wxMouseBridge && window.__wxMouseBridge.probe(\(px),\(py));") { _, error in
+                        dlog("[WebRendererBridge] BRIDGEPROBE screen=\(screen) at=\(px),\(py) error=\(String(describing: error))")
+                    }
+                }
+            }
+            return
+        }
+        if floats.count >= 2 && floats[0] == 0.999 && floats[1...].allSatisfy({ $0 >= 1 && $0 <= 16 && $0 == $0.rounded() }) {
+            let idxs = floats[1...].map { Int($0) }
+            let seq = idxs.map { String($0) }.joined(separator: ",")
+            for (screen, state) in screenStates where state.isLoaded {
+                guard let webView = state.webView else { continue }
+                DispatchQueue.main.async { [weak webView] in
+                    webView?.evaluateJavaScript("(function(){var s=[\(seq)];var k=0;function n(){if(k>=s.length)return;try{window.__rt5.clickIndex(s[k]);}catch(e){}k++;setTimeout(n,800);}n();return s.join(',');})()") { result, error in
+                        dlog("[WebRendererBridge] CLICKSEQ screen=\(screen) result=\(String(describing: result)) error=\(String(describing: error))")
+                    }
+                }
+            }
+            return
+        }
         if floats.allSatisfy({ $0 == 1.0 }) {
             for (screen, state) in screenStates where state.isLoaded {
                 guard let webView = state.webView else { continue }
                 DispatchQueue.main.async { [weak webView] in
-                    webView?.evaluateJavaScript("JSON.stringify({log: window.__wxEventLog || [], pomo: (document.getElementById('gp-pomo-label') || {}).textContent, last: window.__wxLastMouseTarget, vp: [innerWidth, innerHeight, devicePixelRatio], ring: (function(){var r=document.getElementById('gp-pomo-ring').getBoundingClientRect();return [r.x,r.y,r.width,r.height];})(), corner: (function(){var r=document.querySelector('.corner-se').getBoundingClientRect();return [r.x,r.y,r.width,r.height];})(), zoom: getComputedStyle(document.documentElement).zoom, at779: (function(){var e=document.elementFromPoint(714,779);return e&&(e.id||e.className);})(), at862: (function(){var e=document.elementFromPoint(714,862);return e&&(e.id||e.className);})(), card: (function(){var r=document.getElementById('gp-pomo').getBoundingClientRect();return [r.x,r.y,r.width,r.height];})()})") { result, error in
+                    webView?.evaluateJavaScript("JSON.stringify({log: window.__wxEventLog || [], last: window.__wxLastMouseTarget, vp: [innerWidth, innerHeight, devicePixelRatio], rt5: (window.__rt5logs || []).slice(-30), uiOpen: (window.__rt5 && window.__rt5.ui) ? window.__rt5.ui().open : null, uiTrace: (window.__rt5 && window.__rt5.ui) ? window.__rt5.ui().trace : null, domTop: Array.from(document.body.children).map(function(e){var r=e.getBoundingClientRect();return [e.id || e.tagName, Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height), e.children.length];}), touchN: (window.__touch || []).length, ready: !!(window.__rt5 && window.__rt5.ready && window.__rt5.ready()), touchPos: (window.__rt5 && window.__rt5.touch) ? window.__rt5.touch().map(function(t){return [t.index, t.sName, Math.round(t.x), Math.round(t.y), t.enabled];}) : null, hit941_50: (window.__rt5 && window.__rt5.hitTest) ? window.__rt5.hitTest(941,50) : null, hit935_48: (window.__rt5 && window.__rt5.hitTest) ? window.__rt5.hitTest(935,48) : null, hit815_44: (window.__rt5 && window.__rt5.hitTest) ? window.__rt5.hitTest(815,44) : null, hit776_44: (window.__rt5 && window.__rt5.hitTest) ? window.__rt5.hitTest(776,44) : null, hud: (document.getElementById('hud') || {}).textContent ? (document.getElementById('hud').textContent || '').slice(-400) : null, pomo: (document.getElementById('gp-pomo-label') || {}).textContent, ring: (function(){var e=document.getElementById('gp-pomo-ring');if(!e)return null;var r=e.getBoundingClientRect();return [r.x,r.y,r.width,r.height];})(), corner: (function(){var e=document.querySelector('.corner-se');if(!e)return null;var r=e.getBoundingClientRect();return [r.x,r.y,r.width,r.height];})(), zoom: getComputedStyle(document.documentElement).zoom, at779: (function(){var e=document.elementFromPoint(714,779);return e&&(e.id||e.className);})(), at862: (function(){var e=document.elementFromPoint(714,862);return e&&(e.id||e.className);})(), card: (function(){var e=document.getElementById('gp-pomo');if(!e)return null;var r=e.getBoundingClientRect();return [r.x,r.y,r.width,r.height];})(), quads: (window.__rt5 && window.__rt5.quad) ? [2,3,4,5,6,7,8,9,10,11,12].map(function(i){var q=window.__rt5.quad(i);return q?[i,q.map(function(p){return [Math.round(p.x),Math.round(p.y)];})]:null;}).filter(Boolean) : null, hits: (window.__rt5 && window.__rt5.hitTest) ? [[716,453],[700,450],[660,450],[620,470],[560,600],[520,650],[600,700],[480,600],[760,300],[700,250],[941,137],[1386,178]].map(function(p){return [p[0],p[1],window.__rt5.hitTest(p[0],p[1])];}) : null, tracks: (window.__rt5 && window.__rt5.tracks) ? window.__rt5.tracks() : null, pos: (window.__rt5 && window.__rt5.posXform) ? window.__rt5.posXform() : null, clampLog: window.__wxClampLog || []})") { result, error in
                         dlog("[WebRendererBridge] EVENTLOG screen=\(screen) result=\(String(describing: result)) error=\(String(describing: error))")
                     }
                 }
@@ -3823,6 +3898,9 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
     private var wallpaperLayerDesktopWindowIDs: Set<Int> = []
     /// 部分 macOS 版本桌面点击由 Dock 进程的全屏窗口接收（隐藏图标后实测）。
     private var dockDesktopWindowIDs: Set<Int> = []
+    /// 壁纸扩展当选后，桌面点击由 WallpaperAgent 的全屏宿主窗接收
+    /// （Offscreen Wallpaper Window，2026-11-24 实测）。
+    private var wallpaperAgentDesktopWindowIDs: Set<Int> = []
     private var bridgedMouseDownScreen: Int?
     private var loggedFinderHitTestFailure = false
     /// AX 未授权时的降级只报告一次，避免每次点击刷日志。
@@ -3854,7 +3932,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         let ax = AXIsProcessTrusted()
         lastAXTrustedForLog = ax
         lastMouseSummaryTime = CFAbsoluteTimeGetCurrent()
-        dlog("[WebRendererBridge] mouse bridge START screen=\(screen) accessibility=\(ax) FinderDesktopWindows=\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(wallpaperLayerDesktopWindowIDs.sorted()) dockDesktop=\(dockDesktopWindowIDs.sorted()) loadedScreens=\(loadedScreens.sorted())")
+        dlog("[WebRendererBridge] mouse bridge START screen=\(screen) accessibility=\(ax) FinderDesktopWindows=\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(wallpaperLayerDesktopWindowIDs.sorted()) dockDesktop=\(dockDesktopWindowIDs.sorted()) agentDesktop=\(wallpaperAgentDesktopWindowIDs.sorted()) loadedScreens=\(loadedScreens.sorted())")
         let eventTypes: [(NSEvent.EventTypeMask, String)] = [
             (.leftMouseDown, "mousedown"), (.leftMouseUp, "mouseup"),
             (.mouseMoved, "mousemove"), (.scrollWheel, "wheel")
@@ -3908,7 +3986,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         if mouseForwardedCounts.isEmpty && mouseDroppedCounts.isEmpty { return }
         let fwd = mouseForwardedCounts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
         let drop = mouseDroppedCounts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
-        dlog("[WebRendererBridge] mouse summary 10s fwd{\(fwd)} drop{\(drop)} ax=\(AXIsProcessTrusted()) finder=\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(wallpaperLayerDesktopWindowIDs.sorted()) dock=\(dockDesktopWindowIDs.sorted())")
+        dlog("[WebRendererBridge] mouse summary 10s fwd{\(fwd)} drop{\(drop)} ax=\(AXIsProcessTrusted()) finder=\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(wallpaperLayerDesktopWindowIDs.sorted()) dock=\(dockDesktopWindowIDs.sorted()) agent=\(wallpaperAgentDesktopWindowIDs.sorted())")
         mouseForwardedCounts.removeAll()
         mouseDroppedCounts.removeAll()
     }
@@ -3926,6 +4004,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         finderDesktopWindowIDs.removeAll()
         wallpaperLayerDesktopWindowIDs.removeAll()
         dockDesktopWindowIDs.removeAll()
+        wallpaperAgentDesktopWindowIDs.removeAll()
         lastGlobalMouseMoveTime = 0
         loggedFinderHitTestFailure = false
         loggedAccessibilityFallback = false
@@ -3940,6 +4019,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         var finderIDs: Set<Int> = []
         var wallpaperIDs: Set<Int> = []
         var dockIDs: Set<Int> = []
+        var agentIDs: Set<Int> = []
         for info in windows {
             guard let pid = info[kCGWindowOwnerPID as String] as? Int,
                   let app = NSRunningApplication(processIdentifier: pid_t(pid)),
@@ -3970,10 +4050,25 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
                }) {
                 dockIDs.insert(windowID)
             }
+            // 壁纸扩展被系统选中后，桌面点击改落 WallpaperAgent 的全屏宿主窗
+            // （Offscreen Wallpaper Window，layer 比 Wallpaper 层还低一级；
+            // 2026-11-24 实测：扩展当选后整屏 mousedown target 都是它）。
+            // 该窗是桌面本体，只认覆盖整屏的窗口；普通 App 窗口不在此列。
+            if app.bundleIdentifier == "com.apple.wallpaper.agent",
+               let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+               let bx = bounds["X"], let by = bounds["Y"],
+               let bw = bounds["Width"], let bh = bounds["Height"],
+               NSScreen.screens.contains(where: {
+                   abs($0.frame.minX - bx) < 1 && abs($0.frame.minY - by) < 1 &&
+                   abs($0.frame.width - bw) < 1 && abs($0.frame.height - bh) < 1
+               }) {
+                agentIDs.insert(windowID)
+            }
         }
         finderDesktopWindowIDs = finderIDs
         wallpaperLayerDesktopWindowIDs = wallpaperIDs
         dockDesktopWindowIDs = dockIDs
+        wallpaperAgentDesktopWindowIDs = agentIDs
     }
 
     private func isBlankFinderDesktop(at event: NSEvent) -> Bool {
@@ -4076,28 +4171,31 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate, WKScriptM
         if !finderDesktopWindowIDs.contains(target),
            !wallpaperLayerDesktopWindowIDs.contains(target),
            !dockDesktopWindowIDs.contains(target),
+           !wallpaperAgentDesktopWindowIDs.contains(target),
            requireBlank {
             // Finder 可能在壁纸加载后重建桌面窗，或用户刚切换隐藏桌面图标。
             let beforeFinder = finderDesktopWindowIDs
             let beforeWallpaper = wallpaperLayerDesktopWindowIDs
             let beforeDock = dockDesktopWindowIDs
+            let beforeAgent = wallpaperAgentDesktopWindowIDs
             refreshFinderDesktopWindowIDs()
-            if finderDesktopWindowIDs != beforeFinder || wallpaperLayerDesktopWindowIDs != beforeWallpaper || dockDesktopWindowIDs != beforeDock {
-                dlog("[WebRendererBridge] mouse desktop windows changed finder=\(beforeFinder.sorted())->\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(beforeWallpaper.sorted())->\(wallpaperLayerDesktopWindowIDs.sorted()) dock=\(beforeDock.sorted())->\(dockDesktopWindowIDs.sorted()) ax=\(AXIsProcessTrusted())")
+            if finderDesktopWindowIDs != beforeFinder || wallpaperLayerDesktopWindowIDs != beforeWallpaper || dockDesktopWindowIDs != beforeDock || wallpaperAgentDesktopWindowIDs != beforeAgent {
+                dlog("[WebRendererBridge] mouse desktop windows changed finder=\(beforeFinder.sorted())->\(finderDesktopWindowIDs.sorted()) wallpaperLayer=\(beforeWallpaper.sorted())->\(wallpaperLayerDesktopWindowIDs.sorted()) dock=\(beforeDock.sorted())->\(dockDesktopWindowIDs.sorted()) agent=\(beforeAgent.sorted())->\(wallpaperAgentDesktopWindowIDs.sorted()) ax=\(AXIsProcessTrusted())")
             }
         }
         guard target > 0 else { return (false, "invalid-window", target) }
         let isFinderDesktop = finderDesktopWindowIDs.contains(target)
         let isWallpaperLayer = wallpaperLayerDesktopWindowIDs.contains(target)
         let isDockDesktop = dockDesktopWindowIDs.contains(target)
-        guard isFinderDesktop || isWallpaperLayer || isDockDesktop else {
+        let isAgentDesktop = wallpaperAgentDesktopWindowIDs.contains(target)
+        guard isFinderDesktop || isWallpaperLayer || isDockDesktop || isAgentDesktop else {
             return (false, "target-not-finder-desktop", target)
         }
         // 隐藏桌面图标后 Finder 没有桌面窗口，点击落在 WindowManager 的
-        // Wallpaper 全屏层或 Dock 全屏接收窗。这两层不存在桌面图标，
-        // 空白检查没有意义，直接转发。
-        if (isWallpaperLayer || isDockDesktop) && !isFinderDesktop {
-            return (true, isDockDesktop ? "dock-desktop" : "wallpaper-layer-desktop", target)
+        // Wallpaper 全屏层、Dock 全屏接收窗或 WallpaperAgent 宿主窗。这几层
+        // 不存在桌面图标，空白检查没有意义，直接转发。
+        if (isWallpaperLayer || isDockDesktop || isAgentDesktop) && !isFinderDesktop {
+            return (true, isDockDesktop ? "dock-desktop" : (isAgentDesktop ? "wallpaper-agent-desktop" : "wallpaper-layer-desktop"), target)
         }
         if !requireBlank { return (true, "finder-desktop", target) }
         // 目标已确认是 Finder 的桌面层窗口（此判定只依赖 CGWindowList，不看 AX）。

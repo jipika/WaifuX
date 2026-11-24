@@ -20,6 +20,14 @@ private func snappedSliderBinding(
     )
 }
 
+/// 内存上限标签：512MB 步进的奇数倍显示一位小数（1.5 GB），整 GB 不带小数。
+private func sceneMemoryLimitLabel(_ megabytes: Double) -> String {
+    let gigabytes = megabytes / 1024
+    return gigabytes == gigabytes.rounded()
+        ? String(format: "%.0f GB", gigabytes)
+        : String(format: "%.1f GB", gigabytes)
+}
+
 // MARK: - 毛玻璃背景视图
 private struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
@@ -63,7 +71,6 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case pixiv
     case konachan
     case bangumi
-    case danmaku
     case scheduler
     case sync
     case about
@@ -80,7 +87,6 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .pixiv: return "Pixiv"
         case .konachan: return "Konachan"
         case .bangumi: return "Bangumi"
-        case .danmaku: return t("settings.danmaku.title")
         case .scheduler: return t("scheduler")
         case .sync: return t("cloudSync")
         case .about: return t("about")
@@ -97,7 +103,6 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .pixiv: return "p.circle"
         case .konachan: return "k.circle"
         case .bangumi: return "person.crop.circle"
-        case .danmaku: return "text.bubble"
         case .scheduler: return "clock.arrow.circlepath"
         case .sync: return "icloud"
         case .about: return "info.circle"
@@ -201,8 +206,6 @@ struct SettingsView: View {
                         KonachanSettingsTab()
                     case .bangumi:
                         BangumiAccountSyncView()
-                    case .danmaku:
-                        DanmakuSettingsTab()
                     case .scheduler:
                         SchedulerSettingsTab(viewModel: viewModel)
                     case .sync:
@@ -241,9 +244,8 @@ struct SettingsView: View {
         case .pixiv: return .settingsTabPixiv
         case .konachan: return .settingsTabKonachan
         case .bangumi: return nil
-        case .danmaku: return nil
         case .scheduler: return .settingsTabScheduler
-        case .sync: return .settingsTabSync
+        case .sync: return nil // 侧栏 filter 隐藏了 sync 项，无锚点可埋
         case .about: return .settingsTabAbout
         }
     }
@@ -1841,7 +1843,7 @@ private struct AboutSettingsTab: View {
                     Divider().background(Color.white.opacity(0.06)).padding(.leading, 16)
 
                     MacLinkRow(title: t("joinQQGroup"), action: {
-                        if let url = URL(string: "https://qm.qq.com/q/SRCj8msygq") {
+                        if let url = URL(string: "https://qm.qq.com/q/NuLBHJQrKu") {
                             NSWorkspace.shared.open(url)
                         }
                     })
@@ -2064,7 +2066,7 @@ private struct WorkshopSettingsTab: View {
 
                 // 场景壁纸实时渲染模式
                 MacSettingsSection {
-                    MacSettingsRow(title: t("workshop.sceneRealtimeRendering"), subtitle: t("workshop.sceneRealtimeRenderingDesc"), showDivider: false) {
+                    MacSettingsRow(title: t("workshop.sceneRealtimeRendering"), subtitle: t("workshop.sceneRealtimeRenderingDesc"), showDivider: true) {
                         MacToggle(isOn: Binding(
                             get: { viewModel.sceneRealtimeRenderingEnabled },
                             set: { newValue in
@@ -2075,6 +2077,26 @@ private struct WorkshopSettingsTab: View {
                                 }
                             }
                         ))
+                    }
+
+                    MacSettingsRow(title: t("workshop.sceneMemoryLimit"), subtitle: t("workshop.sceneMemoryLimitDesc"), showDivider: false) {
+                        HStack(spacing: 8) {
+                            Text(sceneMemoryLimitLabel(viewModel.sceneRendererMemoryLimitMB))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(minWidth: 52, alignment: .trailing)
+                            Slider(
+                                value: snappedSliderBinding(
+                                    $viewModel.sceneRendererMemoryLimitMB,
+                                    in: 512...16384,
+                                    step: 512
+                                ),
+                                in: 512...16384
+                            )
+                            .tint(settingsSliderTint)
+                            .accessibilityLabel(t("workshop.sceneMemoryLimit"))
+                            .frame(width: 120)
+                        }
                     }
                 }
 

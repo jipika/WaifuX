@@ -12,12 +12,12 @@
     }
   },
   "web": {
-    "version": "1.0.57",
-    "revision": 58,
+    "version": "1.0.70",
+    "revision": 71,
     "sourceSHA256": {
       "ffmpeg": "106ece4ba0df8411833c9e78c85698803848dafae6b9411420f25fcf0b648c35",
       "ffmpeg-x86_64": "9e5420d4f5b9fc0150d1818da5e70cfea46b2b44ea49efc794ca305ed0c6903f",
-      "wallpaperengine-cli": "d34174de49b9ec0256a099461b4d5944b2deef1d1f2104b3e96e1c70620df896",
+      "wallpaperengine-cli": "e7b4931249f93be93999ea849615db7d770b80fe1a7d4cc49ddc9e644311f9ab",
       "wallpaperengine-cli-x86_64": "8060e01519f6aaafa64a620a5e870eeb895e761f381a4bb7b97991078aeb7605"
     }
   },

@@ -2,8 +2,10 @@ import Foundation
 
 // MARK: - WaifuX GuideKit · 导览脚本内容
 // 每页一段 GuideTour；文案 key 统一 guide.<tour>.<step>.title|body，
-// 三语（en/zh/ja）在 Services/LocalizationService.swift 同步维护。
+// 四语（en/zh/ja/es）在 Services/LocalizationService.swift 同步维护。
 // 全部页面脚本清单见 Docs/Guide-Kit-Design.md §4。
+// 文案修订后 bump 该 tour 的 contentVersion（存量用户定向重播一次）。
+// 有意不覆盖（2026-11-24 用户裁定）：media 分级 chips 步、settingsOverview 的 Bangumi 分类。
 
 enum GuideTours {
 
@@ -26,7 +28,7 @@ enum GuideTours {
     /// 详情页导览：由详情浮层打开时触发（GuideEngine.noteDetailOpened）。
     static let detail = GuideTour(
         id: "detail",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             // ① 底部动作栏（收藏/预览/设为壁纸/静音/下载/更多）
             GuideStep(
@@ -59,7 +61,7 @@ enum GuideTours {
     /// 引擎会把遮罩抬到 .popUpMenu 之上）。
     static let detailMoreOptions = GuideTour(
         id: "detailMoreOptions",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             GuideStep(
                 anchor: .detailMorePopover,
@@ -69,10 +71,11 @@ enum GuideTours {
         ]
     )
 
-    /// 动态锁屏：设置页滚到该区块首次可见时播（noteSheetOpened；设置窗为独立 NSWindow）。
+    /// 动态锁屏：设置页首次打开开关时播（SettingsView onChange → noteSheetOpened；
+    /// 设置窗为独立 NSWindow，遮罩会跟随该窗所在屏）。
     static let lockscreen = GuideTour(
         id: "lockscreen",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             GuideStep(
                 anchor: .lockscreenToggle,
@@ -87,10 +90,10 @@ enum GuideTours {
         ]
     )
 
-    /// 设置页总览：打开设置窗首次播（左栏分类逐个高亮）。
+    /// 设置页总览：打开设置窗首次播（左栏分类逐个高亮；Bangumi 有意不覆盖）。
     static let settingsOverview = GuideTour(
         id: "settingsOverview",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             GuideStep(
                 anchor: nil,
@@ -158,11 +161,11 @@ enum GuideTours {
         ]
     )
 
-    // MARK: 首页（Phase 1 示范：5 步，含菜单栏步）
+    // MARK: 首页（6 步，含菜单栏步）
 
     static let home = GuideTour(
         id: "home",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             GuideStep(
                 anchor: nil,
@@ -198,11 +201,11 @@ enum GuideTours {
         ]
     )
 
-    // MARK: 静态壁纸探索（4 步）
+    // MARK: 静态壁纸探索（5 步）
 
     static let explore = GuideTour(
         id: "wallpaperExplore",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             GuideStep(
                 anchor: .exploreSourceMenu,
@@ -234,11 +237,11 @@ enum GuideTours {
         ]
     )
 
-    // MARK: 动态壁纸探索（3 步）
+    // MARK: 动态壁纸探索（3 步；分级 chips 步有意不播——2026-11-24 用户裁定）
 
     static let media = GuideTour(
         id: "mediaExplore",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             GuideStep(
                 anchor: .mediaSourceMenu,
@@ -278,11 +281,11 @@ enum GuideTours {
         ]
     )
 
-    // MARK: 我的库（3 步）
+    // MARK: 我的库（6 步）
 
     static let library = GuideTour(
         id: "myMedia",
-        contentVersion: 1,
+        contentVersion: 2,
         steps: [
             GuideStep(
                 anchor: .libraryEditButton,

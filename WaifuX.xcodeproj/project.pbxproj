@@ -570,7 +570,6 @@
 		EC47A1436831AA790FE5A105 /* SystemFallbackImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7635BE715C6D8F38F725C4BC /* SystemFallbackImage.swift */; };
 		ED8CC76A6300E215C960C06E /* AnimeRules in Resources */ = {isa = PBXBuildFile; fileRef = 222C8AA50BDCFF9AD85ABF2C /* AnimeRules */; };
 		EDA63FEFED0EA8C2D852C7A8 /* FourKWallpapersParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7E5EA68B40F08C0C4032C1D /* FourKWallpapersParser.swift */; };
-		EDF018AEE24E8A7AE95B0164 /* DanmakuSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5087C896E8F5D3F9794C56B4 /* DanmakuSettingsTab.swift */; };
 		EF745AA7A51BBB40A5FA7172 /* RendererComponentUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = 121E8BF87BA7A698AAD0BD97 /* RendererComponentUpdater.swift */; };
 		EF7FF02456D29404AD8C8196 /* LockScreenImagePublication.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3479366882FB5D5D3091E07B /* LockScreenImagePublication.swift */; };
 		EFDF91CBF70B7B69ACF0B325 /* WallpaperBoundedImageDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 695C0C43F501FF67741CE517 /* WallpaperBoundedImageDecoder.swift */; };
@@ -645,10 +644,10 @@
 		6367CD2B049670AE8262B27D /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = Contents/Helpers;
+			dstPath = "Contents/Resources/Screen Savers";
 			dstSubfolderSpec = 1;
 			files = (
-				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
+				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -678,10 +677,10 @@
 		F68564DF1E026B1AC3471511 /* Embed Dependencies */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "Contents/Resources/Screen Savers";
+			dstPath = Contents/Helpers;
 			dstSubfolderSpec = 1;
 			files = (
-				13396788EFBECE9A1E2C708F /* WaifuXScreenSaver.bundle in Embed Dependencies */,
+				8CFD1D3880AF31F54F34F9B2 /* WaifuXHelper.app in Embed Dependencies */,
 			);
 			name = "Embed Dependencies";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -825,7 +824,6 @@
 		4D4DA3125A4D7C5A87ABC9BF /* WaifuXWallpaperExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaifuXWallpaperExtension.swift; sourceTree = "<group>"; };
 		4FBE371602391BF36A8714FE /* WallpaperState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperState.swift; sourceTree = "<group>"; };
 		4FDF3284B97C8262C69C0105 /* GlassStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassStyle.swift; sourceTree = "<group>"; };
-		5087C896E8F5D3F9794C56B4 /* DanmakuSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuSettingsTab.swift; sourceTree = "<group>"; };
 		509F88E110E5EC7E70CE7841 /* CaptchaVerificationWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptchaVerificationWebView.swift; sourceTree = "<group>"; };
 		51297AFB8F5FDA8312BECD8F /* WallsflowDirectURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallsflowDirectURLProtocol.swift; sourceTree = "<group>"; };
 		515A797DB6CCD82CA6AEF42F /* LibraryCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryCards.swift; sourceTree = "<group>"; };
@@ -1204,7 +1202,6 @@
 		0AD39A2929EBC59FA2F8ECAB /* Settings */ = {
 			isa = PBXGroup;
 			children = (
-				5087C896E8F5D3F9794C56B4 /* DanmakuSettingsTab.swift */,
 				DE49EE46468342C942DAD404 /* KonachanSettingsTab.swift */,
 				C7443AC63532A05488FF1BE4 /* PixivSettingsTab.swift */,
 				E8BA7A6E4E480DAEDD2C09DE /* ScreenSaverSettingsTab.swift */,
@@ -2322,7 +2319,6 @@
 				3BCAAE449E23F411D5BCFEB7 /* Danmaku.swift in Sources */,
 				DDB03F807435D05EFDFF0DA9 /* DanmakuCredentials.swift in Sources */,
 				9B0765A8A225A37AD48E1EAA /* DanmakuService.swift in Sources */,
-				EDF018AEE24E8A7AE95B0164 /* DanmakuSettingsTab.swift in Sources */,
 				7CE9D7595407EF27D532FE30 /* DanmakuView.swift in Sources */,
 				FD1B442F09B4C2465EEA06DF /* DataSourceRule.swift in Sources */,
 				8D7F96183814A75F03674265 /* Debouncer.swift in Sources */,
@@ -2637,13 +2633,13 @@
 				CODE_SIGN_ENTITLEMENTS = WaifuX.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				OTHER_LDFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;
 				PRODUCT_NAME = WaifuX;
@@ -2728,13 +2724,13 @@
 				CODE_SIGN_ENTITLEMENTS = WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = WaifuXWallpaperExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app.wallpaperextension;
 				PRODUCT_NAME = WaifuXWallpaperExtension;
 				SDKROOT = macosx;
@@ -2748,13 +2744,13 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = NO;
 				INFOPLIST_FILE = WaifuXScreenSaver/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app.screensaver;
 				PRODUCT_NAME = WaifuXScreenSaver;
 				SDKROOT = macosx;
@@ -2771,13 +2767,13 @@
 				CODE_SIGN_ENTITLEMENTS = BackgroundAgent/BackgroundAgent.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = BackgroundAgent/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				OTHER_LDFLAGS = "$(inherited) $(SRCROOT)/Resources/zip_data.o $(SRCROOT)/Resources/zip_accessor.o";
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app.helper;
 				PRODUCT_NAME = WaifuXHelper;
@@ -2793,13 +2789,13 @@
 				CODE_SIGN_ENTITLEMENTS = WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = WaifuXWallpaperExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app.wallpaperextension;
 				PRODUCT_NAME = WaifuXWallpaperExtension;
 				SDKROOT = macosx;
@@ -2874,13 +2870,13 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = NO;
 				INFOPLIST_FILE = WaifuXScreenSaver/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app.screensaver;
 				PRODUCT_NAME = WaifuXScreenSaver;
 				SDKROOT = macosx;
@@ -2897,13 +2893,13 @@
 				CODE_SIGN_ENTITLEMENTS = BackgroundAgent/BackgroundAgent.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = BackgroundAgent/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				OTHER_LDFLAGS = "$(inherited) $(SRCROOT)/Resources/zip_data.o $(SRCROOT)/Resources/zip_accessor.o";
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app.helper;
 				PRODUCT_NAME = WaifuXHelper;
@@ -2920,13 +2916,13 @@
 				CODE_SIGN_ENTITLEMENTS = WaifuX.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 38.0.158;
+				CURRENT_PROJECT_VERSION = 38.0.159;
 				DEVELOPMENT_TEAM = SRHKTRJ83W;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				MARKETING_VERSION = 38.0.158;
+				MARKETING_VERSION = 38.0.159;
 				OTHER_LDFLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.waifux.app;
 				PRODUCT_NAME = WaifuX;

@@ -1397,6 +1397,8 @@ struct WallpaperDetailSheet: View {
                 )
             }
             .buttonStyle(.plain)
+            // uploader 由详情接口异步补齐；开播后才挂载也能补报
+            //（GuideAnchorModifier 播放期间沿用原宿主/回退主窗口，不再冻结）。
             .guideAnchor(.detailAuthorLink)
             .onHover { hovering in
                 if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }

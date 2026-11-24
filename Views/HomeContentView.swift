@@ -493,6 +493,10 @@ struct HomeContentView: View {
             }
         }
         .frame(width: width, height: height)
+        // 锚点挂常驻容器：hero 数据未就绪时挂骨架上，数据到达轮播重建也不丢登记。
+        // 挂在 heroCarousel 上会在「导览开播时数据未返回」场景下永久缺失——
+        // 播放期间锚点上报被冻结，后挂载的轮播补报全被 guard，hero 两步被跳过。
+        .guideAnchor(.homeHero)
         .mask(
             LinearGradient(
                 stops: [
@@ -509,17 +513,16 @@ struct HomeContentView: View {
 
     @ViewBuilder
     private var heroCaptionLayer: some View {
-        if let heroItem = currentHeroItem {
-            HeroCaptionPanel(
-                heroItem: heroItem,
-                isFavorite: isCurrentHeroFavorite,
-                onOpen: { openCurrentHeroItem() },
-                onFavorite: { toggleCurrentHeroFavorite() }
-            )
-        } else if !homeSkeletonTimedOut {
-            HeroCaptionSkeletonView()
-                .allowsHitTesting(false)
-        }
+        // 按钮行常驻挂载（骨架态半透明占位、禁点）：数据就绪前锚点已登记，
+        // 导览开播时 hero 数据未返回也不会丢「一键查看与收藏」步。
+        HeroCaptionPanel(
+            heroItem: currentHeroItem,
+            isFavorite: isCurrentHeroFavorite,
+            onOpen: { openCurrentHeroItem() },
+            onFavorite: { toggleCurrentHeroFavorite() }
+        )
+        .opacity(currentHeroItem == nil ? (homeSkeletonTimedOut ? 0 : 0.45) : 1)
+        .allowsHitTesting(currentHeroItem != nil)
     }
 
     private func heroCarousel(width: CGFloat, height: CGFloat, items: [HeroItem]) -> some View {
@@ -546,7 +549,6 @@ struct HomeContentView: View {
         .onTapGesture {
             isHomeChromeHidden.toggle()
         }
-        .guideAnchor(.homeHero)
         .simultaneousGesture(
             heroCarouselDragGesture(width: width)
         )
@@ -1147,7 +1149,9 @@ private struct HeroSlide: View {
 }
 
 private struct HeroCaptionPanel: View {
-    let heroItem: HeroItem
+    /// nil = 数据未就绪的骨架占位（半透明、禁点，由 heroCaptionLayer 控制），
+    /// 常驻挂载保证 homeHeroActions 锚点在导览开播时始终已登记。
+    let heroItem: HeroItem?
     let isFavorite: Bool
     let onOpen: () -> Void
     let onFavorite: () -> Void
@@ -1174,7 +1178,7 @@ private struct HeroCaptionPanel: View {
                     action: onOpen
                 )
 
-                if case .wallpaper = heroItem {
+                if heroItem == nil || isWallpaperSlide {
                     HeroActionButton(
                         title: heroFavoriteCount,
                         systemImage: isFavorite ? "heart.fill" : "heart",
@@ -1189,6 +1193,12 @@ private struct HeroCaptionPanel: View {
         }
     }
 
+    /// nil（骨架占位）按静态壁纸展示双按钮，保证锚点区域稳定。
+    private var isWallpaperSlide: Bool {
+        if case .wallpaper = heroItem { return true }
+        return false
+    }
+
     private var heroTitle: String {
         switch heroItem {
         case .wallpaper(let w):
@@ -1201,6 +1211,8 @@ private struct HeroCaptionPanel: View {
             return "Wallhaven \(w.id)"
         case .media(let m):
             return m.title
+        case nil:
+            return "WaifuX"
         }
     }
 
@@ -1213,6 +1225,8 @@ private struct HeroCaptionPanel: View {
             return categoryDisplayName.uppercased()
         case .media(let m):
             return (m.tags.first ?? m.sourceName).uppercased()
+        case nil:
+            return t("featured").uppercased()
         }
     }
 
@@ -1231,6 +1245,8 @@ private struct HeroCaptionPanel: View {
                 m.sourceName,
                 m.durationLabel ?? ""
             ].filter { !$0.isEmpty }
+        case nil:
+            return []
         }
     }
 
@@ -1238,6 +1254,7 @@ private struct HeroCaptionPanel: View {
         switch heroItem {
         case .wallpaper(let w): return "\(w.favorites)"
         case .media: return "0"
+        case nil: return "0"
         }
     }
 
@@ -1256,6 +1273,8 @@ private struct HeroCaptionPanel: View {
             }
         case .media(let m):
             return m.sourceName
+        case nil:
+            return t("featured")
         }
     }
 

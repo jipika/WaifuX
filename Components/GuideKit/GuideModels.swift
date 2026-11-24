@@ -33,10 +33,11 @@ enum GuideAnchorID: Hashable {
     // 我的库
     case libraryEditButton
     case librarySearchControl
-    // 详情页（Media / Wallpaper 两个 sheet 共用）
-    case detailHeroInfo
     case libraryImportButton
     case libraryMoreMenuButton
+    // 详情页（Media / Wallpaper 两个 sheet 共用）
+    case detailHeroInfo
+    case detailActionRow
     // 详情页·信息行的作者胶囊（点开作者面板）
     case detailAuthorLink
     // 顶部标签栏（首页/壁纸/媒体/动漫/我的）
@@ -44,7 +45,7 @@ enum GuideAnchorID: Hashable {
     // 设置页·动态锁屏区块
     case lockscreenToggle
     case lockscreenStatusRow
-    // 设置页·左侧导航十个分类
+    // 设置页·左侧导航分类（sync 被 filter 隐藏、bangumi 有意不覆盖，均无锚点）
     case settingsTabGeneral
     case settingsTabModules
     case settingsTabDownload
@@ -53,9 +54,7 @@ enum GuideAnchorID: Hashable {
     case settingsTabPixiv
     case settingsTabKonachan
     case settingsTabScheduler
-    case settingsTabSync
     case settingsTabAbout
-    case detailActionRow
     /// 详情「更多选项」popover 内容（独立 NSWindow，遮罩层级会自适应抬高）
     case detailMorePopover
     /// 作者滑出面板 header（主窗口内 overlay）
@@ -129,6 +128,11 @@ final class GuideAnchorRegistry {
         return window.level
     }
 
+    /// 锚点宿主窗口（引擎据此选遮罩所在屏、判断作者面板是否打开）。
+    func window(for id: GuideAnchorID) -> NSWindow? {
+        entries[id]?.window
+    }
+
     func removeAll() {
         entries.removeAll()
     }
@@ -180,15 +184,24 @@ struct GuideAnchorModifier: ViewModifier {
     private func reportIfPossible() {
         let frame = lastFrame
         guard frame.width > 0, frame.height > 0 else { return }
-        // tour 播放期间不再刷新登记帧：registry 保留开播前的正确宿主与矩形
-        //（此时遮罩窗是 keyWindow，用它换算会拿到错误宿主）。
-        guard !GuideEngine.shared.isTourActive else { return }
         // 宿主窗口判定：key 窗口浮在主窗口之上（popover/浮层面板）时，
         // 锚点在浮层里；否则属于主内容窗口。
         let key = NSApp.keyWindow
         let main = NSApp.mainWindow
         let window: NSWindow?
-        if let key, key != main {
+        if GuideEngine.shared.isTourActive {
+            // 播放期间遮罩窗是 keyWindow，不能当宿主——但不再一刀切冻结上报：
+            // 已登记锚点沿用原宿主（popover 等浮层窗口），新挂载锚点取非遮罩的
+            // key 窗口、否则主窗口。这样开播后才就绪的条件锚点（详情作者胶囊等）
+            // 仍能补报，用户走到该步时洞已就位，而不是被「缺失」跳掉。
+            if let existing = GuideAnchorRegistry.shared.window(for: id) {
+                window = existing
+            } else if let key, !GuideEngine.shared.isOverlayWindow(key) {
+                window = key
+            } else {
+                window = main
+            }
+        } else if let key, key != main {
             // key ≠ main 一律视为锚点在独立窗口（popover、设置窗等）——
             // 设置窗与主窗同为 normal level，不能再用 level 比较。
             window = key

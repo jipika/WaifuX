@@ -189,6 +189,16 @@ class SettingsViewModel: ObservableObject {
         }
     }
 
+    /// 场景渲染进程内存上限 (MB, 512 ~ 16384)
+    /// 实时渲染的 wallpaper-wgpu phys_footprint 超过该值会被看门狗强制终止并自愈重启；
+    /// 看门狗每轮采样重读该键，改动对运行中进程 ≤2s 生效，无需重启。
+    @Published var sceneRendererMemoryLimitMB: Double = 4096 {
+        didSet {
+            guard !isReloadingImportedSettings else { return }
+            WaifuXPreferences.shared.set(Int(sceneRendererMemoryLimitMB), forKey: "scene_renderer_memory_limit_mb")
+        }
+    }
+
     /// 超分辨率模式开关
     /// 开启后，动态壁纸将以低分辨率运行，利用 Apple MetalFX 超分辨率技术提升性能
     @Published var upscalingEnabled = true {
@@ -474,6 +484,7 @@ class SettingsViewModel: ObservableObject {
         syncProxySettings()
 
         // 纯 UserDefaults 属性（批量期间 didSet 被跳过，统一补写）
+        WaifuXPreferences.shared.set(Int(sceneRendererMemoryLimitMB), forKey: "scene_renderer_memory_limit_mb")
         WaifuXPreferences.shared.set(autoBakeScene, forKey: "auto_bake_scene")
         WaifuXPreferences.shared.set(systemWallpaperSyncEnabled, forKey: "system_wallpaper_sync_enabled")
         WaifuXPreferences.shared.set(preventSystemSleep, forKey: "prevent_system_sleep")
@@ -617,6 +628,10 @@ class SettingsViewModel: ObservableObject {
             workshopSubscriptionAutomationEnabled = WorkshopSubscriptionAutomation.isEnabled(in: defaults)
             // 未写过 key 时默认 true（与属性初始值一致）；bool(forKey:) 会把缺失当成 false
             sceneRealtimeRenderingEnabled = defaults.object(forKey: "scene_realtime_rendering_enabled") as? Bool ?? true
+            // 看门狗键以 Int 落盘（云同步导入也按 int 转写）；残留异常值钳回范围
+            let savedSceneMemoryLimit = (defaults.object(forKey: "scene_renderer_memory_limit_mb") as? Int).map(Double.init) ?? 4096
+            sceneRendererMemoryLimitMB = savedSceneMemoryLimit.isFinite
+                ? max(512, min(16384, savedSceneMemoryLimit)) : 4096
             upscalingEnabled = defaults.object(forKey: "upscaling_enabled") as? Bool ?? true
             upscalingPercent = defaults.object(forKey: "upscaling_percent") as? Double ?? 70
             effectReductionEnabled = defaults.object(forKey: "effect_reduction_enabled") as? Bool ?? false

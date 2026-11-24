@@ -31,6 +31,9 @@ enum CloudSyncSettingsValueType: Codable {
     case string
     case double
     case data
+    /// 整数键：线上仍编码为 number（JSON 无 int/double 之分），
+    /// 导入落盘时转 Int，保证读取侧 `as? Int` 语义稳定。
+    case int
 }
 
 // MARK: - 白名单条目
@@ -84,6 +87,7 @@ enum CloudSyncSettingsRegistry {
     private static var wallpaperEngineEntries: [CloudSyncSettingsEntry] {
         [
             .init(key: "scene_realtime_rendering_enabled", category: .wallpaperEngine, valueType: .bool),
+            .init(key: "scene_renderer_memory_limit_mb", category: .wallpaperEngine, valueType: .int),
             .init(key: "upscaling_enabled", category: .wallpaperEngine, valueType: .bool),
             .init(key: "upscaling_percent", category: .wallpaperEngine, valueType: .double),
             .init(key: "effect_reduction_enabled", category: .wallpaperEngine, valueType: .bool),
@@ -182,8 +186,8 @@ enum CloudSyncSettingsRegistry {
         for (_, entries) in settings {
             for (key, value) in entries {
                 // 检查是否在白名单中
-                guard allEntries.contains(where: { $0.key == key }) else { continue }
-                writeValue(value, to: defaults, key: key)
+                guard let entry = allEntries.first(where: { $0.key == key }) else { continue }
+                writeValue(value, to: defaults, key: key, valueType: entry.valueType)
             }
         }
 
@@ -214,20 +218,33 @@ enum CloudSyncSettingsRegistry {
         case .double:
             guard defaults.object(forKey: entry.key) != nil else { return nil }
             return .number(defaults.double(forKey: entry.key))
+        case .int:
+            guard let val = defaults.object(forKey: entry.key) as? Int else { return nil }
+            return .number(Double(val))
         case .data:
             guard let val = defaults.data(forKey: entry.key) else { return nil }
             return .data(val)
         }
     }
 
-    private static func writeValue(_ value: AnyCodable, to defaults: UserDefaults, key: String) {
+    private static func writeValue(
+        _ value: AnyCodable,
+        to defaults: UserDefaults,
+        key: String,
+        valueType: CloudSyncSettingsValueType
+    ) {
         switch value {
         case .bool(let b):
             defaults.set(b, forKey: key)
         case .string(let s):
             defaults.set(s, forKey: key)
         case .number(let n):
-            defaults.set(n, forKey: key)
+            // int 键按 Int 落盘：看门狗/设置页恢复都用 `as? Int` 读取
+            if valueType == .int {
+                defaults.set(Int(n), forKey: key)
+            } else {
+                defaults.set(n, forKey: key)
+            }
         case .data(let d):
             defaults.set(d, forKey: key)
         }

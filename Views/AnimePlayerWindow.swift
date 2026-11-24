@@ -264,17 +264,20 @@ private struct PlayerSection: View {
             }
         }
         .overlay(alignment: .bottomLeading) {
-            AnimePlaybackAccessories(
-                syncPlay: viewModel.syncPlay,
-                episodeNumber: viewModel.currentEpisode?.episodeNumber,
-                hasVideo: viewModel.currentPlayURL != nil && !viewModel.isLoadingVideo && viewModel.videoError == nil,
-                player: player
-            )
-            .padding(.leading, 28)
-            .padding(.bottom, 22)
-            .opacity(isControlBarVisible ? 1 : 0)
-            .allowsHitTesting(isControlBarVisible)
-            .animation(.easeOut(duration: 0.25), value: isControlBarVisible)
+            if viewModel.currentPlayURL == nil || viewModel.isLoadingVideo {
+                AnimePlaybackAccessories(
+                    syncPlay: viewModel.syncPlay,
+                    episodeNumber: viewModel.currentEpisode?.episodeNumber,
+                    hasVideo: false,
+                    player: player,
+                    standaloneSurface: true
+                )
+                .padding(.leading, 18)
+                .padding(.bottom, 16)
+                .opacity(isControlBarVisible ? 1 : 0)
+                .allowsHitTesting(isControlBarVisible)
+                .animation(.easeOut(duration: 0.25), value: isControlBarVisible)
+            }
         }
         // 鼠标在播放器上移动时显示控制栏，根据当前状态决定是否自动隐藏
         .onHover { hovering in
@@ -330,7 +333,7 @@ private struct PlayerSection: View {
     }
 }
 
-// MARK: - 播放控制栏覆盖层
+// MARK: - 播放控制栏覆盖层（Apple TV / macOS 26 悬浮液态玻璃控制舱）
 private struct PlayerControlOverlay: View {
     let animeId: String
     @ObservedObject var player: NativeVideoPlayer
@@ -339,10 +342,16 @@ private struct PlayerControlOverlay: View {
     var viewModel: AnimeDetailViewModel? = nil
     @State private var currentState: PlaybackState = .idle
     @State private var currentTime: TimeInterval = 0
-    @State private var sliderValue: Float = 0
+    @State private var sliderValue: Double = 0
     @State private var wasPlayingBeforeDrag = false
     @State private var isDraggingSlider = false
-    @State private var showDanmakuSettings = false
+    @State private var hoveredControl: Control?
+
+    private enum Control {
+        case backward, playPause, forward, rate, mute, fullscreen
+    }
+
+    private static let playbackRates: [Double] = [0.5, 1.0, 1.25, 1.5, 2.0]
 
     init(animeId: String, player: NativeVideoPlayer, isPlayerFullscreen: Bool, isControlBarVisible: Bool,
          viewModel: AnimeDetailViewModel? = nil) {
@@ -353,19 +362,37 @@ private struct PlayerControlOverlay: View {
         self.viewModel = viewModel
     }
 
+    private var effectiveVolumeBinding: Binding<Double> {
+        Binding(
+            get: { player.isMuted ? 0 : player.playbackVolume },
+            set: { newValue in
+                let clamped = min(max(newValue, 0), 1)
+                if player.isMuted && clamped > 0 {
+                    player.isMuted = false
+                }
+                player.playbackVolume = clamped
+            }
+        )
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Spacer()
-            VStack(spacing: 12) {
-                // 时间滑块
-                HStack(spacing: 12) {
-                    Text(formatPlayerTime(currentTime))
-                        .font(.system(size: 12, weight: .medium).monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.9))
 
-                    Slider(
+            VStack(spacing: 8) {
+                // 顶部：精密时间进度条
+                HStack(spacing: 10) {
+                    Text(formatPlayerTime(isDraggingSlider ? sliderValue : currentTime))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.80))
+                        .frame(minWidth: 36, alignment: .trailing)
+
+                    ApplePlayerSlider(
                         value: $sliderValue,
-                        in: 0...Float(max(player.totalDuration, 1))
+                        range: 0...max(player.totalDuration, 1),
+                        trackHeight: 4,
+                        expandedTrackHeight: 6,
+                        thumbSize: 12
                     ) { editing in
                         isDraggingSlider = editing
                         if editing {
@@ -373,162 +400,198 @@ private struct PlayerControlOverlay: View {
                             player.pause()
                         } else {
                             let shouldResume = wasPlayingBeforeDrag
-                            player.seek(to: TimeInterval(sliderValue), resumeAfterSeek: shouldResume)
+                            player.seek(to: sliderValue, resumeAfterSeek: shouldResume)
                         }
                     }
-                    .tint(.white)
-                    .frame(height: 16)
-                    .focusable(false)
                     .onChange(of: currentTime) { _, newValue in
                         if !isDraggingSlider && !player.isSeeking {
-                            sliderValue = Float(newValue)
-                        }
-                    }
-                    .onChange(of: sliderValue) { _, newValue in
-                        // macOS 点击 Slider 轨道不会触发 onEditingChanged，
-                        // 因此通过值变化来检测点击并执行 seek
-                        if !isDraggingSlider && !player.isSeeking {
-                            let diff = abs(newValue - Float(currentTime))
-                            if diff > 0.5 {
-                                wasPlayingBeforeDrag = player.state.isPlaying
-                                player.seek(to: TimeInterval(newValue), resumeAfterSeek: wasPlayingBeforeDrag)
-                            }
+                            sliderValue = newValue
                         }
                     }
 
                     Text(formatPlayerTime(player.totalDuration))
-                        .font(.system(size: 12, weight: .medium).monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.9))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.56))
+                        .frame(minWidth: 36, alignment: .leading)
                 }
 
-                // 控制按钮行（播放控制绝对居中）
+                // 底部：左 / 中 / 右三区同轴对齐（播放传输组绝对居中）
                 ZStack {
-                    // 播放控制绝对居中
-                    HStack(spacing: 20) {
+                    // 左侧：播放菜单与截图
+                    HStack {
+                        if let viewModel {
+                            AnimePlaybackAccessories(
+                                syncPlay: viewModel.syncPlay,
+                                episodeNumber: viewModel.currentEpisode?.episodeNumber,
+                                hasVideo: viewModel.videoError == nil,
+                                player: player
+                            )
+                        }
+                        Spacer(minLength: 0)
+                    }
+
+                    // 中间：后退 / 播放暂停 / 前进（绝对居中）
+                    HStack(spacing: 8) {
                         Button {
                             player.skip(by: -15)
                         } label: {
                             Image(systemName: "gobackward.15")
-                                .font(.system(size: 18, weight: .semibold))
+                                .font(.system(size: 15.5, weight: .medium))
+                                .foregroundStyle(.white.opacity(hoveredControl == .backward ? 1.0 : 0.88))
+                                .frame(width: 30, height: 30)
+                                .contentShape(Circle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PlayerChromeControlStyle(hovered: hoveredControl == .backward))
                         .focusable(false)
+                        .onHover { hovering in
+                            hoveredControl = hovering ? .backward : (hoveredControl == .backward ? nil : hoveredControl)
+                        }
 
                         Button {
                             togglePlayPause()
                         } label: {
                             Image(systemName: playPauseIconName)
-                                .font(.system(size: 36, weight: .light))
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .offset(x: playPauseIconName == "play.fill" ? 1 : 0)
+                                .contentTransition(.symbolEffect(.replace))
+                                .frame(width: 36, height: 36)
+                                .contentShape(Circle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PlayPausePrimaryButtonStyle(hovered: hoveredControl == .playPause))
                         .focusable(false)
+                        .onHover { hovering in
+                            hoveredControl = hovering ? .playPause : (hoveredControl == .playPause ? nil : hoveredControl)
+                        }
 
                         Button {
                             player.skip(by: 15)
                         } label: {
                             Image(systemName: "goforward.15")
-                                .font(.system(size: 18, weight: .semibold))
+                                .font(.system(size: 15.5, weight: .medium))
+                                .foregroundStyle(.white.opacity(hoveredControl == .forward ? 1.0 : 0.88))
+                                .frame(width: 30, height: 30)
+                                .contentShape(Circle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PlayerChromeControlStyle(hovered: hoveredControl == .forward))
                         .focusable(false)
+                        .onHover { hovering in
+                            hoveredControl = hovering ? .forward : (hoveredControl == .forward ? nil : hoveredControl)
+                        }
                     }
 
-                    // 右侧控件
+                    // 右侧：弹幕 / 倍速 | 音量 / 全屏
                     HStack {
-                        Spacer()
-                        HStack(spacing: 16) {
-                            // 弹幕开关（Kazumi 同款控制栏入口）
+                        Spacer(minLength: 0)
+                        HStack(spacing: 4) {
                             if let viewModel {
-                                Button {
-                                    viewModel.toggleDanmaku()
-                                } label: {
-                                    Image(systemName: viewModel.danmakuSettings.isEnabled ? "text.bubble.fill" : "text.bubble")
-                                        .font(.system(size: 15))
-                                        .foregroundStyle(viewModel.danmakuSettings.isEnabled ? LiquidGlassColors.primaryPink : .white.opacity(0.85))
-                                        .frame(width: 24, height: 22)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .focusable(false)
-                                .help(t("anime.player.danmakuToggle"))
-
-                                Button {
-                                    showDanmakuSettings = true
-                                } label: {
-                                    Image(systemName: "slider.horizontal.3")
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(.white.opacity(0.85))
-                                        .frame(width: 22, height: 22)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .focusable(false)
-                                .help(t("anime.player.danmakuSettingsButton"))
-                                .popover(isPresented: $showDanmakuSettings, arrowEdge: .top) {
-                                    AnimeDanmakuSettingsPanel(viewModel: viewModel)
-                                        .frame(width: 340, height: 520)
-                                }
+                                DanmakuControlGroup(viewModel: viewModel)
                             }
 
-                            // 倍速菜单
+                            // 倍速菜单（.button 样式保留纯 SwiftUI 胶囊，不注入 AppKit 丑箭头）
                             Menu {
-                                Button("0.5x") { player.playbackRate = 0.5 }
-                                Button("1.0x") { player.playbackRate = 1.0 }
-                                Button("1.25x") { player.playbackRate = 1.25 }
-                                Button("1.5x") { player.playbackRate = 1.5 }
-                                Button("2.0x") { player.playbackRate = 2.0 }
+                                ForEach(Self.playbackRates, id: \.self) { rate in
+                                    Button {
+                                        player.playbackRate = rate
+                                    } label: {
+                                        let label = formatPlaybackRate(rate)
+                                        if abs(player.playbackRate - rate) < 0.01 {
+                                            Label(label, systemImage: "checkmark")
+                                        } else {
+                                            Text(label)
+                                        }
+                                    }
+                                }
                             } label: {
-                                Text("\(String(format: "%.1f", player.playbackRate))x")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 38, height: 22)
-                                    .background(Color.white.opacity(0.15))
-                                    .cornerRadius(4)
+                                Text(formatPlaybackRate(player.playbackRate))
+                                    .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                                    .foregroundStyle(.white.opacity(hoveredControl == .rate ? 1.0 : 0.90))
+                                    .padding(.horizontal, 7)
+                                    .frame(minWidth: 34, minHeight: 24, maxHeight: 24)
+                                    .contentShape(Capsule(style: .continuous))
                             }
-                            .menuStyle(.borderlessButton)
-                            .frame(width: 38, height: 22)
+                            .menuStyle(.button)
+                            .buttonStyle(PlayerChromeControlStyle(hovered: hoveredControl == .rate, isActive: true, shape: .capsule))
+                            .menuIndicator(.hidden)
                             .focusable(false)
+                            .onHover { hovering in
+                                hoveredControl = hovering ? .rate : (hoveredControl == .rate ? nil : hoveredControl)
+                            }
 
-                            // 音量控制（滑块始终显示）
-                            HStack(spacing: 6) {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.14))
+                                .frame(width: 1, height: 14)
+                                .padding(.horizontal, 2)
+                                .accessibilityHidden(true)
+
+                            // 音量控制（精密细轨，替代 macOS 大圆头原生 Slider）
+                            HStack(spacing: 4) {
                                 Button {
                                     player.isMuted.toggle()
                                 } label: {
                                     Image(systemName: volumeIconName)
-                                        .font(.system(size: 15))
+                                        .font(.system(size: 13.5, weight: .medium))
+                                        .symbolRenderingMode(.hierarchical)
+                                        .foregroundStyle(.white.opacity(hoveredControl == .mute ? 1.0 : 0.88))
+                                        .frame(width: 26, height: 28)
+                                        .contentShape(Circle())
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(PlayerChromeControlStyle(hovered: hoveredControl == .mute))
                                 .focusable(false)
+                                .onHover { hovering in
+                                    hoveredControl = hovering ? .mute : (hoveredControl == .mute ? nil : hoveredControl)
+                                }
 
-                                Slider(value: $player.playbackVolume, in: 0...1)
-                                    .tint(.white)
-                                    .frame(width: 70)
-                                    .focusable(false)
+                                ApplePlayerSlider(
+                                    value: effectiveVolumeBinding,
+                                    range: 0...1,
+                                    trackHeight: 4,
+                                    expandedTrackHeight: 5,
+                                    thumbSize: 10
+                                )
+                                .frame(width: 54)
                             }
-                            .frame(height: 22)
 
-                            // 全屏（系统全屏）
+                            // 全屏切换
                             Button {
                                 NotificationCenter.default.post(name: .togglePlayerFullScreen, object: animeId)
                             } label: {
                                 Image(systemName: isPlayerFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                                    .font(.system(size: 15))
+                                    .font(.system(size: 13.5, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(hoveredControl == .fullscreen ? 1.0 : 0.88))
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Circle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PlayerChromeControlStyle(hovered: hoveredControl == .fullscreen))
                             .focusable(false)
+                            .onHover { hovering in
+                                hoveredControl = hovering ? .fullscreen : (hoveredControl == .fullscreen ? nil : hoveredControl)
+                            }
                         }
                     }
                 }
+                .frame(height: 36)
                 .foregroundStyle(.white)
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 20)
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.black.opacity(0.22))
+            )
+            .liquidGlassSurface(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .frame(maxWidth: 920)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
+            .frame(maxWidth: .infinity)
             .background(
                 LinearGradient(
-                    colors: [.black.opacity(0.65), .black.opacity(0.2), .clear],
+                    colors: [.black.opacity(0.42), .black.opacity(0.12), .clear],
                     startPoint: .bottom,
                     endPoint: .top
                 )
+                .allowsHitTesting(false)
             )
         }
         // 传统播放器逻辑：鼠标移动时显示，3秒后自动隐藏
@@ -538,7 +601,7 @@ private struct PlayerControlOverlay: View {
         .onAppear {
             currentState = player.state
             currentTime = player.currentTime
-            sliderValue = Float(player.currentTime)
+            sliderValue = player.currentTime
         }
         .onReceive(player.currentTimePublisher) { newTime in
             currentTime = newTime
@@ -560,19 +623,191 @@ private struct PlayerControlOverlay: View {
         if case .failed = currentState {
             return "play.slash.fill"
         }
-        return currentState.isPlaying ? "pause.circle.fill" : "play.circle.fill"
+        return currentState.isPlaying ? "pause.fill" : "play.fill"
     }
 
     private var volumeIconName: String {
-        if player.isMuted || player.playbackVolume == 0 {
+        if player.isMuted || player.playbackVolume <= 0.001 {
             return "speaker.slash.fill"
-        } else if player.playbackVolume < 0.3 {
-            return "speaker.fill"
-        } else if player.playbackVolume < 0.7 {
+        } else if player.playbackVolume < 0.33 {
             return "speaker.wave.1.fill"
+        } else if player.playbackVolume < 0.67 {
+            return "speaker.wave.2.fill"
         } else {
             return "speaker.wave.3.fill"
         }
+    }
+
+    private func formatPlaybackRate(_ rate: Double) -> String {
+        if abs(rate.rounded() - rate) < 0.001 {
+            return "\(Int(rate.rounded()))×"
+        }
+        let roundedTenth = (rate * 10).rounded() / 10
+        if abs(roundedTenth - rate) < 0.001 {
+            return String(format: "%.1f×", rate)
+        }
+        return String(format: "%.2f×", rate)
+    }
+}
+
+// MARK: - 弹幕控制组（独立观察 viewModel，保证开关状态实时响应）
+private struct DanmakuControlGroup: View {
+    @ObservedObject var viewModel: AnimeDetailViewModel
+    @State private var showDanmakuSettings = false
+    @State private var hoveredControl: Control?
+
+    private enum Control { case toggle, settings }
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Button {
+                viewModel.toggleDanmaku()
+            } label: {
+                Image(systemName: viewModel.danmakuSettings.isEnabled ? "captions.bubble.fill" : "captions.bubble")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(
+                        viewModel.danmakuSettings.isEnabled
+                            ? .white
+                            : .white.opacity(hoveredControl == .toggle ? 0.96 : 0.72)
+                    )
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(PlayerChromeControlStyle(
+                hovered: hoveredControl == .toggle,
+                isActive: viewModel.danmakuSettings.isEnabled
+            ))
+            .focusable(false)
+            .onHover { hovering in
+                hoveredControl = hovering ? .toggle : (hoveredControl == .toggle ? nil : hoveredControl)
+            }
+            .help(t("anime.player.danmakuToggle"))
+
+            Button {
+                showDanmakuSettings = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(hoveredControl == .settings || showDanmakuSettings ? 1.0 : 0.84))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(PlayerChromeControlStyle(
+                hovered: hoveredControl == .settings,
+                isActive: showDanmakuSettings
+            ))
+            .focusable(false)
+            .onHover { hovering in
+                hoveredControl = hovering ? .settings : (hoveredControl == .settings ? nil : hoveredControl)
+            }
+            .help(t("anime.player.danmakuSettingsButton"))
+            .popover(isPresented: $showDanmakuSettings, arrowEdge: .top) {
+                AnimeDanmakuSettingsPanel(viewModel: viewModel)
+                    .frame(width: 340, height: 520)
+            }
+        }
+    }
+}
+
+// MARK: - 播放/暂停主按钮样式
+private struct PlayPausePrimaryButtonStyle: ButtonStyle {
+    var hovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let fillOpacity: Double = configuration.isPressed ? 0.30 : (hovered ? 0.24 : 0.16)
+        configuration.label
+            .background(
+                Circle()
+                    .fill(Color.white.opacity(fillOpacity))
+                    .overlay(
+                        Circle()
+                            .strokeBorder(Color.white.opacity(hovered ? 0.26 : 0.16), lineWidth: 0.75)
+                    )
+            )
+            .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.14), value: hovered)
+    }
+}
+
+// MARK: - Apple 风格精密播放器滑块（时间进度 / 音量共用）
+private struct ApplePlayerSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var trackHeight: CGFloat = 4
+    var expandedTrackHeight: CGFloat = 6
+    var thumbSize: CGFloat = 11
+    var onEditingChanged: ((Bool) -> Void)? = nil
+
+    @State private var isHovered = false
+    @State private var isDragging = false
+
+    private var isInteracting: Bool { isHovered || isDragging }
+
+    private var progress: CGFloat {
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        let normalized = (value - range.lowerBound) / span
+        return CGFloat(min(max(normalized, 0), 1))
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(geometry.size.width, 1)
+            let currentHeight = isInteracting ? expandedTrackHeight : trackHeight
+            let filledWidth = max(0, min(width, width * progress))
+            let clampedThumbX = min(max(filledWidth, thumbSize / 2), max(thumbSize / 2, width - thumbSize / 2))
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.22))
+                    .frame(height: currentHeight)
+
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(isInteracting ? 1.0 : 0.90))
+                    .frame(width: max(currentHeight, filledWidth), height: currentHeight)
+                    .opacity(filledWidth > 0.5 ? 1 : 0)
+
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: thumbSize, height: thumbSize)
+                    .shadow(color: .black.opacity(0.28), radius: 3, y: 1)
+                    .position(x: clampedThumbX, y: geometry.size.height / 2)
+                    .scaleEffect(isInteracting ? 1.0 : 0.45)
+                    .opacity(isInteracting ? 1.0 : 0.0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        if !isDragging {
+                            isDragging = true
+                            onEditingChanged?(true)
+                        }
+                        updateValue(at: gesture.location.x, width: width)
+                    }
+                    .onEnded { gesture in
+                        updateValue(at: gesture.location.x, width: width)
+                        if isDragging {
+                            isDragging = false
+                            onEditingChanged?(false)
+                        }
+                    }
+            )
+        }
+        .frame(height: 18)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.85)) {
+                isHovered = hovering
+            }
+        }
+        .animation(.spring(response: 0.22, dampingFraction: 0.85), value: isDragging)
+    }
+
+    private func updateValue(at x: CGFloat, width: CGFloat) {
+        let ratio = Double(min(max(x / max(width, 1), 0), 1))
+        value = range.lowerBound + (range.upperBound - range.lowerBound) * ratio
     }
 }
 
@@ -1317,14 +1552,15 @@ private struct SourcesContentView: View {
             } else if let source = selectedSource,
                       let index = viewModel.sourceResults.firstIndex(where: { $0.id == source.id }) {
                 SourceSearchProgressHeader(viewModel: viewModel, sources: sources)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 8)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 10)
 
                 EpisodeSourceToolbar(viewModel: viewModel, sources: sources, source: source) { id in
                     selectedSourceID = id
                 }
                 .padding(.horizontal, 20)
-                .padding(.vertical, 8)
+                .padding(.top, 6)
+                .padding(.bottom, 6)
 
                 SourceDetailView(viewModel: viewModel, source: source, sourceIndex: index)
                     .frame(maxWidth: .infinity)
@@ -1369,28 +1605,31 @@ private struct SourceSearchProgressHeader: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             if finishedCount < sources.count {
-                ProgressView().controlSize(.mini)
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.85)
                 Text(String(format: t("anime.player.sourceStatus.searchingProgress"), finishedCount, sources.count))
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(LiquidGlassColors.textTertiary)
+                    .foregroundStyle(.white.opacity(0.54))
             } else {
-                Image(systemName: availableCount > 0 ? "checkmark.circle.fill" : "exclamationmark.circle")
-                    .font(.system(size: 11))
+                Image(systemName: availableCount > 0 ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(availableCount > 0 ? LiquidGlassColors.onlineGreen : LiquidGlassColors.warningOrange)
                 Text(String(format: t("anime.player.sourceStatus.availableCount"), availableCount))
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(LiquidGlassColors.textTertiary)
+                    .foregroundStyle(.white.opacity(0.56))
             }
-            Spacer()
+            Spacer(minLength: 8)
             if finishedCount < sources.count {
                 Text(String(format: t("anime.player.sourceStatus.availableCount"), availableCount))
-                    .font(.system(size: 11))
-                    .foregroundStyle(LiquidGlassColors.textTertiary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.46))
             }
         }
-        .frame(height: 18)
+        .frame(height: 16)
     }
 }
 
@@ -1399,25 +1638,32 @@ private struct EpisodeSourceToolbar: View {
     let sources: [SourceSearchResult]
     let source: SourceSearchResult
     let onSelectSource: (String) -> Void
+    @State private var hoveredSelector: Selector?
+
+    private enum Selector { case source, road }
 
     var body: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 4) {
-                // Outside the native menu label so AppKit cannot discard the status dot.
-                Circle().fill(status(for: source).color)
-                    .frame(width: 6, height: 6)
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
+        HStack(spacing: 8) {
+            // 左侧：紧凑源与线路选择器胶囊（同心内胶囊 hover，不拉长制造无意义空白）
+            HStack(spacing: 2) {
                 sourceMenu
-            }
-            .padding(.leading, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            if source.roads.count > 1 {
-                roadMenu
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+                if source.roads.count > 1 {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.14))
+                        .frame(width: 1, height: 12)
+                        .accessibilityHidden(true)
 
+                    roadMenu
+                }
+            }
+            .padding(3)
+            .frame(height: 30)
+            .liquidGlassSurface(.regular, in: Capsule(style: .continuous))
+
+            Spacer(minLength: 4)
+
+            // 右侧：独立圆形操作按钮，与左侧胶囊同高且共享 GlassEffectContainer
             AnimeEpisodeActionsMenu(
                 sourceID: source.id,
                 episodes: source.detail?.episodes ?? [],
@@ -1425,12 +1671,8 @@ private struct EpisodeSourceToolbar: View {
                 viewModel: viewModel
             )
         }
-        .foregroundStyle(.white.opacity(0.9))
-        .frame(height: 30)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .liquidGlassSurface(.prominent, in: Capsule(style: .continuous))
-        .glassContainer(spacing: 10)
+        .foregroundStyle(.white.opacity(0.92))
+        .glassContainer(spacing: 8)
     }
 
     private var sourceMenu: some View {
@@ -1450,10 +1692,18 @@ private struct EpisodeSourceToolbar: View {
                 }
             }
         } label: {
-            selectorLabel(source.rule.name)
+            selectorLabel(source.rule.name, dotColor: status(for: source).color, isPrimary: true)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(SelectorMenuStyle(hovered: hoveredSelector == .source))
         .menuIndicator(.hidden)
+        .focusable(false)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                if hovering { hoveredSelector = .source }
+                else if hoveredSelector == .source { hoveredSelector = nil }
+            }
+        }
         .accessibilityLabel(t("anime.player.source"))
         .accessibilityValue(sourceTitle(for: source))
         .help(sourceTitle(for: source))
@@ -1469,28 +1719,44 @@ private struct EpisodeSourceToolbar: View {
                 }
             }
         } label: {
-            selectorLabel(title)
+            selectorLabel(title, dotColor: nil, isPrimary: false)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(SelectorMenuStyle(hovered: hoveredSelector == .road))
         .menuIndicator(.hidden)
+        .focusable(false)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.14)) {
+                if hovering { hoveredSelector = .road }
+                else if hoveredSelector == .road { hoveredSelector = nil }
+            }
+        }
         .accessibilityLabel(t("anime.player.road"))
         .accessibilityValue(title)
         .help(title)
     }
 
-    private func selectorLabel(_ title: String) -> some View {
+    private func selectorLabel(_ title: String, dotColor: Color?, isPrimary: Bool) -> some View {
         HStack(spacing: 5) {
+            if let dotColor {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 6, height: 6)
+                    .accessibilityHidden(true)
+            }
             Text(title)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12, weight: isPrimary ? .semibold : .medium))
+                .foregroundStyle(.white.opacity(isPrimary ? 0.94 : 0.84))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.48))
                 .fixedSize()
         }
-        .frame(height: 30)
-        .contentShape(Rectangle())
+        .padding(.horizontal, 9)
+        .frame(height: 24)
+        .contentShape(Capsule(style: .continuous))
     }
 
     private var backToSearchAction: (() -> Void)? {
@@ -1545,7 +1811,7 @@ private struct EpisodeSourceToolbar: View {
                 if viewModel.hasVerifiedPlayback(for: item.id) {
                     return ("anime.player.sourceStatus.verified", LiquidGlassColors.onlineGreen, nil)
                 }
-                return ("anime.player.sourceStatus.episodesUnverified", LiquidGlassColors.textQuaternary, nil)
+                return ("anime.player.sourceStatus.episodesUnverified", Color.white.opacity(0.45), nil)
             }
             return ("player.noEpisodes", Color(hex: "FF6B6B"), nil)
         case .needsSelection: return ("anime.player.sourceStatus.chooseTitle", LiquidGlassColors.warningOrange, nil)
@@ -1555,6 +1821,21 @@ private struct EpisodeSourceToolbar: View {
         case .idle: return ("anime.player.sourceStatus.notSearched", LiquidGlassColors.textQuaternary, nil)
         case .loading: return ("animePlayer.searching", LiquidGlassColors.textQuaternary, nil)
         }
+    }
+}
+
+// MARK: - 源/线路下拉的 hover/按压反馈
+// Menu 用 .button 样式时 label 走纯 SwiftUI：borderlessButton 的 AppKit 渲染
+// 会把 label 里的 Image 抽到文字前、并丢弃自定义背景。
+private struct SelectorMenuStyle: ButtonStyle {
+    var hovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let opacity = configuration.isPressed ? 0.17 : (hovered ? 0.11 : 0)
+        configuration.label
+            .background(Color.white.opacity(opacity), in: Capsule(style: .continuous))
+            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 

@@ -85,6 +85,14 @@ private func waifuxAtExitHandler() {
 enum AppExitDiagnostics {
     nonisolated(unsafe) private static var fd: Int32 = -1
 
+    /// 启动阶段面包屑：只写 waifux-exit.log（同步 write+fsync），不走 AppLogger。
+    /// 启动期挂死（2026-09-20 四例）的指纹是 install 之后零日志——AppLogger 走
+    /// 异步队列，主线程挂死时排队的行永远落不了盘；这里的直写保证「走到哪一步」
+    /// 在强杀后仍可从 EXIT DIAGNOSTICS 段读出。每进程仅启动期数条，无噪声。
+    static func breadcrumb(_ stage: String) {
+        write("\(ISO8601DateFormatter().string(from: Date())) boot:\(stage) | pid=\(getpid())\n")
+    }
+
     static func install() {
         openLogIfNeeded()
         record("install", metadata: [
@@ -208,7 +216,9 @@ class LayoutLoopGuardHostingView<Content: View>: NSHostingView<Content> {
         set {
             if newValue && LayoutLoopGuardState.layoutPassDepth > 0 {
                 LayoutLoopGuardState.suppressedMarks += 1
-                AppLogger.throttled(.error, .general, key: "layoutloop.suppress", interval: 10,
+                // 布局环活跃期这里 10s 一条 ERROR 实测 2.6 天刷 2725 行（占全日志 35%），
+                // 熔断语义不变、只降日志噪声：30s 一条 WARN，count 是累计值不丢信息。
+                AppLogger.throttled(.warn, .general, key: "layoutloop.suppress", interval: 30,
                     "[LayoutLoop] suppressed in-pass constraint mark #\(LayoutLoopGuardState.suppressedMarks)")
                 return
             }
@@ -338,6 +348,7 @@ struct WaifuXApp {
         }
 
         AppExitDiagnostics.install()
+        AppExitDiagnostics.breadcrumb("exitDiagnosticsInstalled")
         // 全局忽略 SIGPIPE：AVFoundation 内部管道在快速切换视频壁纸时可能写入已关闭的 pipe，
         // 若不加此保护会导致信号 13 (SIGPIPE) 传递到 NSEventThread 崩溃。
         // 所有自定义 socket 已通过 SO_NOSIGPIPE 独立防护，全局忽略是安全的。
@@ -357,6 +368,7 @@ struct WaifuXApp {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
+        AppExitDiagnostics.breadcrumb("appRunBegin")
         app.run()
     }
 
@@ -597,6 +609,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppExitDiagnostics.breadcrumb("didFinishLaunchingBegin")
         Self.shared = self
         launchedAsLoginItem = Self.wasLaunchedAsLoginItem()
         // 历史版本曾把主 App 注册为登录项；服务拆到 Helper 后登录恢复归 LaunchAgent。
@@ -608,6 +621,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         NotificationCenter.default.addObserver(self, selector: #selector(reloadImportedUICaches(_:)),
                                                name: .cloudSyncSettingsImported, object: nil)
         BackgroundAgentClient.shared.start()
+        AppExitDiagnostics.breadcrumb("helperBootstrapStarted")
         AppResponsivenessMonitor.startIfNeeded()
         AppResponsivenessMonitor.noteScenePhase("didFinishLaunching")
         AppResponsivenessMonitor.noteAppActive(NSApp.isActive)
@@ -626,6 +640,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
 
         // [AnimTracker] 后台 CPU 诊断：动画存活心跳 + 主窗口遮挡状态
         RepeatForeverAnimationTracker.shared.startHeartbeat()
+        AppExitDiagnostics.breadcrumb("animHeartbeatStarted")
         #if DEBUG
         // 遮挡日志只是诊断手段，Release 下由 MainWindowVisibility 的节流日志覆盖，
         // 这里不再为每条通知构造字符串（issue #119 的空转来源之一）。
@@ -637,7 +652,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             guard let win = note.object as? NSWindow else { return }
             let state = win.occlusionState.contains(.visible) ? "visible" : "occluded"
             let name = win.title.isEmpty ? (win.identifier?.rawValue ?? "?") : win.title
-            AppLogger.throttled(.error, .general, key: "window.occlusion.\(name)", interval: 10,
+            // key 固定：窗口标题是动态值，拼进节流 key 会绕开同 key 节流（AGENTS 约定）。
+            AppLogger.throttled(.debug, .general, key: "window.occlusion", interval: 30,
                                 "[AnimTracker] occlusion \(name) -> \(state)")
         }
         #endif
@@ -663,6 +679,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             updaterDelegate: self,
             userDriverDelegate: self
         )
+        AppExitDiagnostics.breadcrumb("sparkleUpdaterStarted")
 
         // 状态栏由 Helper 持有；UI 只接收明确的窗口/操作请求。
         WaifuXUIActions.handler = { [weak self] action in
@@ -690,13 +707,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
         // 依赖 ModuleAvailability.shared 决定 addPage 哪些 tab。必须在此之前同步读 UserDefaults。
         // 直接读 UserDefaults 是安全的（非 @AppStorage、非 init 读取，与已存在的 line 316/399 一致）。
         ModuleAvailability.shared.refreshFromUserDefaults()
+        AppExitDiagnostics.breadcrumb("didFinishLaunchingEnd")
 
         // Restore preferences after launch, then create only the requested UI.
         // Helper URLs also carry launch arguments, so a late URL event cannot
         // cause the main window to flash during a settings-only cold start.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            AppExitDiagnostics.breadcrumb("restoreBegin")
             self.restoreAllDataAsync()
+            AppExitDiagnostics.breadcrumb("restoreEnd")
             // 系统壁纸缓存清理只在这里激活：执行者刻意是主 App，因为要清理的目标在
             // wallpaper agent 的容器里、受 TCC 保护，而授权对象必须是隐私面板里可见的 WaifuX
             // （Helper 藏在 Contents/Helpers/ 下，用户既找不到也拖不进去）。
@@ -715,6 +735,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             for action in actions {
                 WaifuXUIActions.perform(action)
             }
+            AppExitDiagnostics.breadcrumb("uiActionsDispatched")
         }
 
         // Sparkle 自动按 SUScheduledCheckInterval (24h) 检查更新，无需手动触发
@@ -2258,7 +2279,9 @@ final class ScreenClampedWindow: NSWindow {
                 }
             }
             if constraintMarkCount > 8 {
-                AppLogger.throttled(.error, .general, key: "layoutloop.breaker.constraints", interval: 10,
+                // 环持续活跃时 10s 节流仍实测 6 条/分钟；降为 60s 一条 WARN。
+                // 真正的布局异常仍由 LayoutExceptionHandlerDelegate 以 ERROR 落盘。
+                AppLogger.throttled(.warn, .general, key: "layoutloop.breaker.constraints", interval: 60,
                     "[LayoutLoop] constraint-mark breaker tripped count=\(constraintMarkCount)")
                 scheduleDeferredConstraintMark()
                 return
@@ -2281,7 +2304,7 @@ final class ScreenClampedWindow: NSWindow {
                 }
             }
             if layoutMarkCount > 8 {
-                AppLogger.throttled(.error, .general, key: "layoutloop.breaker.layout", interval: 10,
+                AppLogger.throttled(.warn, .general, key: "layoutloop.breaker.layout", interval: 60,
                     "[LayoutLoop] layout-mark breaker tripped count=\(layoutMarkCount)")
                 scheduleDeferredLayoutMark()
                 return

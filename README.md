@@ -127,7 +127,7 @@ WaifuX 的主要数据源 [Wallhaven](https://wallhaven.cc) 托管在海外服�
 | 🇨🇳 简体中文 | ✅ 完整支持 |
 | 🇺🇸 English | ✅ Full Support |
 | 🇯🇵 日本語 | ✅ 完全対応 |
-| [🇪🇸 Español (España)](LOCALIZATION.md) | ✅ 完整支持 |
+| [🇪🇸 西班牙语（西班牙）](LOCALIZATION.md) | ✅ 完整支持 |
 
 西班牙语（西班牙）本地化由 Jesús Jódar Piernas（[@jesusjodar](https://github.com/jesusjodar)）贡献，见 [PR #123](https://github.com/jipika/WaifuX/pull/123)。
 
@@ -141,7 +141,7 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 
 ### 💬 加入 QQ 群
 
-- **WaifuX 用户交流群**: [点击加入](https://qm.qq.com/q/SRCj8msygq) 👈 971414910
+- **WaifuX 用户交流群**: [点击加入](https://qm.qq.com/q/NuLBHJQrKu) 👈 884912800
 
 <table>
   <tr>

@@ -22,6 +22,11 @@ final class GuideEngine: ObservableObject {
     @Published private(set) var usableRect: CGRect?
 
     var isTourActive: Bool { activeTour != nil }
+
+    /// 该窗口是否为本引擎的遮罩窗（锚点上报用它排除错误宿主）。
+    func isOverlayWindow(_ window: NSWindow) -> Bool {
+        window === overlayWindow
+    }
     var currentStep: GuideStep? {
         guard let tour = activeTour, tour.steps.indices.contains(stepIndex) else { return nil }
         return tour.steps[stepIndex]
@@ -61,7 +66,8 @@ final class GuideEngine: ObservableObject {
         }
     }
 
-    /// 详情浮层打开时调用（ContentView onChange of detailPath.count）。
+    /// 详情浮层打开时调用（ContentView 在路由变为 wallpaper/media 时触发；
+    /// 动漫/漫画详情没有导览锚点，不触发也不记完成）。
     /// 与 tab 自动播放共享 token：打开详情会取消未决的 tab 播放。
     func noteDetailOpened() {
         pendingAutoplayToken = UUID()
@@ -115,8 +121,13 @@ final class GuideEngine: ObservableObject {
 
     private func start(_ tour: GuideTour, recordProgress: Bool) {
         guard !isTourActive else { return }
+        // 锚点可能在独立窗口（设置窗/popover）：遮罩必须落在首步锚点所在屏，
+        // 否则设置窗拖到副屏时全部步骤会被「不在遮罩屏内」跳过。
+        let anchorScreen = tour.steps.first?.anchor.flatMap {
+            GuideAnchorRegistry.shared.window(for: $0)?.screen
+        }
         guard let window = NSApp.mainWindow ?? NSApp.keyWindow,
-              let screen = window.screen ?? NSScreen.main else {
+              let screen = anchorScreen ?? window.screen ?? NSScreen.main else {
             AppLogger.error(.general, "[GuideKit] no host window/screen, tour \(tour.id) aborted")
             return
         }
@@ -230,10 +241,13 @@ final class GuideEngine: ObservableObject {
     }
 
     /// Esc / 跳过导览：标记完成（不再自动播放）并收尾。
+    /// flag 必须在 teardown 之前取出——teardown 会把它复位为 true，
+    /// 否则手动重播（recordProgress: false）按 Esc/跳过也会误写完成状态。
     func end(markCompleted: Bool) {
         guard let tour = activeTour else { return }
+        let shouldRecord = recordProgressOnFinish
         teardown()
-        if markCompleted, recordProgressOnFinish {
+        if markCompleted, shouldRecord {
             progressStore.markCompleted(tour)
         }
     }
@@ -292,8 +306,17 @@ final class GuideEngine: ObservableObject {
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
         guard isTourActive else { return false }
+        // 文本编辑中（搜索框等 NSTextField / field editor）：Space/Esc/方向键放行，
+        // 否则打字里的空格会被吞成「下一步」，Esc 也关不掉输入焦点。
+        if let responder = event.window?.firstResponder,
+           responder is NSTextView || responder is NSTextField {
+            return false
+        }
         switch event.keyCode {
         case 53: // Esc：结束整段导览
+            // 作者滑出面板是详情页自己的弹层：Esc 先交给详情视图关面板，
+            // 与详情页「弹窗优先、逐层关闭」的 Esc 语义一致。
+            if authorSheetIsOpen { return false }
             end(markCompleted: true)
             return true
         case 124, 49: // → / Space：下一步
@@ -305,6 +328,11 @@ final class GuideEngine: ObservableObject {
         default:
             return false
         }
+    }
+
+    /// 作者滑出面板是主窗内 overlay，无法从窗口层级判断；锚点已上报即视为开着。
+    private var authorSheetIsOpen: Bool {
+        GuideAnchorRegistry.shared.window(for: .authorSheetHeader) != nil
     }
 
     // MARK: - 窗口几何跟随
@@ -338,7 +366,9 @@ final class GuideEngine: ObservableObject {
 }
 
 // MARK: - 完成状态持久化
-// UserDefaults 单 key JSON：{ "<tourID>": <contentVersion> }。
+// UserDefaults 单 key JSON：{ "<tourID>": "<seenAppVersion>#<contentVersion>" }。
+// 重播条件 = App 版本跨过 3 个补丁版本，或 tour 的 contentVersion 高于已看值
+// （内容修订 bump contentVersion 即可定向重播该 tour）。
 // 注意：只在触发/收尾时惰性读写（GuideEngine 是懒加载单例，不在 init 里碰 UserDefaults）。
 
 struct GuideProgressStore {
@@ -379,7 +409,7 @@ struct GuideProgressStore {
               let old = try? JSONDecoder().decode([String: Int].self, from: legacy) else { return [:] }
         var migrated: [String: String] = [:]
         for (tourID, version) in old where version >= 0 {
-            migrated[tourID] = Self.currentVersion
+            migrated[tourID] = "\(Self.currentVersion)#\(version)"
         }
         save(migrated)
         return migrated
@@ -390,14 +420,25 @@ struct GuideProgressStore {
         defaults.set(data, forKey: key)
     }
 
+    /// 存储值 = "<seenAppVersion>#<contentVersion>"；旧值无 "#" 时 contentVersion 记 0，
+    /// 因此把某 tour 的 contentVersion bump 到 ≥1 就能让存量用户重播一次。
+    private static func splitRecord(_ raw: String) -> (version: String, content: Int) {
+        guard let hash = raw.lastIndex(of: "#") else { return (raw, 0) }
+        let version = String(raw[..<hash])
+        let content = Int(raw[raw.index(after: hash)...]) ?? 0
+        return (version, content)
+    }
+
     func needsAutoplay(_ tour: GuideTour) -> Bool {
         guard let seen = load()[tour.id] else { return true }
-        return Self.gapReached(from: seen, to: Self.currentVersion)
+        let record = Self.splitRecord(seen)
+        if tour.contentVersion > record.content { return true }
+        return Self.gapReached(from: record.version, to: Self.currentVersion)
     }
 
     func markCompleted(_ tour: GuideTour) {
         var map = load()
-        map[tour.id] = Self.currentVersion
+        map[tour.id] = "\(Self.currentVersion)#\(tour.contentVersion)"
         save(map)
     }
 

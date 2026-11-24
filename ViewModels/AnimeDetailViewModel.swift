@@ -1526,7 +1526,7 @@ class AnimeDetailViewModel: ObservableObject {
         }
     }
 
-    /// 凭证补齐后重试当前集弹幕（设置页保存凭证后调用）。
+    /// 重试当前集弹幕（弹幕面板「重新加载」按钮调用）。
     func retryDanmakuLoad() {
         guard let episode = currentEpisode else { return }
         loadDanmaku(for: episode)

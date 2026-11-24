@@ -28,45 +28,102 @@ struct AnimeDanmakuPlaybackOverlay: View {
     }
 }
 
+/// 播放控制栏统一圆形/胶囊交互反馈（Apple 播放器风格：柔和提亮 + 轻微按压缩放）。
+struct PlayerChromeControlStyle: ButtonStyle {
+    var hovered: Bool
+    var isActive: Bool = false
+    var shape: ShapeKind = .circle
+
+    enum ShapeKind {
+        case circle
+        case capsule
+    }
+
+    func makeBody(configuration: Configuration) -> some View {
+        let fillOpacity: Double = {
+            if configuration.isPressed { return 0.22 }
+            if hovered { return 0.14 }
+            if isActive { return 0.12 }
+            return 0
+        }()
+
+        configuration.label
+            .background {
+                switch shape {
+                case .circle:
+                    Circle().fill(Color.white.opacity(fillOpacity))
+                case .capsule:
+                    Capsule(style: .continuous).fill(Color.white.opacity(fillOpacity))
+                }
+            }
+            .scaleEffect(configuration.isPressed ? 0.94 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.14), value: hovered)
+    }
+}
+
 struct AnimePlaybackAccessories: View {
     let syncPlay: AnimeSyncPlayService
     let episodeNumber: Int?
     let hasVideo: Bool
     @ObservedObject var player: NativeVideoPlayer
+    /// 独立浮在待机画面左下角时显示玻璃圆底；嵌入底部播放控制舱内时由外层玻璃承载。
+    var standaloneSurface: Bool = false
     @State private var showSyncPlay = false
     @State private var screenshotBusy = false
     @State private var screenshotError: String?
+    @State private var hoveredControl: Control?
+
+    private enum Control { case menu, screenshot }
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             Menu {
                 Button(t("anime.player.syncPlay"), systemImage: "person.2") { showSyncPlay = true }
             } label: {
-                Image(systemName: "ellipsis.circle")
-                    .frame(width: 28, height: 32)
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(hoveredControl == .menu ? 1.0 : 0.86))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(PlayerChromeControlStyle(hovered: hoveredControl == .menu))
             .menuIndicator(.hidden)
+            .focusable(false)
+            .onHover { hovering in
+                hoveredControl = hovering ? .menu : (hoveredControl == .menu ? nil : hoveredControl)
+            }
             .accessibilityLabel(t("anime.player.playbackMenu"))
             .help(t("anime.player.playbackMenu"))
 
             if hasVideo {
                 Button { Task { await saveScreenshot() } } label: {
                     Group {
-                        if screenshotBusy { ProgressView().controlSize(.mini) }
-                        else { Image(systemName: "camera") }
+                        if screenshotBusy {
+                            ProgressView().controlSize(.mini).tint(.white)
+                        } else {
+                            Image(systemName: "camera")
+                                .font(.system(size: 13.5, weight: .medium))
+                        }
                     }
-                    .frame(width: 28, height: 32)
-                    .contentShape(Rectangle())
+                    .foregroundStyle(.white.opacity(hoveredControl == .screenshot ? 1.0 : 0.86))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PlayerChromeControlStyle(hovered: hoveredControl == .screenshot))
+                .focusable(false)
                 .disabled(screenshotBusy || !player.state.isReady)
+                .opacity((!player.state.isReady && !screenshotBusy) ? 0.45 : 1.0)
+                .onHover { hovering in
+                    hoveredControl = hovering ? .screenshot : (hoveredControl == .screenshot ? nil : hoveredControl)
+                }
                 .accessibilityLabel(t("anime.player.screenshot"))
                 .help(t("anime.player.screenshot"))
             }
         }
-        .font(.system(size: 15, weight: .medium))
-        .foregroundStyle(.white)
+        .padding(standaloneSurface ? 3 : 0)
+        .modifier(StandaloneGlassModifier(enabled: standaloneSurface))
         .sheet(isPresented: $showSyncPlay) {
             AnimePlayerFeatureSheet { AnimeSyncPlayView(service: syncPlay) }
         }
@@ -103,6 +160,18 @@ struct AnimePlaybackAccessories: View {
             try data.write(to: url, options: .atomic)
         } catch {
             screenshotError = error.localizedDescription
+        }
+    }
+}
+
+private struct StandaloneGlassModifier: ViewModifier {
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.liquidGlassSurface(.regular, in: Capsule(style: .continuous))
+        } else {
+            content
         }
     }
 }
@@ -244,7 +313,7 @@ struct AnimeDanmakuSettingsPanel: View {
         if !viewModel.danmakuList.isEmpty {
             return String(format: t("anime.player.danmakuCount"), viewModel.danmakuList.count)
         }
-        if !DanmakuCredentials.isConfigured { return t("settings.danmaku.sourceNone") }
+        if !DanmakuCredentials.isConfigured { return t("anime.player.danmakuAuthMissing") }
         return t("anime.player.danmakuSourceName")
     }
 
@@ -443,6 +512,7 @@ struct AnimeEpisodeActionsMenu: View {
     let onBackToSearch: (() -> Void)?
     @ObservedObject var viewModel: AnimeDetailViewModel
     @State private var activeSheet: Destination?
+    @State private var isHovered = false
 
     private enum Destination: Identifiable {
         case downloads
@@ -472,11 +542,17 @@ struct AnimeEpisodeActionsMenu: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 13, weight: .semibold))
-                .frame(width: 28, height: 30)
-                .contentShape(Rectangle())
+                .foregroundStyle(.white.opacity(isHovered ? 0.98 : 0.84))
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(PlayerChromeControlStyle(hovered: isHovered))
         .menuIndicator(.hidden)
+        .focusable(false)
+        .liquidGlassSurface(.regular, in: Circle())
+        .fixedSize()
+        .onHover { isHovered = $0 }
         .accessibilityLabel(t("anime.player.episodeActions"))
         .help(t("anime.player.episodeActions"))
         .sheet(item: $activeSheet) { destination in

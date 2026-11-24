@@ -489,11 +489,16 @@ private final class ScenePreviewProcessController {
     func stop(reason: String = "unspecified") {
         let oldPID = process?.processIdentifier
         let hadRunningProcess = process?.isRunning == true
-        AppLogger.error(.wallpaper, "[ScenePreview] stop requested", metadata: [
-            "reason": reason, "pid": oldPID.map(String.init) ?? "nil",
-            "hadRunningProcess": hadRunningProcess ? "1" : "0",
-            "stack": Thread.callStackSymbols.prefix(14).joined(separator: " <- ")
-        ])
+        // 无进程的例行 stop 不写日志：每次壁纸应用/预览切换都会走到这里，
+        // 实测 2.6 天刷了 240 条 ERROR 而其中绝大多数 hadRunningProcess=0。
+        // 真正终止了进程、或内存看门狗强杀时仍保留 ERROR + 调用栈。
+        if hadRunningProcess || reason.hasPrefix("memoryLimitExceeded") {
+            AppLogger.error(.wallpaper, "[ScenePreview] stop requested", metadata: [
+                "reason": reason, "pid": oldPID.map(String.init) ?? "nil",
+                "hadRunningProcess": hadRunningProcess ? "1" : "0",
+                "stack": Thread.callStackSymbols.prefix(14).joined(separator: " <- ")
+            ])
+        }
         memoryWatchdogTask?.cancel()
         memoryWatchdogTask = nil
         guard let process else { return }
