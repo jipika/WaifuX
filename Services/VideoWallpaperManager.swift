@@ -1833,6 +1833,12 @@ final class VideoWallpaperManager: ObservableObject {
         if !wasActive {
             print("[VideoWallpaperManager] Wallpaper extension context became active")
         }
+        if isActive, let contexts = json["contexts"] as? [[String: Any]], !contexts.isEmpty {
+            let activeDisplayIDs = Set(contexts.compactMap { ($0["displayID"] as? NSNumber)?.uint32Value }.filter { $0 > 0 })
+            if !activeDisplayIDs.isEmpty {
+                StaticImageWallpaperOverlayManager.shared.retireFallbackOverlaysForActiveExtension(displayIDs: activeDisplayIDs)
+            }
+        }
         // PID 换代不一定经过 inactive 通知。每次 active 观测都走纯签名门控，
         // 同进程同媒体不再反复清命令/重载，新 PID 和新媒体则立即同步。
         if hasActiveVideoWallpaper {

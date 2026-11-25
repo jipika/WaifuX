@@ -302,14 +302,24 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
         let scopes: [WallpaperAgentRecoveryTargetPolicy.Scope]
         let restartedAt: TimeInterval
         let originalPID: Int32
+        let frozenPID: Int32?
         let deadline: TimeInterval
         var replayed: [UInt32: String] = [:]
         var readyPID: Int32?
         var readyRequests: [UInt32: String] = [:]
         var readySince: TimeInterval = 0
     }
+    private struct FrozenReplacementObservation: Equatable {
+        let fault: WallpaperExtensionRecoveryPolicy.ActiveRecord
+        let frozenPID: Int32
+        let firstObserved: TimeInterval
+        var samples: Int
+        var lastSample: TimeInterval
+    }
     private var missingVerification: MissingVerification?
     private var missingPreflightAfter: TimeInterval = 0
+    private var frozenReplacement: FrozenReplacementObservation?
+    private var frozenReplacementConfirmWindow: TimeInterval = 20
     private static let missingAttemptKey = "wallpaper_missing_process_recovery_attempt"
     private var embeddedExtensionURL: URL?
     private var stateURL: URL?
@@ -534,7 +544,8 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
 
     @MainActor
     private func restartForMissingExtension(
-        _ fault: WallpaperExtensionRecoveryPolicy.ActiveRecord, generation: UInt64, eligible: Bool
+        _ fault: WallpaperExtensionRecoveryPolicy.ActiveRecord, generation: UInt64, eligible: Bool,
+        expectedFrozenPID: Int32? = nil
     ) {
         stateLock.lock()
         let file = stateURL
@@ -574,13 +585,21 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
             WallpaperAgentRecoveryExecutor.currentScope(displayID: scope.displayID) == scope
                 && WallpaperAgentRecoveryExecutor.isSelected(scope)
         }
+        func processStateStillMatches() -> Bool {
+            let pids = WallpaperExtensionKeeper.observedExtensionProcessPids()
+            if let expectedFrozenPID {
+                guard pids == [expectedFrozenPID], expectedFrozenPID != fault.pid else { return false }
+                return Self.hasUnansweredSourceRequest(for: scopes.map(\.displayID))
+            }
+            return pids?.isEmpty == true
+        }
         let restartedAt = Date().timeIntervalSince1970
         var reserved = false
         let result = WallpaperAgentRecoveryExecutor.attemptRestart(shouldContinue: {
             self.isCurrentHealingGeneration(generation) && !VideoWallpaperManager.shared.isScreenLocked
                 && scopes.allSatisfy { scopeIsCurrent($0) }
                 && Self.activeRecord(at: file) == fault && ProcessLiveness.isDefinitelyDead(fault.pid)
-                && WallpaperExtensionKeeper.observedExtensionProcessPids()?.isEmpty == true
+                && processStateStillMatches()
         }, legacyCutoff: Self.legacyMissingAttempt() == fault ? fault.updatedAt : nil, reserve: {
             do {
                 try WallpaperMissingRestartJournal.write(fault: fault, phase: .reserved, number: number, at: journal)
@@ -597,16 +616,32 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
             catch { os_log(.error, log: log, "restart outcome not persisted; reservation remains closed: %{public}@", error.localizedDescription) }
         }
         stateLock.lock()
+        frozenReplacement = nil
         if sent {
             state.registrationFailed(now: ProcessInfo.processInfo.systemUptime)
             missingVerification = MissingVerification(scopes: scopes, restartedAt: restartedAt, originalPID: fault.pid,
-                deadline: ProcessInfo.processInfo.systemUptime + 60)
+                frozenPID: expectedFrozenPID, deadline: ProcessInfo.processInfo.systemUptime + 60)
         } else {
             missingPreflightAfter = ProcessInfo.processInfo.systemUptime + 15
         }
         stateLock.unlock()
-        os_log(sent ? .info : .error, log: log, "missing extension recovery pid=%d candidate=%d: %{public}@",
-               fault.pid, number, String(describing: result))
+        if let expectedFrozenPID {
+            os_log(sent ? .info : .error, log: log, "frozen replacement recovery deadPid=%d frozenPid=%d candidate=%d: %{public}@",
+                   fault.pid, expectedFrozenPID, number, String(describing: result))
+        } else {
+            os_log(sent ? .info : .error, log: log, "missing extension recovery pid=%d candidate=%d: %{public}@",
+                   fault.pid, number, String(describing: result))
+        }
+    }
+
+    private static func hasUnansweredSourceRequest(for displayIDs: [UInt32]) -> Bool {
+        let server = WallpaperExtensionSocketServer.shared
+        guard server.contextRecoveryEvidence().isEmpty else { return false }
+        return displayIDs.contains { display in
+            guard let request = server.recoveryRequestID(displayID: display) else { return false }
+            let status = server.contextRecoveryStatus(displayID: display, requestID: request)
+            return status.current && !status.ready && !status.failed
+        }
     }
 
     /// Returns true while this branch owns recovery. It never treats the old ready bit or cold cache as a receipt.
@@ -625,7 +660,8 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
         }
         if selected, now < verification.deadline {
             if let pids = WallpaperExtensionKeeper.observedExtensionProcessPids(), pids.count == 1,
-               let report = Self.contextReport(at: file), pids.first == report.pid, report.pid != verification.originalPID,
+               let report = Self.contextReport(at: file), pids.first == report.pid,
+               report.pid != verification.originalPID, report.pid != verification.frozenPID,
                report.updatedAt >= verification.restartedAt {
                 var readyRequests: [UInt32: String] = [:]
                 for scope in verification.scopes where report.activeDisplays.contains(scope.displayID) {
@@ -721,6 +757,7 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
         contextFollowupGeneration = nil
         contextLastAgentRestartWall = nil
         missingVerification = nil
+        frozenReplacement = nil
         contextWallStarts.removeAll()
         contextAccepted.removeAll()
         contextReplayed.removeAll()
@@ -885,10 +922,94 @@ final class WallpaperExtensionAgentHealer: @unchecked Sendable {
                 }
             }
         }
+        evaluateFrozenReplacementRecovery(
+            file: file, pids: pids, report: report, evidenceEmpty: evidence.isEmpty,
+            now: now, generation: generation
+        )
         stateLock.lock()
-        let needsFollowup = !evidence.isEmpty || contextStates.values.contains(where: { $0.pendingSubmission != nil })
+        let needsFollowup = !evidence.isEmpty
+            || frozenReplacement != nil
+            || contextStates.values.contains(where: { $0.pendingSubmission != nil })
         stateLock.unlock()
         if needsFollowup { scheduleContextFollowup(generation: generation) }
+    }
+
+    /// RunningBoard can suspend an idle 0-context replacement PID after its XPC disconnects,
+    /// leaving observed PIDs non-empty (blocking zero-process recovery) while the frozen PID
+    /// can never send source_pending (blocking live context recovery). Confirm a dead prior
+    /// rendering PID + unresponsive single replacement PID across distinct samples before
+    /// reusing the same one-shot journaled WallpaperAgent restart path.
+    @MainActor
+    private func evaluateFrozenReplacementRecovery(
+        file: URL?, pids: [Int32]?, report: ContextReport?,
+        evidenceEmpty: Bool, now: TimeInterval, generation: UInt64
+    ) {
+        guard evidenceEmpty,
+              let file, let fault = Self.activeRecord(at: file),
+              let report, report.pid == fault.pid, report.updatedAt == fault.updatedAt,
+              let pids, pids.count == 1, let frozenPID = pids.first,
+              frozenPID != fault.pid, ProcessLiveness.isDefinitelyDead(fault.pid) else {
+            stateLock.lock()
+            frozenReplacement = nil
+            stateLock.unlock()
+            return
+        }
+        let selectedDisplays = report.activeDisplays.sorted().filter { display in
+            guard let scope = WallpaperAgentRecoveryExecutor.currentScope(displayID: display) else { return false }
+            return WallpaperAgentRecoveryExecutor.isSelected(scope)
+        }
+        guard !selectedDisplays.isEmpty, Self.hasUnansweredSourceRequest(for: selectedDisplays) else {
+            stateLock.lock()
+            frozenReplacement = nil
+            stateLock.unlock()
+            return
+        }
+        stateLock.lock()
+        let busy = !started || !monitoring || lifecycleGeneration != generation
+            || healInProgress || contextBusy != nil || missingVerification != nil
+            || now < missingPreflightAfter
+            || contextStates.values.contains(where: { $0.pendingSubmission != nil })
+        if busy {
+            stateLock.unlock()
+            return
+        }
+        if var existing = frozenReplacement, existing.fault == fault, existing.frozenPID == frozenPID {
+            if now > existing.lastSample {
+                existing.samples += 1
+                existing.lastSample = now
+                frozenReplacement = existing
+            }
+        } else {
+            frozenReplacement = FrozenReplacementObservation(
+                fault: fault, frozenPID: frozenPID, firstObserved: now, samples: 1, lastSample: now
+            )
+        }
+        let observation = frozenReplacement
+        let confirmWindow = frozenReplacementConfirmWindow
+        let readyToRestart = observation.map { $0.samples >= 2 && now - $0.firstObserved >= confirmWindow } ?? false
+        let extensionURL = embeddedExtensionURL
+        if readyToRestart {
+            healInProgress = true
+        }
+        stateLock.unlock()
+
+        guard readyToRestart else { return }
+        os_log(.info, log: log, "frozen replacement extension pid=%d unresponsive while dead pid=%d still claimed contexts; requesting guarded WallpaperAgent restart",
+               frozenPID, fault.pid)
+        if let extensionURL {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let eligible = WallpaperExtensionKeeper.hasUsableElectedExtension(for: extensionURL)
+                Task { @MainActor [weak self] in
+                    self?.restartForMissingExtension(
+                        fault, generation: generation, eligible: eligible, expectedFrozenPID: frozenPID
+                    )
+                }
+            }
+        } else {
+            restartForMissingExtension(
+                fault, generation: generation, eligible: false, expectedFrozenPID: frozenPID
+            )
+        }
     }
 
     private func scheduleContextFollowup(generation: UInt64) {

@@ -344,39 +344,55 @@ final class StaticImageWallpaperOverlayManager {
     // MARK: - 启动恢复
 
     /// 扩展正在原生渲染该屏桌面时，overlay 不得出现（会冻结 mac27 菜单栏采样、
-    /// 挡住系统设置切壁纸）。动态锁屏开启 + 该屏有活跃扩展管线 → true。
+    /// 挡住系统设置切壁纸）。动态锁屏开启 + 该屏有活跃扩展管线或扩展已报告活跃 → true。
     private func extensionOwnsDesktop(_ screen: NSScreen) -> Bool {
         guard VideoWallpaperManager.shared.isLockScreenEnabled else { return false }
         guard let displayID = (screen.deviceDescription[
             NSDeviceDescriptionKey("NSScreenNumber")
         ] as? NSNumber)?.uint32Value else { return false }
         return WallpaperExtensionSocketServer.shared.hasActivePipeline(for: displayID)
+            || VideoWallpaperManager.shared.isLockScreenExtensionActive
     }
 
-    /// App 启动时调用：系统壁纸同步关闭且无活跃动态壁纸时，从持久化状态重建 overlay。
+    /// 扩展恢复活跃后调用：仅当「系统壁纸同步开启」且当前屏没有活跃动态壁纸、
+    /// 且扩展已对指定显示器恢复渲染时，安全撤掉之前因扩展失活而挂起的静态图兜底 overlay，
+    /// 让底层扩展接管桌面并恢复系统菜单栏采样。
+    func retireFallbackOverlaysForActiveExtension(displayIDs: Set<UInt32>) {
+        guard BackgroundRuntimeRole.isHelper, !displayIDs.isEmpty else { return }
+        guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
+              !VideoWallpaperManager.shared.isScreenLocked,
+              VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else {
+            return
+        }
+        for screen in NSScreen.screens {
+            guard let displayID = (screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")
+            ] as? NSNumber)?.uint32Value,
+                  displayIDs.contains(displayID),
+                  hasOverlayWindow(for: screen),
+                  !Self.isDynamicWallpaperLive(on: screen) else {
+                continue
+            }
+            AppLogger.info(.wallpaper, "扩展已恢复活跃，撤掉静态图兜底 overlay", metadata: [
+                "screenID": screen.wallpaperScreenIdentifier,
+                "displayID": displayID
+            ])
+            clearState(for: screen)
+        }
+    }
+
+    /// App 启动时调用：允许使用静态图 overlay（系统壁纸同步关闭，或动态锁屏已选但扩展未活跃）
+    /// 且无活跃动态壁纸时，从持久化状态重建 overlay。
     func restoreIfNeeded() {
         guard BackgroundRuntimeRole.isHelper else { return }
 
-        // 系统壁纸同步开启 → 走系统壁纸，不需要 overlay
-        guard !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else {
+        let allowFallbackForInactiveExtension = VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection
+            && !VideoWallpaperManager.shared.isLockScreenExtensionActive
+        // 系统壁纸同步开启且不需要给失活扩展兜底 → 走系统壁纸/扩展，不需要 overlay
+        guard !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled
+                || allowFallbackForInactiveExtension else {
             return
         }
-        // 有活跃视频壁纸 → 视频窗口已覆盖桌面，不需要静态 overlay
-        if VideoWallpaperManager.shared.isVideoWallpaperActive {
-            return
-        }
-        // 有持久化的场景/web 壁纸待恢复（启动竞态防护）：
-        // WaifuXApp 里 WE restore 是 async Task，restoreIfNeeded() 同步执行时
-        // isControllingExternalEngine 可能仍为 false。用 hasPersistedRestoreState()
-        // 同步预测 WE 将被恢复，避免静态 overlay 先弹出再被 WE 窗口盖住。
-        if WallpaperEngineXBridge.shared.hasPersistedRestoreState() {
-            return
-        }
-        // 有活跃场景/web 壁纸 → renderer 窗口已覆盖桌面，不需要静态 overlay
-        if WallpaperEngineXBridge.shared.isControllingExternalEngine {
-            return
-        }
-
         guard let saved = loadState(), !saved.isEmpty else {
             restoreCurrentScreensFromFingerprintStateIfNeeded()
             return
@@ -387,8 +403,13 @@ final class StaticImageWallpaperOverlayManager {
         let savedByFingerprint = loadFingerprintState() ?? [:]
         var restored = 0
         for screen in currentScreens {
-            // 扩展已原生渲染该屏 → 不重建 overlay（否则盖住扩展内容并冻结菜单栏采样）
+            // 扩展已原生渲染该屏，或该屏已有/即将恢复动态壁纸 → 不重建 overlay
             if extensionOwnsDesktop(screen) { continue }
+            if VideoWallpaperManager.shared.hasActiveWallpaper(on: screen) { continue }
+            if WallpaperEngineXBridge.shared.isManaging(screen: screen)
+                || WallpaperEngineXBridge.shared.hasPersistedRestoreState(for: screen) {
+                continue
+            }
             let screenID = screen.wallpaperScreenIdentifier
             let urlString = saved[screenID]
                 ?? WallpaperScreenIdentity.value(
@@ -409,9 +430,12 @@ final class StaticImageWallpaperOverlayManager {
     func restorePreviousImageIfAvailable(for screen: NSScreen) -> Bool {
         guard BackgroundRuntimeRole.isHelper else { return false }
         guard !extensionOwnsDesktop(screen) else { return false }
-        guard !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled else { return false }
-        guard !VideoWallpaperManager.shared.isVideoWallpaperActive else { return false }
-        guard !WallpaperEngineXBridge.shared.isControllingExternalEngine,
+        let allowFallbackForInactiveExtension = VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection
+            && !VideoWallpaperManager.shared.isLockScreenExtensionActive
+        guard !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled
+                || allowFallbackForInactiveExtension else { return false }
+        guard !VideoWallpaperManager.shared.hasActiveWallpaper(on: screen) else { return false }
+        guard !WallpaperEngineXBridge.shared.isManaging(screen: screen),
               !WallpaperEngineXBridge.shared.hasPersistedRestoreState(for: screen) else {
             return false
         }

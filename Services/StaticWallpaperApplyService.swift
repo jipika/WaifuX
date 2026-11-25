@@ -182,14 +182,8 @@ enum StaticWallpaperApplyService {
 
         let preservesDynamicWallpaperUntilReady = VideoWallpaperManager.shared
             .hasNativeVideoWallpaper(on: screens)
+            || screens.contains { VideoWallpaperManager.shared.hasActiveWallpaper(on: $0) }
             || screens.contains { WallpaperEngineXBridge.shared.isManaging(screen: $0) }
-        // The transition snapshot keeps the old frame visible while the static
-        // image is prepared. It must not keep the old renderer alive: a Web CLI
-        // window sits above the system desktop and otherwise hides the new image.
-        for screen in screens {
-            await WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaperForTransition(for: screen)
-            VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: screen)
-        }
 
         // macOS 26+：仅当用户未启用动态锁屏时才清空锁屏扩展状态。
         // 使用持久化设置 isLockScreenEnabled 而非 isLockScreenMirroringActive。
@@ -205,9 +199,10 @@ enum StaticWallpaperApplyService {
         }
 
         // macOS 26+：动态锁屏启用时，不走系统静态壁纸写入（setDesktopImageURL 会
-        // 覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例）。锁屏侧把静态图源直接
-        // 部署给 WaifuX 显示器实例；桌面侧改走独立静态图 overlay 窗口显示，
-        // 保证静态壁纸在每块屏上都真实可见。
+        // 覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例）。先把静态图源发布给扩展；
+        // 若扩展已失活或未能及时回执 ready，不抛错也不留下灰屏，改由桌面静态图
+        // overlay 兜底显示，待准备就绪后再在 finishStaticWallpaperTransitionIfNeeded
+        // 内统一拆除旧动态壁纸，避免先拆旧窗后超时导致桌面裸露灰底。
         if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
             try await prepareExtensionStaticWallpaper(
                 imageURLs: imageURLByScreen, screens: screens, requestToken: transitionToken)
@@ -309,14 +304,9 @@ enum StaticWallpaperApplyService {
 
             let preservesDynamicWallpaperUntilReady = VideoWallpaperManager.shared
                 .hasNativeVideoWallpaper(on: [targetScreen])
+                || VideoWallpaperManager.shared.hasActiveWallpaper(on: targetScreen)
                 || WallpaperEngineXBridge.shared.isManaging(screen: targetScreen)
 
-            // The transition snapshot preserves the old frame visually, but the
-            // old renderer must be torn down before the system desktop is set.
-            // Otherwise a Web CLI window remains above the new static wallpaper.
-            await WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaperForTransition(for: targetScreen)
-            // 只停目标屏幕的动态壁纸，避免影响其他屏幕
-            VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
             // macOS 26+：仅当用户未启用动态锁屏时才清空锁屏镜像帧源缓存。
             // 使用持久化设置 isLockScreenEnabled 而非 isLockScreenMirroringActive。
             let shouldClearExtension: Bool = {
@@ -330,8 +320,9 @@ enum StaticWallpaperApplyService {
             }
 
             // macOS 26+：动态锁屏启用时，不走系统静态壁纸写入（会覆盖用户手动
-            // 选择的锁屏实例）。锁屏侧部署给该显示器的 WaifuX 实例；桌面侧走
-            // 独立静态图 overlay 显示，保证目标屏真实可见。
+            // 选择的锁屏实例）。锁屏侧部署给该显示器的 WaifuX 实例；若扩展失活
+            // 或未能及时回执 ready，桌面侧自动降级走独立静态图 overlay 窗口，
+            // 旧动态壁纸延后到新画面就绪后在 finishStaticWallpaperTransitionIfNeeded 拆除。
             if #available(macOS 26.0, *), VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection {
                 try await prepareExtensionStaticWallpaper(
                     imageURLs: [targetScreen.wallpaperScreenIdentifier: resolvedImageURL],
@@ -387,6 +378,8 @@ enum StaticWallpaperApplyService {
     }
 
     /// 把静态图源推给扩展，等扩展真正换图完成后再提交桌面呈现。
+    /// 若扩展失活或超时未回执（`.pending`），绝不抛错也不露出灰屏：保留已发布给扩展的
+    /// 缓存源，同时在桌面侧挂起静态图 overlay 兜底显示；等扩展恢复活跃后自动回收 overlay。
     @available(macOS 26.0, *)
     private static func prepareExtensionStaticWallpaper(
         imageURLs: [String: URL], screens: [NSScreen],
@@ -398,12 +391,40 @@ enum StaticWallpaperApplyService {
                   let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value else {
                 throw CancellationError()
             }
-            try await LockScreenWallpaperService.shared.cacheStaticImageSource(
-                imageURL: imageURL, displayIDs: [displayID], waitForReady: true, isCurrent: current)
-            if !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled
-                || VideoWallpaperManager.shared.isScreenLocked {
+            let extensionLikelyActive = VideoWallpaperManager.shared.isLockScreenExtensionActive
+                || WallpaperExtensionSocketServer.shared.hasActivePipeline(for: displayID)
+            let waitTimeout: TimeInterval = extensionLikelyActive ? 12 : 1.0
+            let results = try await LockScreenWallpaperService.shared.publishStaticImageSource(
+                imageURL: imageURL, displayIDs: [displayID],
+                waitForReady: true, readyTimeout: waitTimeout, isCurrent: current)
+            guard current() else { throw CancellationError() }
+            let readiness = results[displayID] ?? .pending
+            if readiness == .failed {
+                guard current() else { throw CancellationError() }
+                throw LockScreenError.sourceReadyTimeout
+            }
+            let isExtensionReady = readiness == .ready
+            if isExtensionReady {
+                VideoWallpaperManager.shared.holdDesktopSamplingAfterExtensionPush(displayIDs: [displayID])
+            } else {
+                // 触发扩展恢复采样，加快失活/缺上下文扩展自愈（受既有证据与退避策略约束）。
+                WallpaperExtensionAgentHealer.shared.sourceMissingContextReported()
+            }
+            let needsOverlay = !isExtensionReady
+                || !VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled
+                || VideoWallpaperManager.shared.isScreenLocked
+            if needsOverlay {
+                if !isExtensionReady {
+                    AppLogger.error(.wallpaper, "扩展未回报静态图就绪，桌面降级使用静态图 overlay 兜底", metadata: [
+                        "screenID": screen.wallpaperScreenIdentifier,
+                        "displayID": displayID,
+                        "extensionActive": extensionLikelyActive,
+                        "image": imageURL.lastPathComponent
+                    ])
+                }
                 await StaticImageWallpaperOverlayManager.shared.showPrepared(
                     imageURL: imageURL, for: screen, isCurrent: current)
+                guard current() else { throw CancellationError() }
             } else {
                 StaticImageWallpaperOverlayManager.shared.clearState(for: screen)
             }
@@ -415,13 +436,20 @@ enum StaticWallpaperApplyService {
         preservesDynamicWallpaperUntilReady: Bool,
         requestToken: WallpaperCrossTypeTransitionCoordinator.RequestToken
     ) async {
-        guard preservesDynamicWallpaperUntilReady, !isTerminating else { return }
+        guard !isTerminating else { return }
         let coordinator = WallpaperCrossTypeTransitionCoordinator.shared
         // All sources have already passed preparation. Retire only screens this
         // request still owns: a later single-screen request must not strand the
         // untouched screens behind their old native/Scene presentation.
         for screen in Self.uniqueLiveScreens(preferred: screens) {
             guard let screenToken = coordinator.request(requestToken, for: screen) else { continue }
+            guard preservesDynamicWallpaperUntilReady
+                || VideoWallpaperManager.shared.hasActiveWallpaper(on: screen)
+                || WallpaperEngineXBridge.shared.isManaging(screen: screen) else {
+                // 即使当前宿主记录里没有活跃动态壁纸，也要清理可能游离的 Web daemon 残留窗口。
+                await WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaperForTransition(for: screen)
+                continue
+            }
             VideoWallpaperManager.shared.keepNativeVideoPresentationFront(on: [screen])
             await coordinator.commitPreparedContent(on: [screen], requestToken: screenToken) {
                 guard !isTerminating, coordinator.isCurrent(screenToken) else { return }

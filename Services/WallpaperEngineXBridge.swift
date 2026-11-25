@@ -4040,17 +4040,20 @@ final class WallpaperEngineXBridge: ObservableObject {
             let displayIDs = targetScreens.compactMap {
                 ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
             }
+            let anyExtensionActive = VideoWallpaperManager.shared.isLockScreenExtensionActive
+                || displayIDs.contains { WallpaperExtensionSocketServer.shared.hasActivePipeline(for: $0) }
+            let readyTimeout: TimeInterval = anyExtensionActive ? 12 : 1.0
             do {
                 if let bakedVideo {
                     let ready = await LockScreenWallpaperService.shared.switchActiveInstancesToLocalDecode(
                         videoURL: bakedVideo.url, videoID: bakedVideo.itemID,
-                        displayIDs: displayIDs, waitForReady: true)
+                        displayIDs: displayIDs, waitForReady: true, readyTimeout: readyTimeout)
                     guard ready else {
                         throw WallpaperEngineError.executionFailed("壁纸扩展未回报视频换图完成")
                     }
                 } else if updateLockScreen, let posterURL {
                     try await LockScreenWallpaperService.shared.cacheStaticImageSource(
-                        imageURL: posterURL, displayIDs: displayIDs, waitForReady: true)
+                        imageURL: posterURL, displayIDs: displayIDs, waitForReady: true, readyTimeout: readyTimeout)
                 }
             } catch {
                 AppLogger.error(.wallpaper, "[WebPoster] 锁屏同步失败", metadata: ["error": error.localizedDescription])
@@ -7516,9 +7519,12 @@ extension WallpaperEngineXBridge {
                 ($0.0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
             }
             if !displayIDs.isEmpty {
+                let anyExtensionActive = VideoWallpaperManager.shared.isLockScreenExtensionActive
+                    || displayIDs.contains { WallpaperExtensionSocketServer.shared.hasActivePipeline(for: $0) }
+                let readyTimeout: TimeInterval = anyExtensionActive ? 12 : 1.0
                 let results = await LockScreenWallpaperService.shared.publishLocalDecodeSource(
                     videoURL: source.videoURL, videoID: source.videoID, displayIDs: displayIDs,
-                    waitForReady: true, isCurrent: isCurrent
+                    waitForReady: true, readyTimeout: readyTimeout, isCurrent: isCurrent
                 )
                 guard isCurrent() else { endSceneHandoff(tx); return nil }
                 guard let results, !results.values.contains(.failed) else {
@@ -7536,9 +7542,13 @@ extension WallpaperEngineXBridge {
                     let displayID = number.uint32Value
                     if existingSource == nil {
                         do {
+                            let extensionActive = VideoWallpaperManager.shared.isLockScreenExtensionActive
+                                || WallpaperExtensionSocketServer.shared.hasActivePipeline(for: displayID)
+                            let readyTimeout: TimeInterval = extensionActive ? 12 : 1.0
                             let results = try await LockScreenWallpaperService.shared.publishStaticImageSource(
                                 imageURL: url, displayIDs: [displayID],
-                                alreadyCropped: true, waitForReady: true, isCurrent: isCurrent
+                                alreadyCropped: true, waitForReady: true, readyTimeout: readyTimeout,
+                                isCurrent: isCurrent
                             )
                             sourceResults[displayID] = results[displayID]
                         } catch {

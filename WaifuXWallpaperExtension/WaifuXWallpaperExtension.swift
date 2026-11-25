@@ -7,8 +7,53 @@ import ExtensionFoundation
 import Foundation
 import os
 
+/// 追踪当前存活的 XPC 连接数与空闲自退调度。
+/// macOS RunningBoard 会在最后一条 XPC 连接断开后冻结没有活跃断言的扩展进程；
+/// 若扩展此时持有 0 个渲染 context，冻结后的进程会以“活 PID 但永不轮询 socket”的
+/// 僵尸形态永久占坑。在所有 XPC 连接归零且确实无渲染 context 时短暂防抖后干净
+/// 退出，可避免冻结僵尸并让宿主恢复逻辑正常接管。
+private final class IdleExtensionExitGuard: @unchecked Sendable {
+    static let shared = IdleExtensionExitGuard()
+    private let lock = NSLock()
+    private var activeConnections = 0
+    private var pendingExit: DispatchWorkItem?
+    private let queue = DispatchQueue(label: "com.waifux.wallpaperextension.idle-exit", qos: .utility)
+
+    func connectionAccepted() {
+        lock.lock()
+        activeConnections += 1
+        pendingExit?.cancel()
+        pendingExit = nil
+        lock.unlock()
+    }
+
+    func connectionInvalidated(remainingContexts: Int) {
+        lock.lock()
+        activeConnections = max(0, activeConnections - 1)
+        let shouldScheduleExit = activeConnections == 0 && remainingContexts == 0
+        pendingExit?.cancel()
+        pendingExit = nil
+        if shouldScheduleExit {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                let stillIdle = self.activeConnections == 0 && WallpaperState.shared.activeContextCount == 0
+                self.pendingExit = nil
+                self.lock.unlock()
+                guard stillIdle else { return }
+                extLog("All XPC connections invalidated with 0 active contexts — exiting cleanly to avoid RunningBoard zombie suspension")
+                exit(0)
+            }
+            pendingExit = work
+            queue.asyncAfter(deadline: .now() + 2.0, execute: work)
+        }
+        lock.unlock()
+    }
+}
+
 struct WallpaperExtensionConfiguration: AppExtensionConfiguration {
     func accept(connection: NSXPCConnection) -> Bool {
+        IdleExtensionExitGuard.shared.connectionAccepted()
         extLog("XPC from PID=\(connection.processIdentifier)")
 
         let exported = NSXPCInterface(with: WallpaperExtensionXPCProtocol.self)
@@ -119,8 +164,11 @@ struct WallpaperExtensionConfiguration: AppExtensionConfiguration {
             let remaining = WallpaperState.shared.activeContextCount
             guard !removed.isEmpty else {
                 // Benign teardown: no live contexts (settings-only connection, or
-                // we were already inactive). Nothing rendering, nothing to recover.
+                // we were already inactive). Schedule a short debounced clean exit
+                // if this was the last XPC connection so RunningBoard cannot freeze
+                // an idle 0-context process in the process table indefinitely.
                 extLog("XPC invalidated from PID=\(connection.processIdentifier) ownedContexts=\(ownedContextIDs.count) remaining=\(remaining)")
+                IdleExtensionExitGuard.shared.connectionInvalidated(remainingContexts: remaining)
                 return
             }
             // Abnormal path: the host connection died while we still held live
@@ -139,6 +187,7 @@ struct WallpaperExtensionConfiguration: AppExtensionConfiguration {
             // has been reclaimed so WallpaperAgent can re-acquire the whole set.
             WallpaperPrefs.shared.setActive(remaining > 0)
             if remaining > 0 {
+                IdleExtensionExitGuard.shared.connectionInvalidated(remainingContexts: remaining)
                 extLog("XPC invalidated for one connection — freed \(removed.count) owned context(s), kept \(remaining) other context(s)")
                 return
             }

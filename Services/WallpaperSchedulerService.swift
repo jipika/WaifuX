@@ -809,6 +809,11 @@ class WallpaperSchedulerService: ObservableObject {
             return
         }
 
+        if case .onEnd? = requiredMode {
+            // 播完即换接管该屏时取消正在跑的定时轮换，避免两路并发切同一屏互抢。
+            cancelTimedRotation()
+        }
+        onEndSwitchTasks[screenID]?.cancel()
         let generation = onEndSwitchGeneration
         let task = Task { @MainActor in
             var didApply = false
@@ -839,15 +844,20 @@ class WallpaperSchedulerService: ObservableObject {
             }
             if success {
                 didApply = true
+                self.failedApplyRetryAfter.removeValue(forKey: screenID)
                 self.lastChangeTimes[screenID] = Date()
                 self.noteApplied(itemID: item.id, stateKey: screenID)
                 self.persistSchedulerState()
                 print("\(logTag) Applied next wallpaper '\(item.title)' to screen \(screenID)")
             } else {
                 print("\(logTag) Failed to apply next wallpaper '\(item.title)' to screen \(screenID), trying next item")
-                // 尝试其他可用项，避免因选中不支持的壁纸类型导致黑屏
+                // 尝试其他可用项，避免因选中不支持的壁纸类型导致黑屏；
+                // 限制单次 on-end 重试上限，防止系统级异常下无限遍历全库导致磁盘狂写。
                 var remaining = items.filter { $0.id != item.id }
-                while !remaining.isEmpty {
+                var retryAttempts = 0
+                let maxOnEndRetryAttempts = 3
+                while !remaining.isEmpty && retryAttempts < maxOnEndRetryAttempts {
+                    retryAttempts += 1
                     guard !Task.isCancelled,
                           self.onEndSwitchGeneration == generation,
                           !self.manualWallpaperApplyInFlight else {
@@ -867,15 +877,17 @@ class WallpaperSchedulerService: ObservableObject {
                     }
                     if retrySuccess {
                         didApply = true
+                        self.failedApplyRetryAfter.removeValue(forKey: screenID)
                         self.lastChangeTimes[screenID] = Date()
                         self.noteApplied(itemID: retryItem.id, stateKey: screenID)
                         self.persistSchedulerState()
                         print("\(logTag) Retry applied next wallpaper '\(retryItem.title)' to screen \(screenID)")
                         return
                     }
-                    print("\(logTag) Retry failed for next wallpaper '\(retryItem.title)', trying next")
+                    print("\(logTag) Retry failed for next wallpaper '\(retryItem.title)', trying next (\(retryAttempts)/\(maxOnEndRetryAttempts))")
                 }
-                print("\(logTag) All next-wallpaper candidates exhausted for screen \(screenID), no wallpaper applied")
+                print("\(logTag) Next-wallpaper retry budget exhausted for screen \(screenID), no wallpaper applied")
+                self.failedApplyRetryAfter[screenID] = Date().addingTimeInterval(self.failedApplyRetryDelay)
                 self.recoverCurrentVideoAfterFailedOnEndSwitch(for: screenID, requiredMode: requiredMode)
             }
         }
@@ -2534,6 +2546,10 @@ class WallpaperSchedulerService: ObservableObject {
                 continue
             }
             hasTimedDisplay = true
+            if onEndSwitchInFlightScreens.contains(screenID) || onEndSwitchTasks[screenID] != nil {
+                consider(now.addingTimeInterval(deferredRetryDelay))
+                continue
+            }
             if displayConfig.isOnEndMode,
                VideoWallpaperManager.shared.hasActiveWallpaper(on: screen) {
                 consider(now.addingTimeInterval(deferredRetryDelay))
@@ -2646,6 +2662,12 @@ class WallpaperSchedulerService: ObservableObject {
             }
             guard let interval = timedIntervalSeconds(for: displayConfig) else {
                 logOnEndIdleIfNeeded(screen: screen, screenID: screenID, config: displayConfig)
+                continue
+            }
+
+            // 同一屏已有播完即换任务在途时，定时轮换跳过该屏，避免并发抢占导致
+            // WallpaperApplySupersededError 与连续重复重试。
+            if onEndSwitchInFlightScreens.contains(screenID) || onEndSwitchTasks[screenID] != nil {
                 continue
             }
 
