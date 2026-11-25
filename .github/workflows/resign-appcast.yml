@@ -84,11 +84,13 @@ jobs:
                   print(f"✅ 从原 appcast 还原 {len(lines)} 条 changelog")
                   PY
                   else
+                    # 无 appcast 资产的老版本：从「上一 tag..本版 tag」区间还原。
+                    # 注意不能直接用 generate-appcast-changelog.py（它固定 ..HEAD，
+                    # 会把补签时的最新提交混进老版本 changelog）。
                     PREV_TAG=$(git tag --sort=-creatordate | grep -A1 "^v${VERSION}$" | tail -1)
-                    echo "无 appcast 资产，从 git 区间生成（since=$PREV_TAG）"
-                    python3 scripts/generate-appcast-changelog.py \
-                      --since "$PREV_TAG" --format markdown --version "$VERSION" \
-                      > "$RUNNER_TEMP/changelog.txt"
+                    echo "无 appcast 资产，从 git 区间生成（$PREV_TAG..v$VERSION）"
+                    git log "$PREV_TAG..v$VERSION" --pretty=format:"- %s (%h)" --no-merges \
+                      | head -30 > "$RUNNER_TEMP/changelog.txt"
                   fi
                   head -5 "$RUNNER_TEMP/changelog.txt"
 
