@@ -693,9 +693,16 @@ jobs:
               run: |
                   VERSION="${{ steps.version.outputs.version }}"
 
-                  # Sparkle sign_update：给 DMG 生成 EdDSA 签名
-                  curl -sL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz" -o /tmp/Sparkle.tar.xz
-                  (cd /tmp && tar xJf Sparkle.tar.xz)
+                  # Sparkle sign_update：给 DMG 生成 EdDSA 签名。
+                  # 注意：Sparkle-2.6.4.tar.xz 解压后没有顶层 Sparkle/ 目录，
+                  # bin/ 直接落在解压目录下（2026-06-27 ff5166fb 修过 release.yml，
+                  # 本文件 09-28 重写时又带回了错误路径 /tmp/Sparkle/bin/...，
+                  # 导致 generate-appcast.py 找不到 sign_update 静默出空签名）。
+                  # 这里显式解压到 /tmp/Sparkle/ 并断言二进制存在，路径错/下载坏都硬失败。
+                  curl -fsSL --retry 3 "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz" -o /tmp/Sparkle.tar.xz
+                  mkdir -p /tmp/Sparkle
+                  tar xJf /tmp/Sparkle.tar.xz -C /tmp/Sparkle
+                  test -x /tmp/Sparkle/bin/sign_update || { echo "❌ sign_update 缺失，拒绝生成空签名 appcast"; exit 1; }
 
                   # 固化片段（旧版 universal 客户端的升级通道）：仓库内没有就从历史 release 资产里找。
                   # 片段由 bridge 版生成后随每个 release 持续上传，所以总能命中最早的可用版本；
@@ -858,6 +865,7 @@ jobs:
             contents: read
             pages: write
             id-token: write
+            actions: read
         concurrency:
             group: pages
             cancel-in-progress: false
@@ -882,10 +890,47 @@ jobs:
             - name: Setup Pages
               uses: actions/configure-pages@v4
 
+            # 不用 actions/upload-pages-artifact@v3：它内部固定 overwrite:false，
+            # 每次 re-run 都再叠一个同名 github-pages artifact，而 deploy-pages 要求
+            # 全 run（含所有 attempt）恰好一个 → 首次失败后重跑必报 "Multiple artifacts"。
+            # 这里自己打 tar（与其内部格式一致）再用 upload-artifact@v4 overwrite:true，
+            # 重跑时覆盖同名 artifact，永远只留一个。
+            - name: Archive Pages artifact
+              run: |
+                  tar --dereference --hard-dereference \
+                    --directory Docs \
+                    -cvf "$RUNNER_TEMP/artifact.tar" \
+                    --exclude=.git --exclude=.github .
+
             - name: Upload artifact
-              uses: actions/upload-pages-artifact@v3
+              uses: actions/upload-artifact@v4
               with:
-                  path: 'Docs'
+                  name: github-pages
+                  path: ${{ runner.temp }}/artifact.tar
+                  retention-days: 1
+                  if-no-files-found: error
+                  overwrite: true
+
+            # deploy-pages 上传后立刻查 ListArtifacts，本仓库常命中可见性延迟返回
+            # Found 0（上传成功 0.x 秒后就查）而直接失败。这里先轮询 REST 直到恰好
+            # 一个 github-pages artifact 可见再部署，消除该竞态；配合上面的 overwrite
+            # 保证数量恒为 1，不会误撞 "Multiple artifacts"。
+            - name: Wait for artifact to be listable
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  for i in $(seq 1 30); do
+                    n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+                          --jq '[.artifacts[] | select(.name=="github-pages")] | length')
+                    echo "attempt $i: github-pages artifact count = $n"
+                    if [ "$n" = "1" ]; then
+                      echo "✅ artifact 已可见，开始部署"
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  echo "❌ 等待 150s 后 github-pages artifact 仍非唯一（count=$n）"
+                  exit 1
 
             - name: Deploy to GitHub Pages
               id: deployment

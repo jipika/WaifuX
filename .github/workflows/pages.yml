@@ -15,6 +15,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: "pages"
@@ -57,10 +58,47 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
+      # 不用 actions/upload-pages-artifact@v3：它内部固定 overwrite:false，
+      # 每次 re-run 都再叠一个同名 github-pages artifact，而 deploy-pages 要求
+      # 全 run（含所有 attempt）恰好一个 → 首次失败后重跑必报 "Multiple artifacts"。
+      # 这里自己打 tar（与其内部格式一致）再用 upload-artifact@v4 overwrite:true，
+      # 重跑时覆盖同名 artifact，永远只留一个。
+      - name: Archive Pages artifact
+        run: |
+          tar --dereference --hard-dereference \
+            --directory Docs \
+            -cvf "$RUNNER_TEMP/artifact.tar" \
+            --exclude=.git --exclude=.github .
+
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          path: 'Docs'
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+
+      # deploy-pages 上传后立刻查 ListArtifacts，本仓库常命中可见性延迟返回
+      # Found 0（上传成功 0.x 秒后就查）而直接失败。这里先轮询 REST 直到恰好
+      # 一个 github-pages artifact 可见再部署，消除该竞态；配合上面的 overwrite
+      # 保证数量恒为 1，不会误撞 "Multiple artifacts"。
+      - name: Wait for artifact to be listable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in $(seq 1 30); do
+            n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+                  --jq '[.artifacts[] | select(.name=="github-pages")] | length')
+            echo "attempt $i: github-pages artifact count = $n"
+            if [ "$n" = "1" ]; then
+              echo "✅ artifact 已可见，开始部署"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "❌ 等待 150s 后 github-pages artifact 仍非唯一（count=$n）"
+          exit 1
 
   deploy:
     environment:

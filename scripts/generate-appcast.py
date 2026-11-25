@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -104,12 +105,25 @@ def find_sign_update(explicit: str | None) -> str | None:
 
 
 def sign_dmg(dmg: Path, private_key: str, sign_update: str) -> tuple[str, int]:
-    """返回 (edSignature, 文件字节数)。"""
-    result = subprocess.run(
-        [sign_update, "-s", private_key, str(dmg)],
-        capture_output=True,
-        text=True,
-    )
+    """返回 (edSignature, 文件字节数)。
+
+    Sparkle 2.6.4 起 sign_update 拒绝 -s 直接传私钥（"no longer supported"），
+    必须走 --ed-key-file。私钥写进 0600 临时文件，用完即删，不进 argv/日志。
+    """
+    key_file = None
+    try:
+        fd, key_path = tempfile.mkstemp(prefix="sparkle-key-", suffix=".tmp")
+        key_file = Path(key_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(private_key.strip() + "\n")
+        result = subprocess.run(
+            [sign_update, "--ed-key-file", str(key_file), str(dmg)],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        if key_file is not None:
+            key_file.unlink(missing_ok=True)
     output = (result.stdout or "") + (result.stderr or "")
     match = re.search(r'sparkle:edSignature="([^"]*)"', output)
     if result.returncode != 0 or not match:
@@ -148,6 +162,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docs-dir", type=Path, default=DEFAULT_DOCS_DIR)
     parser.add_argument("--sign-update", help="sign_update 可执行文件路径（默认从 PATH 查找）")
     parser.add_argument("--no-sign", action="store_true", help="跳过签名（本地调试用）")
+    parser.add_argument("--allow-missing-arch", action="store_true",
+                        help="允许 per-arch DMG 缺失（仅限历史 release 补签；常规发版勿用）")
     parser.add_argument("--pub-date", help="覆盖 pubDate（RFC 822）")
     return parser.parse_args()
 
@@ -171,9 +187,17 @@ def main() -> int:
 
     private_key = os.environ.get("SPARKLE_PRIVATE_KEY", "").strip()
     sign_update = find_sign_update(args.sign_update)
+    if args.sign_update and sign_update is None:
+        # 显式给了 --sign-update 却找不到文件：多半是解压布局/路径错了
+        # （Sparkle tarball 无顶层目录，曾因此静默产出空签名 appcast 数月）。
+        # 调用方明确要求签名，这里必须硬失败，不许降级。
+        fail(f"--sign-update 指向的文件不存在：{args.sign_update}")
     signing = bool(private_key) and bool(sign_update) and not args.no_sign
     if not signing:
         warn("未签名（缺少 SPARKLE_PRIVATE_KEY 或 sign_update）；Sparkle 客户端会拒绝该 appcast")
+        if os.environ.get("CI") and private_key and not args.no_sign:
+            # CI 上私钥已注入却签不了 = 工具链坏了，空签名发出去 Sparkle 全拒收。
+            fail("CI 环境且已配置 SPARKLE_PRIVATE_KEY，但 sign_update 不可用；拒绝发布空签名 appcast")
 
     def sign_if_possible(dmg: Path) -> tuple[str, int]:
         if signing:
@@ -181,29 +205,26 @@ def main() -> int:
         return "", dmg.stat().st_size
 
     # ---- arm64 / x86_64 channel item ----
-    arm64_dmg = build_dir / "WaifuX-arm64.dmg"
-    x86_dmg = build_dir / "WaifuX-x86_64.dmg"
-    for dmg in (arm64_dmg, x86_dmg):
+    # 拆架构（38.0.154）之前的老 release 只有 universal 包：仅当历史补签
+    # （--allow-missing-arch）时允许缺失，常规发版缺包仍然硬失败。
+    arch_items = []
+    for dmg_name, dmg, extra in (
+        ("WaifuX-arm64.dmg", build_dir / "WaifuX-arm64.dmg",
+         "    <sparkle:channel>arm64</sparkle:channel>\n    <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>\n"),
+        ("WaifuX-x86_64.dmg", build_dir / "WaifuX-x86_64.dmg",
+         "    <sparkle:channel>x86_64</sparkle:channel>\n"),
+    ):
         if not dmg.is_file():
-            fail(f"缺少 {dmg}（先运行 scripts/package.sh 打包对应架构）")
-
-    sig_arm, size_arm = sign_if_possible(arm64_dmg)
-    sig_x86, size_x86 = sign_if_possible(x86_dmg)
-    log(f"✅ arm64 DMG 已处理 ({size_arm} bytes)")
-    log(f"✅ x86_64 DMG 已处理 ({size_x86} bytes)")
-
-    arch_items = [
-        build_item(
+            if not args.allow_missing_arch:
+                fail(f"缺少 {dmg}（先运行 scripts/package.sh 打包对应架构）")
+            warn(f"缺少 {dmg}，跳过该架构 item（--allow-missing-arch，历史补签）")
+            continue
+        sig, size = sign_if_possible(dmg)
+        log(f"✅ {dmg_name} 已处理 ({size} bytes)")
+        arch_items.append(build_item(
             version=version, pub_date=pub_date, desc=desc,
-            dmg_name="WaifuX-arm64.dmg", size=size_arm, sig=sig_arm,
-            extra="    <sparkle:channel>arm64</sparkle:channel>\n    <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>\n",
-        ),
-        build_item(
-            version=version, pub_date=pub_date, desc=desc,
-            dmg_name="WaifuX-x86_64.dmg", size=size_x86, sig=sig_x86,
-            extra="    <sparkle:channel>x86_64</sparkle:channel>\n",
-        ),
-    ]
+            dmg_name=dmg_name, size=size, sig=sig, extra=extra,
+        ))
 
     # ---- default item（旧 universal 客户端的升级通道）----
     # 常规发版每次都会构建 universal 包（scripts/package.sh WAIFUX_ARCH=universal），
