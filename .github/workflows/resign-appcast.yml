@@ -1,0 +1,198 @@
+name: Resign Appcast
+
+# 给已发布 release 的 DMG 补签 appcast（EdDSA），并部署到 GitHub Pages。
+#
+# 背景（2026-11-24）：ci.yml 曾把 sign_update 指到不存在的 /tmp/Sparkle/bin/
+# （Sparkle tarball 无顶层目录），generate-appcast.py 静默降级出空签名；
+# 且 Sparkle 2.6.4 的 sign_update 已拒绝 -s 传私钥。两处已修，本 workflow
+# 用修好的脚本 + CI 里的 SPARKLE_PRIVATE_KEY secret 远程补签历史 release。
+#
+# 只在 workflow_dispatch 手动触发；不改仓库内容、不建 release，只覆盖
+# 指定 release 的 appcast.xml / appcast-default-item.xml 两个资产。
+on:
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "要补签的版本号（如 38.0.160，不带 v 前缀）"
+                required: true
+            deploy_pages:
+                description: "补签后同时部署 GitHub Pages"
+                type: boolean
+                default: true
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+    contents: write
+
+jobs:
+    resign:
+        runs-on: macos-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Sparkle tools
+              run: |
+                  # Sparkle-2.6.4.tar.xz 解压后没有顶层目录，显式解到 /tmp/Sparkle/
+                  curl -fsSL --retry 3 "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz" -o /tmp/Sparkle.tar.xz
+                  mkdir -p /tmp/Sparkle
+                  tar xJf /tmp/Sparkle.tar.xz -C /tmp/Sparkle
+                  test -x /tmp/Sparkle/bin/sign_update || { echo "❌ sign_update 缺失"; exit 1; }
+
+            - name: Download release DMGs
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  VERSION="${{ inputs.version }}"
+                  mkdir -p build
+                  # universal 必须存在；per-arch DMG 自 38.0.154 起才有，老版本允许缺失
+                  gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" \
+                    --pattern WaifuX.dmg --dir build --clobber
+                  for name in WaifuX-arm64.dmg WaifuX-x86_64.dmg; do
+                    gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" \
+                      --pattern "$name" --dir build --clobber \
+                      || echo "⚠️ $name 不存在（拆架构前的老版本），跳过"
+                  done
+                  ls -lh build/
+
+            - name: Restore original changelog
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  VERSION="${{ inputs.version }}"
+                  # 优先用该版本已发布 appcast 的 CDATA 描述还原本版 changelog；
+                  # 无 appcast 资产的老版本（≤38.0.156）退回 git 区间生成。
+                  if gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" \
+                       --pattern appcast.xml --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
+                    python3 - "$RUNNER_TEMP/appcast.xml" "$RUNNER_TEMP/changelog.txt" <<'PY'
+                  import re, sys
+                  xml = open(sys.argv[1], encoding="utf-8").read()
+                  items = re.findall(r"<item>.*?</item>", xml, re.S)
+                  default = next(i for i in items if "<sparkle:channel>" not in i)
+                  m = re.search(r"<!\[CDATA\[(.*?)\]\]>", default, re.S)
+                  if not m:
+                      sys.exit("原 appcast 无 CDATA 描述")
+                  lines = re.findall(r"<li>(.*?)</li>", m.group(1), re.S)
+                  if not lines:
+                      sys.exit("原 appcast 描述无 <li> 条目")
+                  open(sys.argv[2], "w", encoding="utf-8").write(
+                      "\n".join("- " + l.strip() for l in lines) + "\n")
+                  print(f"✅ 从原 appcast 还原 {len(lines)} 条 changelog")
+                  PY
+                  else
+                    # 无 appcast 资产的老版本：从「上一 tag..本版 tag」区间还原。
+                    # 注意不能直接用 generate-appcast-changelog.py（它固定 ..HEAD，
+                    # 会把补签时的最新提交混进老版本 changelog）。
+                    PREV_TAG=$(git tag --sort=-creatordate | grep -A1 "^v${VERSION}$" | tail -1)
+                    echo "无 appcast 资产，从 git 区间生成（$PREV_TAG..v$VERSION）"
+                    git log "$PREV_TAG..v$VERSION" --pretty=format:"- %s (%h)" --no-merges \
+                      | head -30 > "$RUNNER_TEMP/changelog.txt"
+                  fi
+                  head -5 "$RUNNER_TEMP/changelog.txt"
+
+            - name: Resign appcast
+              env:
+                  SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+              run: |
+                  VERSION="${{ inputs.version }}"
+                  python3 scripts/generate-appcast.py \
+                    --version "$VERSION" \
+                    --changelog-file "$RUNNER_TEMP/changelog.txt" \
+                    --allow-missing-arch \
+                    --sign-update /tmp/Sparkle/bin/sign_update
+                  # 硬校验：所有 item 全部带非空签名才允许上传
+                  EMPTY=$(grep -c 'edSignature=""' Docs/appcast.xml || true)
+                  SIGNED=$(grep -cE 'edSignature="[^"]+"' Docs/appcast.xml || true)
+                  if [ "$EMPTY" != "0" ] || [ "$SIGNED" -lt 1 ]; then
+                    echo "❌ 签名校验失败：empty=$EMPTY signed=$SIGNED"
+                    exit 1
+                  fi
+                  echo "✅ $SIGNED 个 item 均带 EdDSA 签名"
+
+            - name: Upload signed appcast to release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  VERSION="${{ inputs.version }}"
+                  ASSETS=(Docs/appcast.xml)
+                  [ -f Docs/appcast-default-item.xml ] && ASSETS+=(Docs/appcast-default-item.xml)
+                  gh release upload "v$VERSION" "${ASSETS[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+                  echo "✅ 已覆盖 release 资产：${ASSETS[*]}"
+
+    deploy-pages:
+        needs: resign
+        if: inputs.deploy_pages
+        runs-on: ubuntu-latest
+        environment:
+            name: github-pages
+            url: ${{ steps.deployment.outputs.page_url }}
+        permissions:
+            contents: read
+            pages: write
+            id-token: write
+            actions: read
+        concurrency:
+            group: pages
+            cancel-in-progress: false
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+
+            - name: Use signed appcast from release
+              run: |
+                  VERSION="${{ inputs.version }}"
+                  curl -fsSL "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/appcast.xml" -o Docs/appcast.xml
+                  curl -fsSL "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/appcast-default-item.xml" \
+                    -o Docs/appcast-default-item.xml || true
+                  grep -cE 'edSignature="[^"]+"' Docs/appcast.xml | xargs echo "带签名 item 数:"
+
+            - name: Copy landing page to Docs
+              run: |
+                  mkdir -p Docs
+                  cp landing/index.html Docs/
+
+            - name: Setup Pages
+              uses: actions/configure-pages@v4
+
+            - name: Archive Pages artifact
+              run: |
+                  tar --dereference --hard-dereference \
+                    --directory Docs \
+                    -cvf "$RUNNER_TEMP/artifact.tar" \
+                    --exclude=.git --exclude=.github .
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: github-pages
+                  path: ${{ runner.temp }}/artifact.tar
+                  retention-days: 1
+                  if-no-files-found: error
+                  overwrite: true
+
+            # deploy-pages 上传后立刻查 ListArtifacts 常踩可见性延迟（Found 0），
+            # 先轮询到恰好一个 github-pages artifact 可见再部署。
+            - name: Wait for artifact to be listable
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  for i in $(seq 1 30); do
+                    n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+                          --jq '[.artifacts[] | select(.name=="github-pages")] | length')
+                    echo "attempt $i: github-pages artifact count = $n"
+                    if [ "$n" = "1" ]; then
+                      echo "✅ artifact 已可见，开始部署"
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  echo "❌ 等待 150s 后 github-pages artifact 仍非唯一（count=$n）"
+                  exit 1
+
+            - name: Deploy to GitHub Pages
+              id: deployment
+              uses: actions/deploy-pages@v4

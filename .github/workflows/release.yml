@@ -579,8 +579,13 @@ jobs:
 
       - name: Setup Sparkle tools
         run: |
-          curl -sL "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz" -o /tmp/Sparkle.tar.xz
-          cd /tmp && tar xJf Sparkle.tar.xz
+          # Sparkle-2.6.4.tar.xz 解压后没有顶层 Sparkle/ 目录，bin/ 直接在解压目录下。
+          # 显式解压到 /tmp/Sparkle/ 使下方 GITHUB_PATH 与 --sign-update 的路径成立，
+          # 并断言二进制存在：路径错/下载坏都硬失败，不再静默出空签名 appcast。
+          curl -fsSL --retry 3 "https://github.com/sparkle-project/Sparkle/releases/download/2.6.4/Sparkle-2.6.4.tar.xz" -o /tmp/Sparkle.tar.xz
+          mkdir -p /tmp/Sparkle
+          tar xJf /tmp/Sparkle.tar.xz -C /tmp/Sparkle
+          test -x /tmp/Sparkle/bin/sign_update || { echo "❌ sign_update 缺失，拒绝生成空签名 appcast"; exit 1; }
           echo "/tmp/Sparkle/bin" >> $GITHUB_PATH
 
       - name: Generate Changelog
