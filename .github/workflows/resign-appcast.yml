@@ -65,30 +65,32 @@ jobs:
               run: |
                   VERSION="${{ inputs.version }}"
                   # 优先用该版本已发布 appcast 的 CDATA 描述还原本版 changelog；
-                  # 无 appcast 资产的老版本（≤38.0.156）退回 git 区间生成。
+                  # 无 appcast 资产、或描述是写死一句话的老格式（b532034a 之前，
+                  # 如 38.0.157）退回 git 区间生成。
+                  RESTORED=0
                   if gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" \
                        --pattern appcast.xml --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
-                    python3 - "$RUNNER_TEMP/appcast.xml" "$RUNNER_TEMP/changelog.txt" <<'PY'
+                    if python3 - "$RUNNER_TEMP/appcast.xml" "$RUNNER_TEMP/changelog.txt" <<'PY'
                   import re, sys
                   xml = open(sys.argv[1], encoding="utf-8").read()
                   items = re.findall(r"<item>.*?</item>", xml, re.S)
                   default = next(i for i in items if "<sparkle:channel>" not in i)
                   m = re.search(r"<!\[CDATA\[(.*?)\]\]>", default, re.S)
-                  if not m:
-                      sys.exit("原 appcast 无 CDATA 描述")
-                  lines = re.findall(r"<li>(.*?)</li>", m.group(1), re.S)
+                  lines = re.findall(r"<li>(.*?)</li>", m.group(1), re.S) if m else []
                   if not lines:
-                      sys.exit("原 appcast 描述无 <li> 条目")
+                      sys.exit(1)  # 老格式无条目，交给 git 区间兜底
                   open(sys.argv[2], "w", encoding="utf-8").write(
                       "\n".join("- " + l.strip() for l in lines) + "\n")
                   print(f"✅ 从原 appcast 还原 {len(lines)} 条 changelog")
                   PY
-                  else
-                    # 无 appcast 资产的老版本：从「上一 tag..本版 tag」区间还原。
+                    then RESTORED=1; fi
+                  fi
+                  if [ "$RESTORED" != "1" ]; then
+                    # 从「上一 tag..本版 tag」区间还原。
                     # 注意不能直接用 generate-appcast-changelog.py（它固定 ..HEAD，
                     # 会把补签时的最新提交混进老版本 changelog）。
                     PREV_TAG=$(git tag --sort=-creatordate | grep -A1 "^v${VERSION}$" | tail -1)
-                    echo "无 appcast 资产，从 git 区间生成（$PREV_TAG..v$VERSION）"
+                    echo "从 git 区间生成（$PREV_TAG..v$VERSION）"
                     git log "$PREV_TAG..v$VERSION" --pretty=format:"- %s (%h)" --no-merges \
                       | head -30 > "$RUNNER_TEMP/changelog.txt"
                   fi
