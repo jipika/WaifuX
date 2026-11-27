@@ -36,6 +36,121 @@ enum WallpaperBoundedImageDecoder {
         return result
     }
 
+    private static let containerIntegrityScanLimitBytes = 128 * 1024 * 1024
+
+    /// Fast structural completeness check for JPEG (SOI..EOI) and PNG (magic..IEND).
+    /// ImageIO can return `status == .statusComplete` on truncated files while filling missing bottom rows with gray.
+    static func isCompleteFile(at url: URL) -> Bool {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options),
+              CGImageSourceGetCount(source) > 0 else { return false }
+        let type = CGImageSourceGetType(source) as String?
+        return verifyContainerIntegrity(url: url, typeIdentifier: type) == nil
+    }
+
+    static func hasCompleteContainerStream(_ data: Data, typeIdentifier: String?) -> Bool {
+        switch typeIdentifier {
+        case "public.jpeg":
+            return hasCompleteJPEGStream(data)
+        case "public.png":
+            return hasCompletePNGStream(data)
+        default:
+            return true
+        }
+    }
+
+    private static func verifyContainerIntegrity(
+        url: URL,
+        typeIdentifier: String?
+    ) -> WallpaperImageDecodeFailure? {
+        guard typeIdentifier == "public.jpeg" || typeIdentifier == "public.png" else { return nil }
+        if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize,
+           size > containerIntegrityScanLimitBytes {
+            return nil
+        }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            return .init(stage: "integrity", detail: "unreadable \(typeIdentifier ?? "image")")
+        }
+        guard hasCompleteContainerStream(data, typeIdentifier: typeIdentifier) else {
+            return .init(stage: "integrity", detail: "truncated \(typeIdentifier ?? "image")")
+        }
+        return nil
+    }
+
+    private static func hasCompleteJPEGStream(_ data: Data) -> Bool {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return false }
+            let count = raw.count
+            guard count >= 4, base[0] == 0xFF, base[1] == 0xD8 else { return false }
+            var index = 2
+            while index + 1 < count {
+                if base[index] != 0xFF {
+                    index += 1
+                    continue
+                }
+                while index < count && base[index] == 0xFF {
+                    index += 1
+                }
+                guard index < count else { return false }
+                let marker = base[index]
+                index += 1
+                if marker == 0xD9 { return true }
+                if marker == 0x00 || marker == 0x01 || marker == 0xD8 || (marker >= 0xD0 && marker <= 0xD7) {
+                    continue
+                }
+                guard index + 1 < count else { return false }
+                let segmentLength = (Int(base[index]) << 8) | Int(base[index + 1])
+                guard segmentLength >= 2, segmentLength <= count - index else { return false }
+                index += segmentLength
+                if marker == 0xDA {
+                    while index + 1 < count {
+                        if base[index] == 0xFF {
+                            let next = base[index + 1]
+                            if next == 0x00 || (next >= 0xD0 && next <= 0xD7) {
+                                index += 2
+                                continue
+                            }
+                            if next == 0xFF {
+                                index += 1
+                                continue
+                            }
+                            break
+                        }
+                        index += 1
+                    }
+                }
+            }
+            return false
+        }
+    }
+
+    private static func hasCompletePNGStream(_ data: Data) -> Bool {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return false }
+            let count = raw.count
+            guard count >= 8,
+                  base[0] == 0x89, base[1] == 0x50, base[2] == 0x4E, base[3] == 0x47,
+                  base[4] == 0x0D, base[5] == 0x0A, base[6] == 0x1A, base[7] == 0x0A else {
+                return false
+            }
+            var index = 8
+            while index <= count - 12 {
+                let length = (Int(base[index]) << 24)
+                    | (Int(base[index + 1]) << 16)
+                    | (Int(base[index + 2]) << 8)
+                    | Int(base[index + 3])
+                guard length >= 0, length <= count - index - 12 else { return false }
+                let isIEND = base[index + 4] == 0x49
+                    && base[index + 5] == 0x45
+                    && base[index + 6] == 0x4E
+                    && base[index + 7] == 0x44
+                if isIEND { return length == 0 }
+                index += 12 + length
+            }
+            return false
+        }
+    }
+
     static func decode(url: URL) -> Result<WallpaperDecodedImage, WallpaperImageDecodeFailure> {
         decodeLock.lock()
         defer { decodeLock.unlock() }
@@ -43,6 +158,10 @@ enum WallpaperBoundedImageDecoder {
             let options = [kCGImageSourceShouldCache: false] as CFDictionary
             guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else {
                 return .failure(.init(stage: "open", detail: url.lastPathComponent))
+            }
+            let type = CGImageSourceGetType(source) as String?
+            if let failure = verifyContainerIntegrity(url: url, typeIdentifier: type) {
+                return .failure(failure)
             }
             return decode(source: source)
         }
@@ -55,6 +174,10 @@ enum WallpaperBoundedImageDecoder {
             let options = [kCGImageSourceShouldCache: false] as CFDictionary
             guard let source = CGImageSourceCreateWithData(data as CFData, options) else {
                 return .failure(.init(stage: "open", detail: "unrecognized image data"))
+            }
+            let type = CGImageSourceGetType(source) as String?
+            if !hasCompleteContainerStream(data, typeIdentifier: type) {
+                return .failure(.init(stage: "integrity", detail: "truncated \(type ?? "image")"))
             }
             return decode(source: source)
         }

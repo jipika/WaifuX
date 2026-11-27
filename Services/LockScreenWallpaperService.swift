@@ -1449,12 +1449,14 @@ final class LockScreenWallpaperService: ObservableObject {
         try? FileManager.default.createDirectory(at: thumbDir, withIntermediateDirectories: true)
         let thumbURL = thumbDir.appendingPathComponent("\(videoID).jpg")
 
-        if FileManager.default.fileExists(atPath: thumbURL.path) { return }
+        if FileManager.default.fileExists(atPath: thumbURL.path),
+           WallpaperBoundedImageDecoder.isCompleteFile(at: thumbURL) { return }
 
         let asset = AVURLAsset(url: videoURL)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 480, height: 270)
+        if #available(macOS 15.0, *) { generator.dynamicRangePolicy = .forceSDR }
+        generator.maximumSize = CGSize(width: thumbnailMaximumDimension, height: thumbnailMaximumDimension)
 
         var actualTime: CMTime = .zero
         guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: &actualTime) else {
@@ -1462,10 +1464,15 @@ final class LockScreenWallpaperService: ObservableObject {
             return
         }
 
-        guard let dest = CGImageDestinationCreateWithURL(thumbURL as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+        let output = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(output, "public.jpeg" as CFString, 1, nil) else { return }
         CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
-        if CGImageDestinationFinalize(dest) {
+        guard CGImageDestinationFinalize(dest) else { return }
+        do {
+            try (output as Data).write(to: thumbURL, options: .atomic)
             print("[LockScreenWallpaper] ✅ 缩略图已生成: \(thumbURL.lastPathComponent)")
+        } catch {
+            print("[LockScreenWallpaper] ⚠️ 缩略图写入失败: \(error.localizedDescription)")
         }
     }
 

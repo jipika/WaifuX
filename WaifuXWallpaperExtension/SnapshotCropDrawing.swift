@@ -68,19 +68,20 @@ struct WallpaperSnapshotSources: Sendable, Equatable {
         let root = container.standardizedFileURL.path + "/"
         return WallpaperSnapshotSources(
             images: imageURLs.map { WallpaperSnapshotFileRevision($0, readMetadata: $0.standardizedFileURL.path.hasPrefix(root)) },
-            video: currentVideoPath.flatMap { $0.isEmpty ? nil : WallpaperSnapshotFileRevision(URL(fileURLWithPath: $0), readMetadata: false) }
+            video: currentVideoPath.flatMap { path in
+                guard !path.isEmpty else { return nil }
+                let url = URL(fileURLWithPath: path)
+                return WallpaperSnapshotFileRevision(url, readMetadata: url.standardizedFileURL.path.hasPrefix(root))
+            }
         )
     }
 
     static func imageCandidateURLs(in container: URL, currentImagePath: String?, currentVideoPath: String?) -> [URL] {
+        // Video preview thumbnails belong solely to System Settings cards
+        // (SettingsProvider); video snapshots decode the real video directly
+        // instead of stretching a preview thumbnail onto the lock screen.
         var candidates: [URL] = []
         if let currentImagePath, !currentImagePath.isEmpty { candidates.append(URL(fileURLWithPath: currentImagePath)) }
-        if let currentVideoPath, !currentVideoPath.isEmpty {
-            let videoID = URL(fileURLWithPath: currentVideoPath).deletingPathExtension().lastPathComponent
-            candidates.append(container.appendingPathComponent("WallpaperCache/thumbnails/\(videoID).jpg"))
-        }
-        // Never select an unrelated old JPG merely because its name starts
-        // with display-N. Only the current video's basename identifies its JPG.
         var seen = Set<String>()
         return candidates.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
@@ -95,7 +96,6 @@ struct SnapshotRequest: Sendable, Equatable {
     let sources: WallpaperSnapshotSources
     let playbackTime: Double?
     let prefsRevision: WallpaperSnapshotFileRevision?
-    let thumbnailsRevision: WallpaperSnapshotFileRevision?
     let selectedVideoID: String?
     let targetGeometry: WallpaperSnapshotTargetGeometry?
     let cropPreferences: WallpaperSnapshotCropPreferences
@@ -107,12 +107,12 @@ struct SnapshotRequest: Sendable, Equatable {
     // Ordinary system requests keep their existing failure throttle.
     var failureCacheLifetime: TimeInterval { 5 }
 
-    // A moving timebase is not a new snapshot. Geometry, crop and poster file
+    // A moving timebase is not a new snapshot. Geometry, crop and source file
     // revisions are: none may reuse a successful surface for different pixels.
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.displayID == rhs.displayID && lhs.targetDisplayID == rhs.targetDisplayID
             && lhs.sources == rhs.sources && lhs.prefsRevision == rhs.prefsRevision
-            && lhs.thumbnailsRevision == rhs.thumbnailsRevision && lhs.selectedVideoID == rhs.selectedVideoID
+            && lhs.selectedVideoID == rhs.selectedVideoID
             && lhs.targetGeometry == rhs.targetGeometry && lhs.cropPreferences == rhs.cropPreferences
             && lhs.invalidationRevision == rhs.invalidationRevision
     }

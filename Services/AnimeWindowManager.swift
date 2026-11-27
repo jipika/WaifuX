@@ -16,8 +16,8 @@ class AnimePlayerWindowController: NSWindowController {
         self.animeId = anime.id
         self.viewModel = viewModel
         
-        // 创建窗口
-        let window = NSWindow(
+        // 创建窗口（使用 ScreenClampedWindow 获得 macOS 14/15 布局环熔断保护）
+        let window = ScreenClampedWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,

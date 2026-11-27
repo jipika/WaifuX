@@ -220,10 +220,15 @@ final class BackgroundAgentClient: ObservableObject {
                     // 同一时刻只允许一轮 repair：连点「重试」只 cancel 旧的
                     // bootstrapTask，而 SMAppService 的注销/注册不响应取消，
                     // 两轮交错会把刚注册好的 job 又注销掉（实测一秒内三次 4099）。
-                    guard !isRepairingRegistration else {
-                        AppLogger.error(.startup, "Helper repair already in flight, skipping",
+                    if isRepairingRegistration {
+                        AppLogger.error(.startup, "Helper repair already in flight, waiting before retry",
                                         metadata: ["code": (error as NSError).code])
-                        throw CancellationError()
+                        while isRepairingRegistration {
+                            try Task.checkCancellation()
+                            try await Task.sleep(for: .milliseconds(250))
+                        }
+                        try Task.checkCancellation()
+                        continue
                     }
                     isRepairingRegistration = true
                     defer { isRepairingRegistration = false }
@@ -307,6 +312,7 @@ final class BackgroundAgentClient: ObservableObject {
                                                "error": error.localizedDescription])
                     return
                 }
+                if error is CancellationError || Task.isCancelled { return }
                 lastError = error.localizedDescription
                 if case BackgroundAgentRegistrationError.approvalRequired = error { requiresApproval = true }
                 isRelinkingRegistration = false
@@ -784,7 +790,7 @@ final class BackgroundAgentClient: ObservableObject {
                     lastError = nil
                     break
                 } catch {
-                    if Task.isCancelled { return }
+                    if Task.isCancelled || error is CancellationError { return }
                     lastError = error.localizedDescription
                 }
             }
@@ -971,7 +977,7 @@ final class BackgroundAgentClient: ObservableObject {
                             try Task.checkCancellation()
                             applyLibrarySnapshot(values)
                         } while fetchedRevision != libraryRevision
-                    } catch { if !Task.isCancelled { lastError = error.localizedDescription } }
+                    } catch { if !Task.isCancelled && !(error is CancellationError) { lastError = error.localizedDescription } }
                 }
             }
         }
@@ -1000,7 +1006,10 @@ final class BackgroundAgentClient: ObservableObject {
         let task = enqueue(operation, arguments)
         Task {
             do { _ = try await task.value }
-            catch { lastError = error.localizedDescription }
+            catch {
+                if error is CancellationError || Task.isCancelled { return }
+                lastError = error.localizedDescription
+            }
         }
     }
 

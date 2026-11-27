@@ -3,19 +3,14 @@ import AppKit
 import Kingfisher
 import AVFoundation
 
-/// macOS 15+ 的 Liquid Glass 改变了标题栏 safe area 行为，
-/// NSHostingController 会报告标题栏高度作为 top safe area，
-/// 但我们的 UI 已经通过 fullSizeContentView 自行处理布局。
-/// 使用 SwiftUI 的 .ignoresSafeArea() 在视图层面解决。
+/// 主窗口使用 fullSizeContentView 并自绘顶栏，各 tab 页统一在 SwiftUI 层面忽略顶部标题栏安全区。
+/// `.ignoresSafeArea(.container, edges: .top)` 自 macOS 11 起可用，macOS 14/15/26+ 保持一致，
+/// 避免在 AppKit 宿主层覆写 safeAreaInsets / 激活额外 Auto Layout 约束引发振荡（#136）。
 private struct EdgeToEdgeContainer<Content: View>: View {
     let content: Content
 
     var body: some View {
-        if #available(macOS 15.0, *) {
-            content.ignoresSafeArea(.container, edges: .top)
-        } else {
-            content
-        }
+        content.ignoresSafeArea(.container, edges: .top)
     }
 }
 
@@ -169,16 +164,13 @@ private final class MainTabViewController: NSTabViewController {
     /// 实际添加的 tab 顺序（仅含启动快照启用的 tab），用于 select(tab:) 查找真实 index。
     /// 在 configure 一次性构建（快照不变），禁用的 tab 不加入，避免位置 Int 错位。
     private var addedTabs: [MainTab] = []
-    /// #130/#132/#133：懒挂载。非激活 tab 的 item.view 是占位 NSView，真实
-    /// NSHostingController 的 view 只在激活时挂上、失活时摘回 controller。
-    /// keep-alive 若把 5 个 SwiftUI 宿主同时挂在窗口里，任何一页的 @Published
-    /// 变化都会让隐藏页的 graph 失效并 setNeedsUpdateConstraints，在 macOS 15 的
-    /// display cycle 内把窗口反复标脏（Update Constraints pass 自喂养环，15.4.1
-    /// 实机栈实锤：graphDidChange→NSHostingView.requestUpdate→setNeedsUpdateConstraints）。
-    /// 懒挂载后状态变化只 invalidate 激活页。controller 始终被 tabViewItem 持有，
-    /// @State/滚动位置不丢，切回即恢复。
-    private var pageControllers: [NSHostingController<EdgeToEdgeContainer<AnyView>>] = []
-    /// 与 pageControllers 一一对应的隔离宿主视图（阻断 macOS 15 约束环）。
+    /// #130/#132/#133/#136：懒挂载。每个 tab item 由普通 NSViewController 持有一枚固定
+    /// 容器 NSView（始终保持 `item.view === viewController.view` 契约完整，不再劫持
+    /// NSHostingController.view 或重复创建两份 ViewGraph）；真实的 LayoutLoopGuardHostingView
+    /// 仅在激活时 addSubview 挂进容器、失活时 removeFromSuperview 摘下，由 pageHostingViews
+    /// 强引用保留 @State 与滚动位置，切回即恢复。
+    private var pageContainers: [NSView] = []
+    /// 与 pageContainers 一一对应的隔离宿主视图（阻断 macOS 14/15 约束环）。
     private var pageHostingViews: [LayoutLoopGuardHostingView<EdgeToEdgeContainer<AnyView>>] = []
 
     override func viewDidLoad() {
@@ -288,61 +280,62 @@ private final class MainTabViewController: NSTabViewController {
 
     private func addPage<Content: View>(title: String, view: Content) {
         let root = EdgeToEdgeContainer(content: AnyView(view))
-        let hostingController = NSHostingController(rootView: root)
-        // #130/#132：Tab 页由 NSTabView 的 frame 决定尺寸。默认 sizingOptions 会让
-        // AppKit 在约束更新时反复测量 SwiftUI 内容（含内嵌 NSCollectionView /
-        // NSVisualEffectView 平台视图），形成 updateConstraints 自喂养循环。
-        hostingController.sizingOptions = []
-        // 用隔离宿主替换默认 NSHostingView：macOS 15 约束 pass 内的状态提交
-        // 不再向窗口传播 needsUpdateConstraints（见 LayoutLoopGuardHostingView）。
+        // #130/#132/#136：Tab 页由 NSTabView 的 frame 单向决定尺寸，使用普通 NSViewController
+        // 托管固定容器 NSView，不再先创建 NSHostingController 又强行替换其 view 与 item.view，
+        // 避免 macOS 14 上 NSHostingController 内部宿主失配及每个 tab 冗余建两份 ViewGraph。
         let hostingView = LayoutLoopGuardHostingView(rootView: root)
         hostingView.sizingOptions = []
-        hostingController.view = hostingView
-        let item = NSTabViewItem(viewController: hostingController)
+        let container = NSView()
+        container.autoresizingMask = [.width, .height]
+        let viewController = NSViewController()
+        viewController.view = container
+        let item = NSTabViewItem(viewController: viewController)
         item.label = title
-        // 懒挂载：初始不加载真实 view，item 先持占位视图；select 时再挂。
-        item.view = NSView()
-        pageControllers.append(hostingController)
+        pageContainers.append(container)
         pageHostingViews.append(hostingView)
         addTabViewItem(item)
     }
 
-    /// 选中 index 未变时兜底：item 仍持占位视图就把真实宿主挂上。
-    /// NSTabView 不会重读已选中 item 的 view，需手动替换当前显示的子视图。
+    /// 选中 index 未变时兜底：容器内尚未挂载真实宿主就挂上。
+    /// NSTabView 添加首项后默认选中 index 0，select(.home) 同 index 早退会走此路径。
     private func mountPageIfNeeded(at index: Int) {
-        let items = tabView.tabViewItems
-        guard pageHostingViews.count == items.count, items.indices.contains(index) else { return }
+        guard pageHostingViews.indices.contains(index),
+              pageContainers.indices.contains(index) else { return }
+        let container = pageContainers[index]
         let hostingView = pageHostingViews[index]
-        guard items[index].view !== hostingView else { return }
+        guard hostingView.superview !== container else { return }
         AppLogger.throttled(.error, .general, key: "tabtrace.mount.fallback", interval: 2,
             "[TabTrace] 2c.mount fallback | index=\(index)")
-        hostingView.frame = tabView.bounds
-        hostingView.autoresizingMask = [.width, .height]
-        let placeholder = items[index].view
-        items[index].view = hostingView
-        if let placeholder, placeholder.superview === tabView {
-            tabView.replaceSubview(placeholder, with: hostingView)
+        if container.bounds.isEmpty && !tabView.bounds.isEmpty {
+            container.frame = tabView.bounds
         }
+        hostingView.frame = container.bounds
+        hostingView.autoresizingMask = [.width, .height]
+        container.addSubview(hostingView)
     }
 
-    /// 切换前把旧页宿主摘回 controller、新页宿主挂上 item。
-    /// 必须在 selectedTabViewItemIndex 赋值前调用：NSTabView 选中时读 item.view。
+    /// 切换前把旧页宿主从容器摘下、新页宿主挂进目标容器。
+    /// 必须在 selectedTabViewItemIndex 赋值前调用，保持 `item.view === viewController.view` 不变。
     private func swapTabItems(from oldIndex: Int, to newIndex: Int) {
-        let items = tabView.tabViewItems
-        guard pageHostingViews.count == items.count else { return }
-        if items.indices.contains(oldIndex), oldIndex != newIndex {
-            let hostingView = pageHostingViews[oldIndex]
-            if items[oldIndex].view === hostingView {
-                hostingView.removeFromSuperview()
-                items[oldIndex].view = NSView()
+        guard pageHostingViews.count == pageContainers.count else { return }
+        if pageHostingViews.indices.contains(oldIndex), oldIndex != newIndex {
+            let oldHostingView = pageHostingViews[oldIndex]
+            if oldHostingView.superview != nil {
+                oldHostingView.removeFromSuperview()
             }
         }
-        if items.indices.contains(newIndex) {
+        if pageHostingViews.indices.contains(newIndex) {
+            let container = pageContainers[newIndex]
             let hostingView = pageHostingViews[newIndex]
-            if items[newIndex].view !== hostingView {
-                hostingView.frame = tabView.bounds
+            if container.bounds.isEmpty && !tabView.bounds.isEmpty {
+                container.frame = tabView.bounds
+            }
+            if hostingView.superview !== container {
+                hostingView.frame = container.bounds
                 hostingView.autoresizingMask = [.width, .height]
-                items[newIndex].view = hostingView
+                container.addSubview(hostingView)
+            } else if hostingView.frame != container.bounds {
+                hostingView.frame = container.bounds
             }
         }
     }

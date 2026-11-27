@@ -359,6 +359,9 @@ final class StaticImageWallpaperOverlayManager {
     /// 让底层扩展接管桌面并恢复系统菜单栏采样。
     func retireFallbackOverlaysForActiveExtension(displayIDs: Set<UInt32>) {
         guard BackgroundRuntimeRole.isHelper, !displayIDs.isEmpty else { return }
+        // 早退：尚未挂载任何兜底 overlay 时直接返回，避免在 VideoWallpaperManager.shared
+        // 或 WallpaperEngineXBridge.shared 尚处于 dispatch_once 初始化期间反查单例触发递归死锁。
+        guard !imageWindows.isEmpty else { return }
         guard VideoWallpaperManager.shared.isSystemWallpaperSyncEnabled,
               !VideoWallpaperManager.shared.isScreenLocked,
               VideoWallpaperManager.shared.shouldPreserveLockScreenWallpaperSelection else {

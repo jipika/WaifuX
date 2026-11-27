@@ -11,7 +11,7 @@ import os
 final class WallpaperPrefs: @unchecked Sendable {
     static let shared = WallpaperPrefs()
 
-    private struct PrefsFile: Codable, Equatable {
+    struct PrefsFile: Codable, Equatable {
         var userPaused: Bool = false
         /// 宿主「使用电池时暂停动态壁纸」开关的镜像。扩展自己检测电源/低功耗模式，
         /// 所以这里只表示开关是否开启，不表示当前是否应该暂停。
@@ -22,6 +22,29 @@ final class WallpaperPrefs: @unchecked Sendable {
         var desktopOccluded: Bool = false
         var pausedDisplayIDs: Set<UInt32>?
         var mutedDisplayIDs: Set<UInt32>?
+
+        enum CodingKeys: String, CodingKey {
+            case userPaused
+            case pauseOnBattery
+            case alwaysPauseDesktop
+            case pauseWhenOccluded
+            case desktopOccluded
+            case pausedDisplayIDs
+            case mutedDisplayIDs
+        }
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            userPaused = try container.decodeIfPresent(Bool.self, forKey: .userPaused) ?? false
+            pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery)
+            alwaysPauseDesktop = try container.decodeIfPresent(Bool.self, forKey: .alwaysPauseDesktop) ?? true
+            pauseWhenOccluded = try container.decodeIfPresent(Bool.self, forKey: .pauseWhenOccluded) ?? false
+            desktopOccluded = try container.decodeIfPresent(Bool.self, forKey: .desktopOccluded) ?? false
+            pausedDisplayIDs = try container.decodeIfPresent(Set<UInt32>.self, forKey: .pausedDisplayIDs)
+            mutedDisplayIDs = try container.decodeIfPresent(Set<UInt32>.self, forKey: .mutedDisplayIDs)
+        }
     }
 
     private struct ContextState: Codable {
@@ -154,7 +177,15 @@ final class WallpaperPrefs: @unchecked Sendable {
     func reload() {
         guard let url = Self.prefsURL,
               let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(PrefsFile.self, from: data) else { return }
+              !data.isEmpty else { return }
+        let decoded: PrefsFile
+        do {
+            decoded = try JSONDecoder().decode(PrefsFile.self, from: data)
+        } catch {
+            extLogThrottled(key: "prefs.decodeError", interval: 60,
+                            "[WallpaperPrefs] ⚠️ 解码 waifux-wallpaper-prefs.json 失败: \(error)")
+            return
+        }
         // 内容未变时跳过 applyPauseState：宿主侧库变化与 prefs 变化共用同一个
         // Darwin 通知，无差别重算会给所有渲染器来一次策略抖动（可能触发速率 ramp）。
         let changed = lock.withLock { state -> Bool in

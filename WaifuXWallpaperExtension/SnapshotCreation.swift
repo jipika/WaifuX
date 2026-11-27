@@ -49,7 +49,6 @@ func requestSnapshotViaRuntime(
         sources = WallpaperSnapshotSources(images: [], video: nil)
     }
     let prefsRevision = container.map { WallpaperSnapshotFileRevision($0.appendingPathComponent("waifux-wallpaper-prefs.json")) }
-    let thumbnailsRevision = container.map { WallpaperSnapshotFileRevision($0.appendingPathComponent("WallpaperCache/thumbnails")) }
     let cropPreferences = WallpaperSnapshotCropPreferences(in: container)
     let invalidationRevision = runtimeSnapshotRevision.withLock { $0 }
     let selectedVideoID = WallpaperState.shared.currentVideoID
@@ -60,7 +59,7 @@ func requestSnapshotViaRuntime(
         let geometry = snapshotTargetGeometry(for: targetDisplayID)
         let request = SnapshotRequest(
             displayID: displayID, targetDisplayID: targetDisplayID, sources: sources, playbackTime: time,
-            prefsRevision: prefsRevision, thumbnailsRevision: thumbnailsRevision, selectedVideoID: selectedVideoID,
+            prefsRevision: prefsRevision, selectedVideoID: selectedVideoID,
             targetGeometry: geometry, cropPreferences: cropPreferences, invalidationRevision: invalidationRevision)
         snapshotWork.submit(request) { result in
             guard let result, result.invalidationRevision == runtimeSnapshotRevision.withLock({ $0 }) else { reply(nil); return }
@@ -91,7 +90,7 @@ private func buildSnapshot(_ request: SnapshotRequest) async -> SnapshotResult {
     }
     guard !Task.isCancelled else { return empty }
     // A raw live surface bypasses target/crop geometry and can represent older
-    // media. Use only the current video's thumbnail above or a budgeted frame.
+    // media. Use only the current static image above or a budgeted frame decoded from the real video.
     guard let videoURL = request.sources.video?.url ?? (request.displayID == nil ? findVideoURL() : nil) else { return empty }
     let asset = AVURLAsset(url: videoURL)
     let generator = AVAssetImageGenerator(asset: asset)
@@ -112,15 +111,25 @@ private func buildSnapshot(_ request: SnapshotRequest) async -> SnapshotResult {
         requestTime = .zero
     }
 
-    let image: CGImage
-    do {
-        let result = try await withTaskCancellationHandler(operation: {
-            try await generator.image(at: requestTime)
-        }, onCancel: { generator.cancelAllCGImageGeneration() })
+    let candidateTimes = requestTime == .zero ? [CMTime.zero] : [requestTime, .zero]
+    var decodedImage: CGImage?
+    var lastError: (any Error)?
+    for candidateTime in candidateTimes {
         guard !Task.isCancelled else { return empty }
-        image = result.image
-    } catch {
-        extLog("  [Snapshot] Failed to get video frame: \(error)")
+        do {
+            let result = try await withTaskCancellationHandler(operation: {
+                try await generator.image(at: candidateTime)
+            }, onCancel: { generator.cancelAllCGImageGeneration() })
+            guard !Task.isCancelled else { return empty }
+            decodedImage = result.image
+            break
+        } catch {
+            if Task.isCancelled { return empty }
+            lastError = error
+        }
+    }
+    guard let image = decodedImage else {
+        if let lastError { extLog("  [Snapshot] Failed to get video frame: \(lastError)") }
         return empty
     }
     guard let snapshotXPC = renderSnapshotToIOSurface(image: image, request: request) else { return empty }

@@ -1836,7 +1836,13 @@ final class VideoWallpaperManager: ObservableObject {
         if isActive, let contexts = json["contexts"] as? [[String: Any]], !contexts.isEmpty {
             let activeDisplayIDs = Set(contexts.compactMap { ($0["displayID"] as? NSNumber)?.uint32Value }.filter { $0 > 0 })
             if !activeDisplayIDs.isEmpty {
-                StaticImageWallpaperOverlayManager.shared.retireFallbackOverlaysForActiveExtension(displayIDs: activeDisplayIDs)
+                // 延迟到下一次主队列派发：checkExtensionState() 会在 VideoWallpaperManager.shared
+                // 首次 init()（dispatch_once 锁内）同步调用，retireFallbackOverlaysForActiveExtension
+                // 内部需要访问 VideoWallpaperManager.shared / WallpaperEngineXBridge.shared，
+                // 同步调用会触发 libdispatch 递归锁死（SIGILL）。
+                DispatchQueue.main.async {
+                    StaticImageWallpaperOverlayManager.shared.retireFallbackOverlaysForActiveExtension(displayIDs: activeDisplayIDs)
+                }
             }
         }
         // PID 换代不一定经过 inactive 通知。每次 active 观测都走纯签名门控，

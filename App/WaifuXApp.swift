@@ -191,10 +191,10 @@ enum AppExitDiagnostics {
     }
 }
 
-/// #130/#132/#133：macOS 15 约束自喂养环隔离层。
-/// 15.x 上 SwiftUI 在窗口约束 pass 内提交状态（ViewGraph.beginNextUpdate→
+/// #130/#132/#133/#136：macOS 14/15 约束自喂养环隔离层。
+/// SwiftUI 在窗口约束 pass 内提交状态（ViewGraph.beginNextUpdate→
 /// graphDidChange→NSHostingView.setNeedsUpdateConstraints），把窗口再次标脏，
-/// 同一 display cycle 内 pass 数超过视图数抛 NSGenericException（15.4.1 实机栈）。
+/// 同一 display cycle 内 pass 数超过视图数抛 NSGenericException 或引发崩溃。
 /// 这里在窗口布局 pass 期间阻断 hosting view 向窗口传播 needsUpdateConstraints
 /// （hosting view 自身仍由 autoresizing/frame 正常布局，功能不受影响）；
 /// pass 之外的标记照常传播，下一轮 display cycle 正常渲染。
@@ -207,8 +207,8 @@ enum LayoutLoopGuardState {
 class LayoutLoopGuardHostingView<Content: View>: NSHostingView<Content> {
     override func updateConstraints() {
         LayoutLoopGuardState.layoutPassDepth += 1
+        defer { LayoutLoopGuardState.layoutPassDepth -= 1 }
         super.updateConstraints()
-        LayoutLoopGuardState.layoutPassDepth -= 1
     }
 
     override var needsUpdateConstraints: Bool {
@@ -227,30 +227,14 @@ class LayoutLoopGuardHostingView<Content: View>: NSHostingView<Content> {
     }
 }
 
+/// 顶层窗口 SwiftUI 宿主视图。
+/// 历史版本曾在 macOS 14 覆写 safeAreaInsets/safeAreaLayoutGuide 并激活 4 条
+/// NSLayoutConstraint，但主窗/设置窗/播放器窗均已在 SwiftUI 侧声明 `.ignoresSafeArea()`
+/// 且宿主改由普通容器以 `sizingOptions = []` + `autoresizingMask` 单向传尺寸，
+/// 覆写 safe area 与额外 Auto Layout 约束反而在 macOS 14 上增加约束引擎振荡风险（#136）。
 final class EdgeToEdgeHostingView<Content: View>: LayoutLoopGuardHostingView<Content> {
-    private let edgeToEdgeLayoutGuide = NSLayoutGuide()
-
-    /// macOS 15+ (Sequoia) 的 Liquid Glass 改变了 safe area 行为，
-    /// 强制覆盖 safe area 为 0 会与 SwiftUI 布局引擎产生冲突导致振荡。
-    private let useLegacySafeAreaOverride: Bool = {
-        if #available(macOS 15.0, *) {
-            return false
-        }
-        return true
-    }()
-
-    private let zeroInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-
     required init(rootView: Content) {
         super.init(rootView: rootView)
-
-        addLayoutGuide(edgeToEdgeLayoutGuide)
-        NSLayoutConstraint.activate([
-            edgeToEdgeLayoutGuide.leadingAnchor.constraint(equalTo: leadingAnchor),
-            edgeToEdgeLayoutGuide.trailingAnchor.constraint(equalTo: trailingAnchor),
-            edgeToEdgeLayoutGuide.topAnchor.constraint(equalTo: topAnchor),
-            edgeToEdgeLayoutGuide.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
     }
 
     // Let the first click both activate an inactive window and reach SwiftUI
@@ -262,23 +246,6 @@ final class EdgeToEdgeHostingView<Content: View>: LayoutLoopGuardHostingView<Con
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    override var safeAreaRect: NSRect {
-        useLegacySafeAreaOverride ? bounds : super.safeAreaRect
-    }
-
-    override var safeAreaInsets: NSEdgeInsets {
-        useLegacySafeAreaOverride ? zeroInsets : super.safeAreaInsets
-    }
-
-    override var safeAreaLayoutGuide: NSLayoutGuide {
-        useLegacySafeAreaOverride ? edgeToEdgeLayoutGuide : super.safeAreaLayoutGuide
-    }
-
-    override var additionalSafeAreaInsets: NSEdgeInsets {
-        get { useLegacySafeAreaOverride ? zeroInsets : super.additionalSafeAreaInsets }
-        set { if useLegacySafeAreaOverride { /* ignore */ } else { super.additionalSafeAreaInsets = newValue } }
     }
 }
 
@@ -1315,7 +1282,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
             ])
             if exception.name.rawValue == "NSGenericException",
                let reason = exception.reason,
-               reason.contains("Layout Window") {
+               reason.contains("Update Constraints") || reason.contains("Layout Window") {
                 AppLogger.error(.general, "检测到窗口布局循环异常（未捕获）: \(reason)")
             }
         }
@@ -1836,7 +1803,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @preconcur
     }
 
     private func createAndShowSettingsWindow() {
-        let settingsWindow = NSWindow(
+        let settingsWindow = ScreenClampedWindow(
             contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -2224,15 +2191,24 @@ extension AppDelegate {
 /// 这里在 setFrame/setContentSize 入口把任何调用方（含 AppKit/SwiftUI 内部）
 /// 请求的尺寸收敛到当前屏幕可用区，从源头切断振荡；全屏状态不干预。
 final class ScreenClampedWindow: NSWindow {
-    /// #130/#132/#133：macOS 15 约束环熔断器。
+    /// #130/#132/#133/#136：macOS 14/15+ 约束环熔断器。
     /// SwiftUI 的 render pass（ViewGraph.beginNextUpdate）会在窗口 display cycle
     /// 内提交状态并私有路径标脏窗口，_postWindowNeedsUpdateConstraints 同 tick
-    /// 反复触发直至 pass 数超过视图数抛 NSGenericException。继承拦不住（私有
+    /// 反复触发直至 pass 数超过视图数抛 NSGenericException 或在 macOS 14 引发
+    /// AttributeGraph/setNeedsUpdateConstraints 崩溃。继承拦不住（私有
     /// setNeedsUpdate 不走公开属性），但崩溃点这个私有 category 方法可以按
     /// selector 覆盖：同一 runloop tick 内标记次数超阈值即跳过本次、下一 tick
-    /// 补发，切断同步自喂养；合法更新不丢。仅 macOS 15 启用。
+    /// 补发，切断同步自喂养；合法更新不丢。macOS 14.4+ 统一启用（安装前校验方法存在及签名）。
+    private typealias PostWindowMarkIMP = @convention(c) (AnyObject, Selector) -> Void
+    private static let postConstraintsSelector = NSSelectorFromString("_postWindowNeedsUpdateConstraints")
+    private static let postLayoutSelector = NSSelectorFromString("_postWindowNeedsLayout")
+    private static var originalPostConstraintsIMP: PostWindowMarkIMP?
+    private static var originalPostLayoutIMP: PostWindowMarkIMP?
+
     private var constraintMarkCount = 0
     private var layoutMarkCount = 0
+    private var deferredConstraintMarkScheduled = false
+    private var deferredLayoutMarkScheduled = false
 
     /// 熔断后的补发：100ms 后重发原始标记（tick 计数已清零必放行），并直接
     /// 驱动宿主视图 layoutSubtreeIfNeeded——SwiftUI 的 render 事务在窗口布局
@@ -2248,88 +2224,91 @@ final class ScreenClampedWindow: NSWindow {
     }
 
     private func scheduleDeferredConstraintMark() {
+        guard !deferredConstraintMarkScheduled else { return }
+        deferredConstraintMarkScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self else { return }
-            typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
-            let sel = NSSelectorFromString("_postWindowNeedsUpdateConstraints")
-            let post: PostIMP = unsafeBitCast(class_getMethodImplementation(NSWindow.self, sel), to: PostIMP.self)
-            post(self, sel)
+            self.deferredConstraintMarkScheduled = false
+            Self.originalPostConstraintsIMP?(self, Self.postConstraintsSelector)
             self.driveHostingRender()
         }
     }
 
     private func scheduleDeferredLayoutMark() {
+        guard !deferredLayoutMarkScheduled else { return }
+        deferredLayoutMarkScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self else { return }
-            typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
-            let sel = NSSelectorFromString("_postWindowNeedsLayout")
-            let post: PostIMP = unsafeBitCast(class_getMethodImplementation(NSWindow.self, sel), to: PostIMP.self)
-            post(self, sel)
+            self.deferredLayoutMarkScheduled = false
+            Self.originalPostLayoutIMP?(self, Self.postLayoutSelector)
             self.driveHostingRender()
         }
     }
 
     @objc(_waifux_postWindowNeedsUpdateConstraints)
     private func waifux_postWindowNeedsUpdateConstraints() {
-        if #available(macOS 15.0, *) {
-            constraintMarkCount += 1
-            if constraintMarkCount == 1 {
-                DispatchQueue.main.async { [weak self] in
-                    self?.constraintMarkCount = 0
-                }
-            }
-            if constraintMarkCount > 8 {
-                // 环持续活跃时 10s 节流仍实测 6 条/分钟；降为 60s 一条 WARN。
-                // 真正的布局异常仍由 LayoutExceptionHandlerDelegate 以 ERROR 落盘。
-                AppLogger.throttled(.warn, .general, key: "layoutloop.breaker.constraints", interval: 60,
-                    "[LayoutLoop] constraint-mark breaker tripped count=\(constraintMarkCount)")
-                scheduleDeferredConstraintMark()
-                return
+        constraintMarkCount += 1
+        if constraintMarkCount == 1 {
+            DispatchQueue.main.async { [weak self] in
+                self?.constraintMarkCount = 0
             }
         }
-        typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
-        let post: PostIMP = unsafeBitCast(
-            class_getMethodImplementation(NSWindow.self, NSSelectorFromString("_postWindowNeedsUpdateConstraints")),
-            to: PostIMP.self)
-        post(self, NSSelectorFromString("_postWindowNeedsUpdateConstraints"))
+        if constraintMarkCount > 8 {
+            // 环持续活跃时 10s 节流仍实测 6 条/分钟；降为 60s 一条 WARN。
+            // 真正的布局异常仍由 LayoutExceptionHandlerDelegate 以 ERROR 落盘。
+            AppLogger.throttled(.warn, .general, key: "layoutloop.breaker.constraints", interval: 60,
+                "[LayoutLoop] constraint-mark breaker tripped count=\(constraintMarkCount)")
+            scheduleDeferredConstraintMark()
+            return
+        }
+        Self.originalPostConstraintsIMP?(self, Self.postConstraintsSelector)
     }
 
     @objc(_waifux_postWindowNeedsLayout)
     private func waifux_postWindowNeedsLayout() {
-        if #available(macOS 15.0, *) {
-            layoutMarkCount += 1
-            if layoutMarkCount == 1 {
-                DispatchQueue.main.async { [weak self] in
-                    self?.layoutMarkCount = 0
-                }
-            }
-            if layoutMarkCount > 8 {
-                AppLogger.throttled(.warn, .general, key: "layoutloop.breaker.layout", interval: 60,
-                    "[LayoutLoop] layout-mark breaker tripped count=\(layoutMarkCount)")
-                scheduleDeferredLayoutMark()
-                return
+        layoutMarkCount += 1
+        if layoutMarkCount == 1 {
+            DispatchQueue.main.async { [weak self] in
+                self?.layoutMarkCount = 0
             }
         }
-        typealias PostIMP = @convention(c) (AnyObject, Selector) -> Void
-        let post: PostIMP = unsafeBitCast(
-            class_getMethodImplementation(NSWindow.self, NSSelectorFromString("_postWindowNeedsLayout")),
-            to: PostIMP.self)
-        post(self, NSSelectorFromString("_postWindowNeedsLayout"))
+        if layoutMarkCount > 8 {
+            AppLogger.throttled(.warn, .general, key: "layoutloop.breaker.layout", interval: 60,
+                "[LayoutLoop] layout-mark breaker tripped count=\(layoutMarkCount)")
+            scheduleDeferredLayoutMark()
+            return
+        }
+        Self.originalPostLayoutIMP?(self, Self.postLayoutSelector)
+    }
+
+    /// 校验 NSWindow 私有方法签名确实为 `void (id, SEL)` 再挂接覆盖，避免跨系统版本 ABI 不一致。
+    private static func validatedVoidZeroArgIMP(on cls: AnyClass, selector: Selector) -> PostWindowMarkIMP? {
+        guard let method = class_getInstanceMethod(cls, selector),
+              method_getNumberOfArguments(method) == 2 else {
+            return nil
+        }
+        var returnType: [CChar] = [0, 0, 0, 0]
+        method_getReturnType(method, &returnType, returnType.count)
+        guard returnType[0] == CChar(UnicodeScalar("v").value) else {
+            return nil
+        }
+        return unsafeBitCast(method_getImplementation(method), to: PostWindowMarkIMP.self)
     }
 
     private static let installConstraintBreaker: Void = {
-        if #available(macOS 15.0, *) {
-            // 只给子类添加覆盖实现，不动 NSWindow 本类（其它窗口不受影响）。
-            for (orig, repl) in [
-                ("_postWindowNeedsUpdateConstraints", "_waifux_postWindowNeedsUpdateConstraints"),
-                ("_postWindowNeedsLayout", "_waifux_postWindowNeedsLayout"),
-            ] {
-                guard let swizzled = class_getInstanceMethod(ScreenClampedWindow.self, NSSelectorFromString(repl)),
-                      class_getInstanceMethod(NSWindow.self, NSSelectorFromString(orig)) != nil
-                else { continue }
-                class_addMethod(ScreenClampedWindow.self, NSSelectorFromString(orig),
-                                method_getImplementation(swizzled), method_getTypeEncoding(swizzled))
-            }
+        // 只给子类添加覆盖实现，不动 NSWindow 本类（其它窗口不受影响）。
+        // 同步缓存原始 NSWindow IMP，覆盖 macOS 14/15/26+ 全版本。
+        if let origIMP = validatedVoidZeroArgIMP(on: NSWindow.self, selector: postConstraintsSelector),
+           let swizzled = class_getInstanceMethod(ScreenClampedWindow.self, NSSelectorFromString("_waifux_postWindowNeedsUpdateConstraints")) {
+            originalPostConstraintsIMP = origIMP
+            class_addMethod(ScreenClampedWindow.self, postConstraintsSelector,
+                            method_getImplementation(swizzled), method_getTypeEncoding(swizzled))
+        }
+        if let origIMP = validatedVoidZeroArgIMP(on: NSWindow.self, selector: postLayoutSelector),
+           let swizzled = class_getInstanceMethod(ScreenClampedWindow.self, NSSelectorFromString("_waifux_postWindowNeedsLayout")) {
+            originalPostLayoutIMP = origIMP
+            class_addMethod(ScreenClampedWindow.self, postLayoutSelector,
+                            method_getImplementation(swizzled), method_getTypeEncoding(swizzled))
         }
     }()
 

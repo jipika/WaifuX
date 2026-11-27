@@ -399,7 +399,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                                 } else if destProp.label == "directDisplayID", let did = destProp.value as? UInt32 {
                                     displayID = did
                                 } else if destProp.label == "cacheDirectory" {
-                                    if let url = prop.value as? URL {
+                                    if let url = destProp.value as? URL {
                                         WallpaperState.shared.cacheDirectoryURL = url
                                     }
                                 }
